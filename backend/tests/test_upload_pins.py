@@ -86,7 +86,7 @@ async def test_the_pinned_inputs_are_those_of_live_and_resumable_jobs(monkeypatc
 
 
 class _Versioning:
-    async def sweep_idle_drafts(self):
+    async def sweep_idle_drafts(self, **_window):
         return []
 
 

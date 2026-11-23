@@ -17,7 +17,7 @@ import type { PullRequest, ReviewEvent, ReviewVerdict } from '@/services/version
 import { useCommitLog, useReviewEvents } from '@/features/versioning/hooks/useVersioning'
 import { CommitRow } from '@/features/versioning/components/CommitRow'
 import { ownerName } from '@/features/versioning/model/branchVocab'
-import { isDraftMr } from '../components/PrMeta'
+import { isDraftMr, mergedAs } from '../components/PrMeta'
 
 const VERDICT: Record<ReviewVerdict, { label: string; tone: BadgeTone; Icon: LucideIcon; tint: string }> = {
   approve: { label: 'Approved', tone: 'success', Icon: CheckCircle2, tint: 'bg-emerald-500' },
@@ -71,7 +71,8 @@ export function ReviewTimeline({ wsId, pr }: { wsId: string; pr: PullRequest }) 
       case 'merged': {
         // Published straight past the review: what it proposed landed without its reviewers seeing it.
         const bypassed = pr.mergedVia === 'direct_publish'
-        const sha = pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''
+        const landedAs = mergedAs(pr)
+        const sha = landedAs ? ` · ${landedAs.slice(0, 8)}` : ''
         return {
           Icon: bypassed ? ShieldAlert : GitMerge, tint: bypassed ? 'bg-amber-500' : 'bg-violet-500',
           text: bypassed ? `Published directly by ${who}, bypassing this review${sha}`

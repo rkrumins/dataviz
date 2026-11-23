@@ -2,19 +2,29 @@
 draft may have, whether the person who opened a review may approve it, or merge it, how many
 approvals a review needs, and whether open threads hold its merge.
 
-Each field resolves on its own, most specific first: the data source's override
-(``WorkspaceDataSourceORM``), then its workspace's setting (``WorkspaceORM``), then the built-in
-default — drafts start public, may be either level, the opener may approve and merge, a review
-needs everyone asked to approve it, and open threads don't hold it. The Playground's drafts start
-private (``KIND_DEFAULTS``): an experiment's draft is its maker's until they share it. NULL at a
-level means "not set here". The policy is read where a draft is created or changes level, and wherever a review is
-reviewed, read, merged or published; it is never cached: a tightened rule holds from the next
+Each field is a setting in the settings store (``config/versioned_graph_settings.py``:
+``drafts.defaultVisibility``, ``drafts.levels``, ``drafts.selfApproval``, ``drafts.selfMerge``,
+``drafts.requiredApprovals``, ``drafts.threadsHold``), and resolves on its own, most specific first:
+the data source's graph's value (a fork's: its root's), then its workspace's, then the platform's,
+then the built-in default. Drafts start public, may be either level, the opener may approve and
+merge, a review needs everyone asked to approve it, and open threads don't hold it. A level that is
+the only one allowed is also where a new draft starts (the resolver derives it). The Playground's
+drafts start private (``KIND_DEFAULTS``): an experiment's draft is its maker's until they share it,
+unless the Playground or the graph chose otherwise. The policy is read
+where a draft is created, changes level, or a review is read, reviewed, approved, merged or
+published. It is read fresh every time (``strict``), so a tightened rule holds from the next such
 request.
+
+The store spells "everyone asked" as the word ``"everyone"``; this policy, the old columns and the
+old endpoints as ``0`` (``resolver.encode`` and ``decode``).
+
+:func:`resolve` is the same rule over the old columns (``WorkspaceORM``, ``WorkspaceDataSourceORM``),
+which one release keeps writing (``settings.legacy``) and compares against.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, Optional
 
 VISIBILITIES = ("public", "private")
 LEVELS = ("any", "public_only", "private_only")
@@ -32,6 +42,13 @@ FIELDS = (
     ("review_required_approvals", "requiredApprovals", 0),
     ("review_threads_hold", "threadsHold", False),
 )
+#: Each API field's setting in the settings store.
+KEYS = {"defaultVisibility": "drafts.defaultVisibility", "levels": "drafts.levels",
+        "selfApproval": "drafts.selfApproval", "selfMerge": "drafts.selfMerge",
+        "requiredApprovals": "drafts.requiredApprovals", "threadsHold": "drafts.threadsHold"}
+#: Where a value came from, as the resolver names it, in this policy's words: the platform's, the
+#: environment's and the built-in one are all ``default``.
+_SOURCES = {"graph": SOURCE_DATA_SOURCE, "workspace": SOURCE_WORKSPACE}
 
 
 #: Built-in defaults a kind of workspace has of its own, by API field.
@@ -72,13 +89,13 @@ class EffectiveDraftsPolicy:
 
 
 def settings_of(row: Any) -> dict:
-    """What one level holds itself, by API field name; None where it sets nothing."""
+    """What one level's old columns hold, by API field name; None where it sets nothing."""
     return {api: (getattr(row, column, None) if row is not None else None)
             for column, api, _default in FIELDS}
 
 
 def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPolicy:
-    """The effective policy for a data source and its workspace (either may be None). Pure."""
+    """The policy the old columns give a data source and its workspace (either may be None). Pure."""
     values, sources = {}, {}
     kind_defaults = KIND_DEFAULTS.get(getattr(workspace, "kind", None), {})
     for column, api, default in FIELDS:
@@ -100,20 +117,91 @@ def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPo
         sources=tuple(sorted(sources.items())))
 
 
+async def effective(workspace_id: Optional[str] = None, data_source_id: Optional[str] = None, *,
+                    root_id: Optional[str] = None, kind: Optional[str] = None) -> EffectiveDraftsPolicy:
+    """The policy in force, from the settings store: a data source's (``data_source_id``, in
+    ``workspace_id``; ``root_id``: a fork's root data source, whose values it follows), a
+    workspace's (no data source), or the platform's (neither). Read fresh.
+
+    ``kind``: the workspace's kind. Its own defaults (``KIND_DEFAULTS``: the Playground's drafts
+    start private) stand in for the platform's and the built-in value. A value the graph or the
+    workspace chose wins over them, and so do a platform lock and a level that is the only one
+    allowed."""
+    from backend.app.services.settings import effective as settings, resolver
+
+    ctx = await settings.refresh(strict=True)
+    target = settings.target(workspace_id, data_source_id, {"fork_of": root_id} if root_id else None)
+    kind_defaults = KIND_DEFAULTS.get(kind, {})
+    values, sources = {}, {}
+    for api, key in KEYS.items():
+        found = resolver.resolve(ctx, key, target)
+        values[api] = resolver.encode(ctx.settings[key], found["effective"])
+        sources[api] = _SOURCES.get(found["source"], SOURCE_DEFAULT)
+        if (api in kind_defaults and sources[api] == SOURCE_DEFAULT
+                and found.get("status") not in ("locked", "adjusted")):
+            values[api] = kind_defaults[api]
+    return EffectiveDraftsPolicy(
+        default_visibility=values["defaultVisibility"], levels=values["levels"],
+        self_approval=bool(values["selfApproval"]), self_merge=bool(values["selfMerge"]),
+        required_approvals=int(values["requiredApprovals"]), threads_hold=bool(values["threadsHold"]),
+        sources=tuple(sorted(sources.items())))
+
+
 async def load(session, data_source_id: str) -> EffectiveDraftsPolicy:
-    """The effective policy of a data source: two reads by primary key, never a join. Raises
-    ``LookupError`` for a data source that isn't there."""
+    """The effective policy of a data source (:func:`effective`): its row read by primary key, and
+    a fork's parents' up to its root. Raises ``LookupError`` for a data source that isn't there."""
     from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+    from backend.app.services import fork_sources
 
     ds = await session.get(WorkspaceDataSourceORM, data_source_id)
     if ds is None:
         raise LookupError(data_source_id)
-    return resolve(await session.get(WorkspaceORM, ds.workspace_id), ds)
+    root = await fork_sources.governing_row(session, ds)
+    ws = await session.get(WorkspaceORM, ds.workspace_id)
+    return await effective(ds.workspace_id, ds.id, root_id=root.id if root is not ds else None,
+                           kind=getattr(ws, "kind", None))
+
+
+async def own(session, scope: str, scope_id: str) -> Dict[str, Any]:
+    """What a workspace (``scope`` ``workspace``) or a data source's graph (``graph``) chose itself
+    in the settings store, by API field in the old endpoints' spelling; None where it chose
+    nothing."""
+    from backend.app.services.settings import registry, resolver, store
+
+    reg = registry()
+    held = {r.key: r.value for r in await store.read_scope(session, reg.DOMAIN, scope, scope_id)}
+    return {api: (resolver.encode(reg.BY_KEY[key], held[key]) if held.get(key) is not None
+                  else None) for api, key in KEYS.items()}
+
+
+async def save(session, scope: str, scope_id: str, changes: dict, *, actor: Optional[str],
+               record, check=None) -> None:
+    """Save ``changes`` (by API field; ``"inherit"`` clears one) at a workspace or a data source's
+    graph, through the settings store as an old endpoint saves (``settings.legacy.save``, which
+    runs ``check`` first: ``settings.service.checker`` for who saves, against the platform's limits
+    and locks). When a field changed, ``record(session, before, after)`` runs in the same
+    transaction with what the fields that changed were and became, by API field in the old
+    endpoints' spelling. Commits."""
+    from backend.app.services.settings import legacy, registry, resolver
+
+    field_of = {key: api for api, key in KEYS.items()}
+    settings = registry().BY_KEY
+
+    async def recorded(s, change_set) -> None:
+        await record(s, {field_of[a.key]: resolver.encode(settings[a.key], a.before_value)
+                         for a in change_set.applied},
+                     {field_of[a.key]: resolver.encode(settings[a.key], a.after_value)
+                      for a in change_set.applied})
+
+    await legacy.save(session, scope, scope_id,
+                      {KEYS[api]: None if value == "inherit" else resolver.decode(settings[KEYS[api]], value)
+                       for api, value in changes.items()}, actor=actor, record=recorded,
+                      check=check)
 
 
 def apply(row: Any, changes: dict) -> tuple[dict, dict]:
     """Write ``changes`` (by API field; ``"inherit"`` clears one) onto a workspace or data source
-    row. Returns what the fields that changed were and became, by API field."""
+    row's old columns. Returns what the fields that changed were and became, by API field."""
     before = settings_of(row)
     for column, api, _default in FIELDS:
         if api in changes:

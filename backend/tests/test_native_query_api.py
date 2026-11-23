@@ -626,7 +626,7 @@ async def test_a_versioned_source_out_of_falkordb_is_loading_whatever_the_switch
     """Residency (doc 17): a graph whose key is out of FalkorDB, as the watermark the query reads
     says, answers 503 graph_loading and asks for its load — with Graph residency off too, when
     evicted graphs are being brought back — and nothing runs."""
-    from backend.app.services.versioning import residency, residency_policy
+    from backend.app.services.versioning import residency
 
     asked = []
 
@@ -634,16 +634,12 @@ async def test_a_versioned_source_out_of_falkordb_is_loading_whatever_the_switch
         asked.append(graph_id)
 
     monkeypatch.setattr(residency, "request_load", request_load)
-    residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
     versioned["wm"] = {"fresh": False, "status": "evicted", "residency": "standard", "committed": 3,
                        "served": None, "size_bytes": None, "falkor_provider": None,
                        "falkor_graph_name": DS}
     engine["engine"].manager_cache_key = ("prov_native", DS)
-    try:
-        with signed_in(person("usr_reader"), READER):
-            r = await run(test_client)
-    finally:
-        residency_policy.invalidate()
+    with signed_in(person("usr_reader"), READER):
+        r = await run(test_client)
     assert r.status_code == 503, r.text
     assert r.json()["detail"]["code"] == "graph_loading" and r.headers.get("Retry-After")
     assert set(asked) == {"g_native"} and engine["engine"].calls == []

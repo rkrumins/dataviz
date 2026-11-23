@@ -152,6 +152,9 @@ def _projector(monkeypatch, *, ps=None, bootstrap_status=None, claim=(5, 2), fin
     async def nudge(graph_id):
         seen["nudge"].append(graph_id)
 
+    async def no_summaries_job(data_source_id, since):
+        return False
+
     monkeypatch.setattr(proj, "_claim", _claim)
     monkeypatch.setattr(proj, "_finish", _finish)
     monkeypatch.setattr(proj, "_yield_superseded", _yield)
@@ -164,6 +167,7 @@ def _projector(monkeypatch, *, ps=None, bootstrap_status=None, claim=(5, 2), fin
     monkeypatch.setattr(proj, "_verify_and_heal", verify)
     monkeypatch.setattr(projection, "reconcile_interrupted", not_interrupted)
     monkeypatch.setattr(projection, "nudge_projection", nudge)
+    monkeypatch.setattr(projection, "_rollups_ran_since", no_summaries_job)
     return proj, ps, client, seen
 
 
@@ -450,7 +454,7 @@ def test_a_rebuild_that_resumes_retries_what_its_earlier_passes_held(monkeypatch
     """A full seed that resumes from its cursor writes nothing again before where it stopped, so
     what its earlier passes held is retried, as a window retries it, never cleared unwritten. One
     that starts over clears it."""
-    for cursor, expect in (([[0, 5, "node", "ent_9", False, 0]], False), ([], True)):
+    for cursor, expect in (([[0, 5, "node", "ent_9", False, 0, 0, None, None]], False), ([], True)):
         ps = _PS(projected=0, target=5)
         ps.status, ps.quarantine_next_at = "rebuilding", "2000-01-01T00:00:00+00:00"
         proj, ps, client, _seen = _projector(monkeypatch, ps=ps)
@@ -591,8 +595,8 @@ def test_a_resumed_paged_window_knows_what_its_earlier_pages_did(monkeypatch):
     reports both, so it bumps the graph's generation and verifies, though its own pages did
     neither; and each of its pages' cursors carries them on, for a pass after it."""
     proj, _ps, client, _seen = _projector(monkeypatch)
-    pages = {"node": [(([("n2", "u2", {"entityType": "Dataset"})], [], [], []), "v2")],
-             "edge": [(([], [], [], []), "v3")]}
+    pages = {"node": [(([("n2", "u2", {"entityType": "Dataset"})], [], [], []), "v2", 1)],
+             "edge": [(([], [], [], []), "v3", 1)]}
 
     async def window_rows(*a):
         return 2
@@ -615,8 +619,11 @@ def test_a_full_replay_that_stops_at_a_page_stays_a_rebuild(monkeypatch):
     """Past its time box a pass stops at a page. A full replay stays ``rebuilding``: back at idle,
     with the Graph residency switch on, the pass that resumes it would be taken for a first seed
     and queued for a load into a fresh key, leaving its pages and its cursor behind. A window goes
-    back to idle, as it was."""
-    for projected, status in ((0, "rebuilding"), (3, "idle")):
+    back to idle, as it was, marked in flight with its version rows (``window_rows``), so eviction
+    leaves it alone until it lands; counted or not, it is marked."""
+    for projected, status, counted, window in ((0, "rebuilding", True, None),
+                                               (3, "idle", True, 250_000),
+                                               (3, "idle", False, config.PROJECTION_PAGED_ABOVE + 1)):
         ps = _PS(projected=projected, target=5)
         ps.status = "rebuilding" if projected == 0 else "idle"
         proj, ps, _client, seen = _projector(monkeypatch, ps=ps)
@@ -627,11 +634,19 @@ def test_a_full_replay_that_stops_at_a_page_stays_a_rebuild(monkeypatch):
         async def paged(*a):
             return None                                      # a window too large to hold
 
+        async def window_rows(s, graph, main_id, from_seq, to_seq, counted=counted):
+            if not counted:
+                raise ConnectionError("Postgres went away")
+            return 250_000
+
         monkeypatch.setattr(proj, "_compute_changes", paged)
         monkeypatch.setattr(proj, "_reconcile_in_place", stop)
         monkeypatch.setattr(proj, "_apply_paged", stop)
+        monkeypatch.setattr(proj, "_window_rows", window_rows)
         r = asyncio.run(proj.project_graph("g1"))
-        assert r["partial"] and seen["finish"][0][2]["status"] == status, (r, seen["finish"])
+        finished = seen["finish"][0][2]
+        assert r["partial"] and finished["status"] == status, (r, seen["finish"])
+        assert finished["window_rows"] == window, finished
 
 
 def test_with_residency_on_a_key_holding_a_stopped_rebuild_is_resumed_not_queued(monkeypatch):
@@ -640,7 +655,7 @@ def test_with_residency_on_a_key_holding_a_stopped_rebuild_is_resumed_not_queued
     page: a pass that failed or was cancelled after it left the graph idle, and this pass claims
     the row and resumes it in place. A key with no cursor, one that does not exist (asking does
     not create it) or one out of reach is queued, as before."""
-    stopped = [[0, 5, "fk_edge", "20000", False, 0]]
+    stopped = [[0, 5, "fk_edge", "20000", False, 0, 0, None, None]]
     for found, queued in ((stopped, False), ([], True), ("missing", True), ("unreachable", True)):
         proj, _ps, client, seen = _projector(monkeypatch, ps=_PS(projected=0, target=5))
         asked = []

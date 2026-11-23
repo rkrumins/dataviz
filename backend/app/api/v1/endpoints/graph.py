@@ -840,7 +840,10 @@ async def get_alignment_analysis(
                    GraphORM.main_head_commit_seq,
                    ProjectionStateORM.last_error,
                    ProjectionStateORM.status,
-                   ProjectionStateORM.served_commit_seq)
+                   ProjectionStateORM.served_commit_seq,
+                   ProjectionStateORM.read_mode,
+                   GraphORM.workspace_id,
+                   ProjectionStateORM.owns_falkor_graph)
             .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
             .where(GraphORM.data_source_id == ds_id,
                    ProjectionStateORM.falkor_graph_name.isnot(None))
@@ -850,9 +853,14 @@ async def get_alignment_analysis(
             proj_error = _proj_row[2] or None
             if _proj_row[0] is not None and _proj_row[1] is not None:
                 proj_behind = max(0, int(_proj_row[1]) - int(_proj_row[0]))
+                from backend.app.services.versioning import build_policy
                 from backend.app.services.versioning.service import serving_seq
+                await build_policy.resolve()
+                _mode = build_policy.read_mode_for(
+                    workspace_id=_proj_row[6], data_source_id=ds_id,
+                    platform_copy=bool(_proj_row[7]), own=_proj_row[5])
                 proj_serving = serving_seq(int(_proj_row[0]), int(_proj_row[1]), _proj_row[3],
-                                           _proj_row[4]) is not None
+                                           _proj_row[4], _mode.max_lag) is not None
     except Exception:  # versioning schema absent (test contexts) — never break Data health
         _proj_row = None
     # None means UNKNOWN (not versioned, unpinned, or the store could not be
@@ -2953,6 +2961,22 @@ class _SyncVersioned(BaseModel):
     # record (nothing written yet, or out of the graph).
     served: Optional[int] = None
     served_revision: Optional[_SyncRevision] = Field(None, alias="servedRevision")
+    # What its readers get while a newer version lands: the mode in force (latest | in_place |
+    # beside); the one chosen and where (graph, workspace, platform, env or default); and why
+    # they differ, each {code, text, fix} (Keep serving, switch when ready updates in place while
+    # New-version builds are off: builds_off; or on a connected graph: connected_graph) — so a
+    # view can say why it shows what it shows.
+    read_mode: str = Field("latest", alias="readMode")
+    read_mode_declared: Optional[str] = Field(None, alias="readModeDeclared")
+    read_mode_source: str = Field("platform", alias="readModeSource")
+    read_mode_why: List[Dict[str, Any]] = Field(default_factory=list, alias="readModeWhy")
+    # A new version built beside the key views read (read mode beside), while one is: its step
+    # (queued, copying, catching_up, switching), attempts, error and why it waits; null when none.
+    candidate: Optional[Dict[str, Any]] = None
+    # How far the update in flight is and the time it has left, as the watermark's ``progress``
+    # (``update_progress``): {phase, done, total, unit, ratePerSec, etaSecs, startedAt, updatedAt,
+    # targetSeq, targetVersion}; null while none is.
+    progress: Optional[Dict[str, Any]] = None
 
     class Config:
         populate_by_name = True
@@ -3040,7 +3064,8 @@ async def get_sync_status(
     lineage summaries and the automation keeping them current (queued / running / cooling down).
 
     Cheap by construction — Postgres rows and the freshness row the cockpit already serves; no
-    FalkorDB or provider call — so the view header can show it to everyone who can open the view."""
+    FalkorDB or provider call; one Redis read for a versioned graph's update progress, only while
+    one may be in flight — so the view header can show it to everyone who can open the view."""
     from backend.app.services.aggregation.models import AggregationJobORM
     from backend.app.services.aggregation.service import assemble_fleet_freshness
     from backend.app.services.versioning.service import GraphVersioningService
@@ -3112,6 +3137,8 @@ async def get_sync_status(
     svc = GraphVersioningService()
     graph = await svc.get_graph_by_data_source(dataSourceId)
     if graph and str(graph.get("workspace_id")) == str(ws_id):
+        from backend.app.services.versioning import update_progress
+
         wm = await svc.projection_watermark(str(graph["graph_id"]))
         revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision"),
                             wm.get("served_revision")) if r]
@@ -3137,6 +3164,12 @@ async def get_sync_status(
                 committed_revision=_rev(wm.get("committed_revision")),
                 projected_revision=_rev(wm.get("projected_revision")),
                 served=wm.get("served"), served_revision=_rev(wm.get("served_revision")),
+                read_mode=wm.get("read_mode", "latest"),
+                read_mode_declared=wm.get("read_mode_declared"),
+                read_mode_source=wm.get("read_mode_source", "platform"),
+                read_mode_why=wm.get("read_mode_why") or [],
+                candidate=wm.get("candidate"),
+                progress=await update_progress.for_watermark(str(graph["graph_id"]), wm),
             ),
             summaries=summaries, counts=counts,
         )

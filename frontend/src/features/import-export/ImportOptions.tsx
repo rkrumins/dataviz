@@ -47,6 +47,8 @@ export function ImportOptions({ reconcile, match, onMatch, graphDefault, note, k
   const fallback = graphDefault ? parseIdentifier(graphDefault) : null
   const shown = match ?? fallback
   const viewScoped = !!reconcile?.viewScoped
+  // A replace that deletes only what holds the property: the property's name.
+  const keyed = keyedOnly?.value && shown?.kind === 'prop' ? shown.name.trim() || 'this property' : null
   return (
     <>
       {reconcile && (
@@ -58,7 +60,9 @@ export function ImportOptions({ reconcile, match, onMatch, graphDefault, note, k
               desc="Creates new items and updates matching ones. Never deletes — safe default." />
             <ModeCard active={reconcile.mode === 'replace'} onClick={() => reconcile.onChange('replace')}
               icon={<ShieldAlert className="w-4 h-4" />} title="Replace (authoritative)" tone="amber"
-              desc={viewScoped
+              desc={keyed
+                ? `Removes ${viewScoped ? "this view's" : 'the'} items that have ${keyed} and aren't in your file; items without it are left alone.`
+                : viewScoped
                 ? "The file is the source of truth for this view — its items missing from the file are deleted."
                 : "The file becomes the source of truth — items missing from it are deleted."} />
           </div>
@@ -81,7 +85,7 @@ export function ImportOptions({ reconcile, match, onMatch, graphDefault, note, k
           className="flex items-center gap-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] p-1">
           {MATCH_KINDS.map((m) => (
             <button key={m.kind} type="button" role="radio" aria-checked={shown?.kind === m.kind}
-              onClick={() => onMatch({ kind: m.kind, name: m.kind === 'prop' ? (shown?.name ?? '') : '' })}
+              onClick={() => shown?.kind !== m.kind && onMatch({ kind: m.kind, name: m.kind === 'prop' ? (shown?.name ?? '') : '' })}
               className={cn('flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors',
                 shown?.kind === m.kind ? 'bg-white dark:bg-white/10 text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
               {m.label}{fallback?.kind === m.kind && <>{' '}<span className="font-normal text-ink-muted">· default</span></>}

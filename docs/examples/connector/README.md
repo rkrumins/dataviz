@@ -31,9 +31,11 @@ python connector.py source.json --workspace ws_… --graph graph_… --publish  
 python connector.py --file export.csv --workspace ws_… --graph graph_… --publish
 ```
 
-Without `--publish`, the import lands in a draft for someone to review and publish. The run exits
-non-zero when the import fails, or when it couldn't publish itself; the printed `publish.reason`
-says why. Run it again and nothing changes.
+Without `--publish`, the import lands in a draft for someone to review and publish. With it, the
+printed `publish.state` says how the publish ended: `published`; `unchanged`, when there was nothing
+to publish (a success); `skipped`, with `publish.reason` saying why; or `failed`. The run exits
+non-zero when the import fails, or when it couldn't publish itself. Run it again and nothing
+changes.
 
 A full snapshot each night, which deletes what the source no longer has:
 

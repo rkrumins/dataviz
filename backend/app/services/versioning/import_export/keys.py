@@ -8,7 +8,7 @@ the first time an import names the property, from main's live nodes a page at a 
 from main's version log before each import that uses it after that. No write path changes: a node
 created or edited on the canvas is found by the next import. A deleted node keeps its last value,
 not live, so a row naming it again brings it back under its id. A graph has at most
-``GRAPHVER_MAX_MATCHING_PROPERTIES``.
+``imports.maxMatchingProperties`` (Matching properties per graph).
 
 Building and catching up hold an advisory lock per graph and property, a page at a time, and read
 the watermark under it: two imports at once never write an older value over a newer one, and each
@@ -24,7 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from sqlalchemy import Text, bindparam, func, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, insert as pg_insert
 
-from .. import config, db
+from .. import db
 from ..models import BranchORM, EntityHeadORM, EntityKeyORM, GraphORM, KeyIndexORM, NodeVersionORM
 from .resolve import key_value
 from .snapshot import open_snapshot
@@ -40,7 +40,7 @@ _KEEP = object()
 
 
 class MatchingPropertyLimit(Exception):
-    """The graph already has ``GRAPHVER_MAX_MATCHING_PROPERTIES`` properties imports match by."""
+    """The graph already has as many properties imports match by as its limit allows."""
     code, action = "too_many_matching_properties", "identifier"
 
 
@@ -64,10 +64,16 @@ async def _main_id(s, graph_id: str) -> str:
         BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
 
 
-async def ensure(graph_id: str, name: str, *, job_id: Optional[str] = None) -> int:
+async def ensure(graph_id: str, name: str, *, job_id: Optional[str] = None,
+                 limit: Optional[int] = None) -> int:
     """The property's index, built when no import named it before, and caught up to main's head:
-    the main commit it describes. :class:`MatchingPropertyLimit` past the graph's limit,
+    the main commit it describes. :class:`MatchingPropertyLimit` past the graph's ``limit`` (the
+    import's job keeps it; left out, the platform's ``imports.maxMatchingProperties``),
     :class:`NotOnAFork` on a fork."""
+    if limit is None:
+        from backend.app.services.settings import effective
+
+        limit = await effective.value_of("imports.maxMatchingProperties")
     async with db.graphver_session() as s:
         graph = await s.get(GraphORM, graph_id)
         if graph is not None and graph.fork_parent_graph_id:
@@ -78,10 +84,10 @@ async def ensure(graph_id: str, name: str, *, job_id: Optional[str] = None) -> i
         if row is None:
             others = await s.scalar(select(func.count()).select_from(KeyIndexORM).where(
                 KeyIndexORM.graph_id == graph_id, KeyIndexORM.key_name != name))
-            if others >= config.MAX_MATCHING_PROPERTIES:
+            if others >= limit:
                 raise MatchingPropertyLimit(
                     f"this graph's imports already match by {others} properties, its most "
-                    f"(GRAPHVER_MAX_MATCHING_PROPERTIES): match by one of them, by entity_id or "
+                    f"(Matching properties per graph): match by one of them, by entity_id or "
                     f"by urn, or ask an administrator to raise the limit")
         ready = row is not None and row.status == "ready"
     if not ready:

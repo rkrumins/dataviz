@@ -83,6 +83,7 @@ from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadabl
                                                    IneligibleOwner, PublishRequired, ReviewRequired,
                                                    SelfMerge, ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
+from backend.app.services.versioning import update_progress
 from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
@@ -1123,6 +1124,77 @@ class WatermarkModel(_ApiModel):
     last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
     size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
     rehydrating_since: Optional[datetime] = Field(default=None, alias="rehydratingSince")
+    # What readers of main get while a newer version lands, the mode in force: latest (always the
+    # newest published version, from Postgres until FalkorDB holds it), in_place (the version
+    # FalkorDB last finished, while the next is written into it) or beside (exactly that version,
+    # while the next is built in a second key, then one switch). Then the mode chosen
+    # (readModeDeclared) and where (readModeSource: graph, workspace, platform, env or default),
+    # and why the mode in force differs (readModeWhy, each {code, text, fix}): beside updates in
+    # place while New-version builds are off (builds_off) or on a connected graph
+    # (connected_graph). A fork's are its root's.
+    read_mode: str = Field(default="latest", alias="readMode")
+    read_mode_declared: Optional[str] = Field(default=None, alias="readModeDeclared")
+    read_mode_source: str = Field(default="platform", alias="readModeSource")
+    read_mode_why: List[Dict[str, Any]] = Field(default_factory=list, alias="readModeWhy")
+    # The version rows of a window written a page at a time, in flight: null when none is.
+    window_rows: Optional[int] = Field(default=None, alias="windowRows")
+    # A new version built beside the serving key (read mode beside), while one is: null when none
+    # is. The serving key keeps serving ``served`` whole meanwhile.
+    candidate: Optional["BuildModel"] = None
+    # How far the update in flight is and the time it has left (GET …/watermark), null while none
+    # is (``update_progress``). A fork's is its root's.
+    progress: Optional["UpdateProgressModel"] = None
+
+
+class BuildModel(_ApiModel):
+    """A new version of a graph built beside the key that serves it (read mode beside)."""
+    id: Optional[str] = None
+    # queued (waiting for room), copying, seeding (written from Postgres instead of copied),
+    # catching_up or switching.
+    step: Optional[str] = None
+    # Why it was asked for: window, a publish larger than New-version builds' buildAboveRows;
+    # rebuild, a rebuild of the key; move, a move to another key or provider (target).
+    reason: Optional[str] = None
+    # copy: the serving key copied, then the commits since written into the copy. reseed: its key
+    # written from Postgres on the node with most room, the serving key's summaries carried over.
+    mode: Optional[str] = None
+    # A move's: the key and provider it goes to ({providerId, key}); null for any other build.
+    target: Optional[Dict[str, Optional[str]]] = None
+    # Who asked for the rebuild it makes (operator, or drift or failures: the projector on its
+    # own); null when it makes none. A move asked during a rebuild, or rebuilt during, makes one.
+    rebuild: Optional[str] = None
+    # The version the build's key holds whole: null until it is written.
+    seq: Optional[int] = None
+    attempts: int = 0
+    error: Optional[str] = None
+    # Why a queued build waits (room: no room for a copy yet), else null.
+    waiting: Optional[str] = None
+    since: Optional[str] = None
+    # The version rows of the change it builds.
+    rows: Optional[int] = None
+    # How far a seed or a catch-up has written ({done, total}), while it does.
+    progress: Optional[Dict[str, int]] = None
+
+
+class UpdateProgressModel(_ApiModel):
+    """How far the update in flight is, as the projector last published it (``update_progress``):
+    its phase; the rows done of its total, where the phase counts them (a copy counts none: both
+    null); their rate, smoothed, and the time left, derived when it is read, both null while the
+    rate is too young to trust or rows have stopped landing; when it started and when this was
+    published; and the version it writes (``targetVersion``: the number readers know it by)."""
+    phase: Literal["updating", "building", "switching", "loading", "seeding"]
+    done: Optional[int] = None
+    total: Optional[int] = None
+    unit: str = "rows"
+    rate_per_sec: Optional[float] = Field(default=None, alias="ratePerSec")
+    eta_secs: Optional[int] = Field(default=None, alias="etaSecs")
+    started_at: Optional[str] = Field(default=None, alias="startedAt")
+    updated_at: Optional[str] = Field(default=None, alias="updatedAt")
+    target_seq: Optional[int] = Field(default=None, alias="targetSeq")
+    target_version: Optional[int] = Field(default=None, alias="targetVersion")
+
+
+WatermarkModel.model_rebuild()
 
 
 class SavedSinceModel(_ApiModel):
@@ -1159,6 +1231,9 @@ class BranchFreshnessModel(_ApiModel):
 class RebuildResponse(_ApiModel):
     started: bool                                        # a fresh full replay was requested
     already_running: bool = Field(alias="alreadyRunning")  # a projection/rebuild was in flight (no-op)
+    # Built beside the serving key (read mode beside): readers keep the version they have until
+    # the new key is checked and switched to; watermark.candidate follows it.
+    beside: bool = False
     watermark: WatermarkModel
 
 
@@ -1697,7 +1772,9 @@ class PrResponse(_ApiModel):
     title: Optional[str] = None
     description: Optional[str] = None
     conflicts: Optional[List[dict]] = None
-    resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
+    resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId", description=(
+        "The commit a merged review landed as on main; null for one merged with no change (its "
+        "merge answered outcome unchanged)"))
     # The single-PR read only: a merged draft review's commit on main, by seq. Its change list is
     # main between ``resultingCommitSeq - 1`` and it.
     resulting_commit_seq: Optional[int] = Field(default=None, alias="resultingCommitSeq")
@@ -2286,14 +2363,14 @@ async def _group_people(session: AsyncSession, groups: Iterable[str], cap: int =
 
 async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
     """The drafts and reviews policy ``data_source_id`` works under (``drafts_policy``). A graph
-    whose data source row is gone follows the built-in policy."""
+    whose data source row is gone follows the platform's policy."""
     from backend.app.services import drafts_policy
     if data_source_id:
         try:
             return await drafts_policy.load(session, data_source_id)
         except LookupError:
             pass
-    return drafts_policy.resolve()
+    return await drafts_policy.effective()
 
 
 async def _pr_policy(svc: GraphVersioningService, session: AsyncSession, pr: dict):
@@ -3048,11 +3125,13 @@ async def get_watermark(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised).
-    404 for a fork whose parent's graph is gone."""
+    404 for a fork whose parent's graph is gone. With the update in flight's progress: one Redis
+    read, only while one may be (``update_progress.for_watermark``)."""
     try:
         wm = await svc.projection_watermark(graph_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    wm["progress"] = await update_progress.for_watermark(graph_id, wm)
     return await _watermark_model(session, wm)
 
 
@@ -3124,7 +3203,16 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           evicted_reason=wm.get("evicted_reason"),
                           last_read_at=wm.get("last_read_at"),
                           size_bytes=wm.get("size_bytes"),
-                          rehydrating_since=wm.get("rehydrating_since"))
+                          rehydrating_since=wm.get("rehydrating_since"),
+                          read_mode=wm.get("read_mode", "latest"),
+                          read_mode_declared=wm.get("read_mode_declared"),
+                          read_mode_source=wm.get("read_mode_source", "platform"),
+                          read_mode_why=wm.get("read_mode_why") or [],
+                          window_rows=wm.get("window_rows"),
+                          candidate=(BuildModel(**wm["candidate"]) if wm.get("candidate")
+                                     else None),
+                          progress=(UpdateProgressModel(**wm["progress"]) if wm.get("progress")
+                                    else None))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
@@ -3152,7 +3240,12 @@ async def rebuild_projection(
     FalkorDB). The catch-up runs in-process as a background task (same path publish/merge use)
     and is scheduled ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding'
     status on a worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a
-    no-op when the cache is already fresh)."""
+    no-op when the cache is already fresh).
+
+    A graph that reads ``beside`` may have its rebuild built beside its key (``beside``: true): a
+    new key seeded from Postgres while its readers keep the version they have, then switched to.
+    The serving key, its cursor included, is left as it is, and the projection worker builds it
+    (nudged), within its own limit on builds at once."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
     try:
         wm = await svc.projection_watermark(graph_id)
@@ -3167,19 +3260,28 @@ async def rebuild_projection(
         started = await svc.request_projection_rebuild(graph_id)
     except ConcurrencyError as exc:            # enabling version control hasn't finished
         raise HTTPException(status_code=409, detail={"type": "bootstrapping", "message": str(exc)})
-    proj = _get_projector() if started else None
+    wm = await svc.projection_watermark(graph_id)
+    building = wm.get("candidate") or {}
+    # Built beside the serving key, or by a move that rebuilds too: nothing here touches the key
+    # that serves, and the worker takes the build on.
+    beside = building.get("reason") == "rebuild" or bool(building.get("rebuild"))
+    proj = _get_projector() if started and not beside else None
     if proj is not None:
         # The rebuild replays main from the start: a pass that stopped part-way and then failed
         # left its cursor in the key, which the rebuild's first pass would otherwise resume.
         await proj.forget_cursor(graph_id)
-    # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
-    # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
-    # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the
-    # rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed actually finish.
-    background.add_task(rebuild_now, graph_id)
-    return RebuildResponse(started=started, already_running=not started,
-                           watermark=await _watermark_model(
-                               session, await svc.projection_watermark(graph_id)))
+    if beside:
+        # A build's steps are the projection worker's (within buildConcurrency), never this
+        # process's: a nudge, and the poll takes it up whatever the nudge's fate.
+        background.add_task(nudge_projection, graph_id)
+    else:
+        # Schedule the catch-up unconditionally: even on the already-in-flight (started=False)
+        # path, rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a
+        # status stranded by a lost worker self-heals. Unlike project_now's 10s interactive
+        # ceiling, the rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed finish.
+        background.add_task(rebuild_now, graph_id)
+    return RebuildResponse(started=started, already_running=not started, beside=beside,
+                           watermark=await _watermark_model(session, wm))
 
 
 # Per-graph in-process guard: a reconcile is a request-scoped full scan; a second concurrent one
@@ -4395,10 +4497,12 @@ _AUTO_PUBLISH_NEEDS = ("an import that publishes itself needs publish permission
 
 
 _AUTO_PUBLISH = Query(False, alias="autoPublish", description=(
-    "Publish the import's draft once it has finished with every row applied (see the job's "
-    "``summary.publish``). Needs publish (for an API key, its owner's) and a data source whose "
-    "policy lets you merge your own changes. The import opens a draft of its own, so not with "
-    "``branchId``."))
+    "Publish the import's draft once it has finished, with every row applied or no more refused "
+    "than maxRefusedRows allows. The job's ``summary.publish`` says how: queued (``jobId``); then "
+    "published (``commitId``, ``revisionId``), unchanged (nothing to commit; ``commitId`` and "
+    "``revisionId`` are main's head), or skipped (``reason``; the draft waits for review). Needs "
+    "publish (for an API key, its owner's) and a data source whose policy lets you merge your own "
+    "changes. The import opens a draft of its own, so not with ``branchId``."))
 
 
 class CreateImportResponse(_ApiModel):
@@ -4409,35 +4513,46 @@ class CreateImportResponse(_ApiModel):
 
 
 _IDENTIFIER = Query(None, description=(
-    "What the file's rows find their entities by: entity_id (the default: an entity id of the "
-    "graph, else the urn, the identifier property, a field its type matches imports by, then a "
-    "unique qualifiedName), urn (an entity id, else the urn only) or prop.<name> (an entity id, "
-    "else the value of the property <name>, such as prop.external_id). An entity's id never "
-    "changes, whichever it is"))
+    "What the file's rows find their entities by: entity_id (an entity id of the graph, else the "
+    "urn, the identifier property, a field its type matches imports by, then a unique "
+    "qualifiedName), urn (an entity id, else the urn only), prop.<name> (an entity id, else the "
+    "value of the property <name>, such as prop.external_id; an edge's ends by source.<name> and "
+    "target.<name>) or prop.<name>,urn (the property, then the urn: a row or an edge end without "
+    "it, or whose value no node holds yet, by its urn, and a node found so takes the value). Left "
+    "out, the graph's default applies (GET …/import-settings). An entity's id never changes, "
+    "whichever it is"))
 
 
 _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
     "A replace: delete what the file leaves out even past the replace guard, which refuses a "
     "replace that would delete most of a scope and create most of it again (a file whose rows name "
-    "their entities by another key), and read the whole file even when its first rows find almost "
-    "nothing"))
+    "their entities by another key; what it creates counts the rows it refused that matched "
+    "nothing, summary.replaceGuard.refusedUnmatched), and read the whole file even when its first "
+    "node rows find almost nothing, past the early stop (identifier_matched_nothing)"))
 
 
 _MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, description=(
     "How many of the file's rows may be refused before the import holds: 0 (none: the default, "
-    "unless the platform's IMPORT_MAX_REFUSED_ROWS says otherwise), a count such as 100, a share "
+    "unless the graph's import settings say otherwise), a count such as 100, a share "
     "of the file's rows such as 0.5%, or -1 (any). Past it, a replace deletes nothing and fails "
     "(rows_refused), and autoPublish leaves the draft for review. Within it, the import goes on "
-    "without them, and a replace keeps what a refused row still names. Every import reports its "
-    "refused rows, with why, in summary.refused"))
+    "without them, and a replace keeps what a refused row still names (a refused delete row, only "
+    "what it matched). Every import reports its refused rows, with why, in summary.refused"))
 
 
 _REPLACE_SCOPE = Query(None, alias="replaceScope", pattern="^(all|keyed)$", description=(
     "A replace: what it may delete. all (the default): anything in its scope the file leaves out. "
     "keyed: by identifier=prop.<name> (or prop.<name>,urn), only the nodes that hold that property, "
     "and the edges between two of them, that the file leaves out — a node made in the app or by "
-    "another source, which never had the property, is left alone, with its edges. By the urn or an "
-    "entity id every node holds its key, so keyed is all"))
+    "another source, which never had the property, is left alone, with its edges, but for an edge "
+    "to a node the replace deletes, which goes with that node (summary.edgesCascaded). By the urn "
+    "or an entity id every node holds its key, so keyed is all"))
+
+
+_RECONCILE_MODE = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$", description=(
+    "upsert (the default) writes what the file names. replace also deletes what it leaves out of "
+    "its scope (the graph, or viewId's view; with replaceScope=keyed, only what holds the "
+    "property), held by the replace guard"))
 
 
 def _with_replace_scope(settings: dict, requested: Optional[str]) -> dict:
@@ -4447,10 +4562,13 @@ def _with_replace_scope(settings: dict, requested: Optional[str]) -> dict:
 
 def _with_refused_budget(settings: dict, requested: Optional[str]) -> dict:
     """The job's settings, with how many refused rows it allows (``maxRefusedRows``): the request's,
-    checked (422, saying what it may be), else the platform's. A job keeps it, resumed or not."""
+    checked (422, saying what it may be), else its graph's (:func:`_import_settings_for`). A job
+    keeps it, resumed or not."""
     from backend.app.services.versioning.import_export.import_worker import refused_budget
-    try:      # called directly, an unsent parameter is its Query: the platform's, as unsent
-        return {**settings, "maxRefusedRows": refused_budget(requested if isinstance(requested, str) else None)}
+    if not isinstance(requested, str):    # called directly, an unsent parameter is its Query
+        return settings
+    try:
+        return {**settings, "maxRefusedRows": refused_budget(requested)}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_max_refused_rows",
                                                      "message": str(exc)})
@@ -4469,21 +4587,24 @@ async def _identity_property_of(session: AsyncSession, row) -> Optional[str]:
 async def _import_settings_for(session: AsyncSession, data_source_id: Optional[str],
                                requested: Optional[str], *, fork: bool = False) -> tuple:
     """``(identifier, settings)``: what an import into the data source's graph (``fork``: a fork's)
-    runs under (``services.import_settings``) — the request's identifier, checked (422 with the
-    grammar), else the data source's, else the platform's, a property default ``entity_id`` on a
-    fork but for its identifier property; and what its job keeps: where the identifier came from,
-    the replace guard's limits with where each came from, and the most rows its file may hold
-    (``maxRows``: the Playground's ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``;
-    0, no limit)."""
+    runs under, from the settings store (``services.import_settings``). The identifier is the
+    request's, checked (422 with the grammar), else the graph's, else its workspace's, else the
+    platform's; on a fork, a property default is ``entity_id`` but for its identifier property.
+    The settings are what its job keeps: where the identifier came from, the replace guard's switch
+    and limits with where each came from, the refused rows it allows, and how many properties its
+    graph may match by, and the most rows its file may hold (``maxRows``: the Playground's
+    ``maxImportRows`` in the Playground, else ``IMPORT_MAX_ROWS``; 0, no limit)."""
     from backend.app.db.models import WorkspaceDataSourceORM
-    from backend.app.services import import_settings
+    from backend.app.services import fork_sources, import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
     row = (await session.get(WorkspaceDataSourceORM, data_source_id)
            if data_source_id and session is not None else None)     # a direct caller may hold none
     identity = await _identity_property_of(session, row) if fork else None
+    root = await fork_sources.governing_row(session, row) if row is not None else None
     try:
-        identifier, settings = import_settings.for_import(row, requested, fork=fork,
-                                                          identity_property=identity)
+        identifier, settings = await import_settings.for_import(
+            row.workspace_id if row is not None else None, data_source_id, requested,
+            root_id=root.id if root is not row else None, fork=fork, identity_property=identity)
     except identifiers.IdentifierError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
@@ -4496,7 +4617,7 @@ async def create_import(
     ws_id: str, graph_id: str,
     request: Request,
     format: str = Query("ndjson"),
-    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    reconcile_mode: str = _RECONCILE_MODE,
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
@@ -4779,7 +4900,7 @@ async def put_import_upload_part(
              status_code=202)
 async def complete_import_upload(
     ws_id: str, graph_id: str, upload_id: str,
-    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    reconcile_mode: str = _RECONCILE_MODE,
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     auto_publish: bool = _AUTO_PUBLISH,
@@ -5022,7 +5143,7 @@ class ImportSettingsChange(_ApiModel):
     stays as it is, and ``"inherit"`` clears it, so the platform's holds."""
     identifier: Optional[str] = Field(default=None, description=(
         "What its imports' rows find their entities by when an import names no identifier: "
-        "entity_id, urn or prop.<name>"))
+        "entity_id, urn, prop.<name> or prop.<name>,urn (the property, then the urn)"))
     replace_min_live: Optional[Union[Annotated[int, Field(ge=0)], Literal["inherit"]]] = Field(
         default=None, alias="replaceMinLive")
     replace_delete_fraction: Optional[_Fraction] = Field(default=None, alias="replaceDeleteFraction")
@@ -5049,20 +5170,50 @@ async def _settings_row(session: AsyncSession, meta: dict):
 
 async def _import_settings_view(session: AsyncSession, row, graph_id: str, *,
                                 fork: bool = False) -> dict:
-    from backend.app.services import import_settings
-    from backend.app.services.versioning import config as gv_config
+    """The graph's import settings from the settings store: its own (a fork's: its root's, which
+    it follows), the platform's, and what holds for it."""
+    from backend.app.services import fork_sources, import_settings
+    from backend.app.services.settings import effective as settings
     from backend.app.services.versioning.import_export import keys as matching
     identity = await _identity_property_of(session, row) if fork else None
+    root = await fork_sources.governing_row(session, row) if row is not None else None
+    ws_id = row.workspace_id if row is not None else None
+    root_id = root.id if root is not row else None
+    effective = await import_settings.effective(ws_id, row.id if row is not None else None,
+                                                root_id=root_id, fork=fork,
+                                                identity_property=identity)
     return {"dataSourceId": row.id if row is not None else None,
-            "overrides": import_settings.settings_of(row), "platform": import_settings.platform(),
-            "effective": import_settings.resolve(row, fork=fork, identity_property=identity),
-            "replaceGuard": gv_config.IMPORT_REPLACE_GUARD,
+            "overrides": (await import_settings.own(session, root.id) if root is not None
+                          else import_settings.settings_of(None)),
+            "platform": import_settings.platform(), "effective": effective,
+            "replaceGuard": settings.value(
+                "imports.replaceGuard", workspace_id=ws_id, graph_id=row.id if row is not None else None,
+                graph_facts={"fork_of": root_id} if root_id else None),
             "followsParent": bool(row is not None and row.fork_of_data_source_id),
             "matchingProperties": await matching.listed(graph_id),
-            "maxMatchingProperties": gv_config.MAX_MATCHING_PROPERTIES}
+            "maxMatchingProperties": settings.value("imports.maxMatchingProperties")}
 
 
-@router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+def _superseded_by(successor: str):
+    """A dependency for an old settings route: its answer says it is deprecated
+    (``Deprecation: true``) and names the settings API route that replaces it (a ``Link`` with
+    ``rel="successor-version"``), with this request's own ids put into it where the paths share
+    them. The old routes keep working for one more release
+    (``docs/guide/VERSIONED_GRAPH_SETTINGS.md``, "If you used the old endpoints")."""
+    class _Kept(dict):
+        def __missing__(self, key: str) -> str:
+            return "{" + key + "}"
+
+    def mark(request: Request, response: Response) -> None:
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = (f'<{successor.format_map(_Kept(request.path_params))}>; '
+                                    'rel="successor-version"')
+
+    return mark
+
+
+@router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def get_import_settings(
     ws_id: str, graph_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -5078,19 +5229,23 @@ async def get_import_settings(
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
 
-@router.put("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+@router.put("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def put_import_settings(
     ws_id: str, graph_id: str, body: ImportSettingsChange,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set this graph's import settings (workspace admins), field by field; ``"inherit"`` goes back
-    to the platform's. An import that names its own identifier still uses it, and one already made
-    keeps the settings it was made with. A fork's are its parent's (409
-    ``fork_settings_follow_parent``). A change is recorded in the activity log."""
+    to the workspace's or the platform's. An import that names its own identifier still uses it,
+    and one already made keeps the settings it was made with. A fork's are its parent's (409
+    ``fork_settings_follow_parent``). A change is saved through the settings store and recorded in
+    the activity log."""
     from backend.app.services import fork_sources, import_settings
     from backend.app.services.activity import recorder
+    from backend.app.services.settings import legacy
     from backend.app.services.versioning.import_export import identifier as identifiers
     row = await _settings_row(session, meta)
     if row is None:
@@ -5106,21 +5261,34 @@ async def put_import_settings(
                                                          "message": str(exc)})
         if changes["identifier"] is None:
             raise HTTPException(status_code=422, detail={
-                "type": "invalid_identifier",
-                "message": "identifier is entity_id, urn or prop.<name>, or inherit"})
-    governing = fork_sources.governing(row)
-    before, after = import_settings.apply(row, changes)
-    await fork_sources.follow_parent(session, row, governing)
-    if after:
-        await recorder.record_for_request(
-            session, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
-            details={"from": before, "to": after})
+                "type": "invalid_identifier", "message": f"{identifiers._GRAMMAR}, or inherit"})
+    if row.fork_of_data_source_id:
+        governing = fork_sources.governing(row)
+        import_settings.apply(row, changes)
+        await fork_sources.follow_parent(session, row, governing)
+    else:
+        field_of = {key: api for _column, api, key in import_settings.FIELDS}
+
+        async def record(s: AsyncSession, change_set) -> None:
+            await recorder.record_for_request(
+                s, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
+                details={"from": {field_of[a.key]: a.before_value for a in change_set.applied},
+                         "to": {field_of[a.key]: a.after_value for a in change_set.applied}})
+
+        # Written through to the old columns of the data source and of its forks.
+        with _settings_refusals():
+            await legacy.save(session, "graph", row.id, {
+                key: None if changes[api] == "inherit" else changes[api]
+                for _column, api, key in import_settings.FIELDS if api in changes},
+                actor=_user.id, record=record, check=_settings_check(claims, ws_id))
     return await _import_settings_view(session, row, graph_id,
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
 
 class ResolveIdentitiesRequest(_ApiModel):
-    identifier: str = Field(description="entity_id, urn or prop.<name>, as on an import")
+    identifier: str = Field(description=(
+        "entity_id, urn, prop.<name> or prop.<name>,urn (the property, then the urn), as on an "
+        "import"))
     values: List[str] = Field(max_length=10000, description="Up to 10,000 values to look up")
 
 
@@ -5136,9 +5304,11 @@ async def resolve_identities(
     row's entity — without importing anything: ``{identifier, results: [{value, status,
     entityId, entityIds?}]}``, ``status`` ``found``, ``none`` or ``duplicate`` (two live nodes hold
     it: ``entityIds``). For clients of the writes that name entities by id (``POST
-    /graph/changes``, a draft's changes) that know them by an id of their own system. **422** for
-    an identifier it may not name; **409 ``identifier_not_indexed``** for ``prop.<name>`` before an
-    import has built that property's index."""
+    /graph/changes``, a draft's changes) that know them by an id of their own system. With
+    ``prop.<name>,urn``, a value no node holds as ``<name>`` is looked up as a urn. The data
+    source's identifier property (with ``,urn`` or not) holds the urn, and is looked up as ``urn``.
+    **422** for an identifier it may not name; **409 ``identifier_not_indexed``** for
+    ``prop.<name>`` or ``prop.<name>,urn`` before an import has built that property's index."""
     from backend.app.services.versioning.import_export import identifier as identifiers
     from backend.app.services.versioning.import_export import keys as matching
     try:
@@ -5147,9 +5317,9 @@ async def resolve_identities(
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier", "message": str(exc)})
     if identifier is None:
         raise HTTPException(status_code=422, detail={
-            "type": "invalid_identifier", "message": "identifier is entity_id, urn or prop.<name>"})
+            "type": "invalid_identifier", "message": identifiers._GRAMMAR})
     identity = await _node_identity_for_meta(session, meta)
-    if identity is not None and identifier == f"prop.{identity.identity_property}":
+    if identity is not None and identifiers.property_of(identifier) == identity.identity_property:
         identifier = "urn"                       # that property holds the urn, as on an import
     try:
         results = await svc.resolve_identities(graph_id=graph_id, identifier=identifier,
@@ -5170,6 +5340,26 @@ async def get_import(
     svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
+    """An import job: its ``status``, where it has got (``phase``, ``progress``,
+    ``processed``/``total``) and its ``summary``:
+
+    * the tallies: how many rows were ``new``, ``updated``, ``unchanged``, ``deleted`` (with what a
+      replace deleted because no row named it) or ``invalid`` (refused), and ``skipped``: records
+      that are neither a node nor an edge;
+    * ``refused``: ``{total, byCode, byKind, rows, fixes, hints}`` — the refused rows by reason and
+      by kind of row, the first 20 (``rows``: ``rowIndex``, ``at``, ``kind``, ``label``, ``code``,
+      ``reason``), what to do about each reason, and ``hints.by_urn``: how many of them
+      ``identifier=prop.<name>,urn`` would find by their urn;
+    * ``edgesCascaded``: the edges a replace's deleted nodes took with them;
+    * ``replaceGuard``: a replace's verdict — ``{state, live, deletes, creates, limits, sources}``,
+      with ``refusedUnmatched`` (refused rows that matched nothing, counted with what it creates)
+      and ``scope`` (``keyed``);
+    * ``publish``: how an ``autoPublish`` went — ``{state, jobId, commitId, revisionId, reason,
+      refusedRows, pulls}``: ``queued``, then ``published``, ``unchanged`` (``commitId`` and
+      ``revisionId`` are main's head) or ``skipped``;
+    * ``failure``: a failed job's ``{code, action, phase, reason}``.
+
+    404 for a job of another graph, or one the caller may not read."""
     job = await ie.get_job(job_id)
     if job is None or job.get("graphId") != graph_id or not await _import_visible(svc, graph_id, job, viewer):
         raise HTTPException(status_code=404, detail="import job not found")
@@ -6185,7 +6375,9 @@ async def list_reviewer_candidates(
             ids.add(b.subject_id)
         elif b.subject_type == "group":
             ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
-    if not drafts_policy.resolve(ws, ds).self_approval:
+    policy = (await drafts_policy.load(session, ds.id) if ds is not None
+              else await drafts_policy.effective(ws_id, kind=ws.kind))
+    if not policy.self_approval:
         ids.discard(user.id)
     idents = await user_repo.get_identities_by_ids(session, sorted(ids))
     people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
@@ -6387,6 +6579,31 @@ async def _policy_source(session: AsyncSession, ws_id: str, data_source_id: str)
     return ds
 
 
+@contextmanager
+def _settings_refusals():
+    """A save an old settings endpoint makes through the settings store, refused as the settings
+    API refuses it: 403 for a value the caller may not set, 422 for one outside the platform's
+    limits or otherwise invalid. Nothing is saved."""
+    from backend.app.services.settings import service as settings_service, validate
+
+    try:
+        yield
+    except validate.SettingNotPermitted as exc:
+        raise HTTPException(status_code=403, detail={
+            "type": exc.code, "message": str(exc), "denied": exc.denied}) from exc
+    except settings_service.InvalidSettings as exc:
+        raise HTTPException(status_code=422, detail={
+            "type": exc.code, "message": str(exc), "errors": exc.errors}) from exc
+
+
+def _settings_check(claims: PermissionClaims, ws_id: str):
+    """The check an old settings endpoint's save runs: the caller's, as the settings API checks a
+    PATCH (``settings.service.checker``)."""
+    from backend.app.services.settings import service as settings_service
+
+    return settings_service.checker(settings_service.editor_of(claims, ws_id), ws_id)
+
+
 async def _record_policy_change(session: AsyncSession, scope: str, before: dict, after: dict,
                                 **target) -> None:
     """A real change, once, with what it was and what it became: in the same transaction as the
@@ -6426,7 +6643,8 @@ async def list_drafts_whose_owner_left(
     return drafts
 
 
-@router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+@router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/settings"))])
 async def get_workspace_drafts_policy(
     ws_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -6435,35 +6653,55 @@ async def get_workspace_drafts_policy(
     """The workspace's own drafts and reviews settings, and the policy its data sources start
     from: the level a new draft starts at, the levels it may have, and whether a review's opener
     may approve and merge it."""
+    await _policy_workspace(session, ws_id)
+    return await _workspace_policy(session, ws_id)
+
+
+async def _workspace_policy(session: AsyncSession, ws_id: str) -> dict:
+    from backend.app.db.models import WorkspaceORM
     from backend.app.services import drafts_policy
-    ws = await _policy_workspace(session, ws_id)
-    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+    ws = await session.get(WorkspaceORM, ws_id)
+    return {"settings": await drafts_policy.own(session, "workspace", ws_id),
+            "effective": (await drafts_policy.effective(ws_id, kind=getattr(ws, "kind", None))).as_dict()}
 
 
-@router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+@router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/settings"))])
 async def put_workspace_drafts_policy(
     ws_id: str, body: DraftsPolicySettings,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set the workspace's drafts and reviews policy (workspace admins). A data source's own
-    override still wins. A change is recorded in the activity log; drafts already open keep their
-    level."""
+    override still wins. A change is saved through the settings store and recorded in the
+    activity log; drafts already open keep their level."""
     from backend.app.services import drafts_policy
     ws = await _policy_workspace(session, ws_id)
-    before, after = drafts_policy.apply(ws, drafts_policy.changes_from(body))
-    if after:
-        await _record_policy_change(session, "workspace", before, after, workspace_id=ws_id,
+
+    async def record(s: AsyncSession, before: dict, after: dict) -> None:
+        await _record_policy_change(s, "workspace", before, after, workspace_id=ws_id,
                                     target_type="workspace", target_id=ws_id, target_label=ws.name)
-    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+
+    with _settings_refusals():
+        await drafts_policy.save(session, "workspace", ws_id, drafts_policy.changes_from(body),
+                                 actor=_user.id, record=record,
+                                 check=_settings_check(claims, ws_id))
+    return await _workspace_policy(session, ws_id)
 
 
-def _source_policy(drafts_policy, ws, ds) -> dict:
-    return {"overrides": drafts_policy.settings_of(ds), "workspace": drafts_policy.settings_of(ws),
-            "effective": drafts_policy.resolve(ws, ds).as_dict()}
+async def _source_policy(session: AsyncSession, ws_id: str, ds) -> dict:
+    """A data source's own settings (a fork's: its root's, which it follows), its workspace's, and
+    what holds for it."""
+    from backend.app.services import drafts_policy, fork_sources
+    root = await fork_sources.governing_row(session, ds)
+    return {"overrides": await drafts_policy.own(session, "graph", root.id),
+            "workspace": await drafts_policy.own(session, "workspace", ws_id),
+            "effective": (await drafts_policy.load(session, ds.id)).as_dict()}
 
 
-@router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+@router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def get_data_source_drafts_policy(
     ws_id: str, data_source_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -6471,30 +6709,42 @@ async def get_data_source_drafts_policy(
 ):
     """A data source's drafts and reviews policy: its own overrides, its workspace's settings, and
     what holds for it, with the level each field came from."""
-    from backend.app.services import drafts_policy
     ds = await _policy_source(session, ws_id, data_source_id)
-    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+    await _policy_workspace(session, ws_id)
+    return await _source_policy(session, ws_id, ds)
 
 
-@router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+@router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def put_data_source_drafts_policy(
     ws_id: str, data_source_id: str, body: DraftsPolicySettings,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Override the workspace's drafts and reviews policy for one data source (workspace admins),
-    field by field; ``"inherit"`` goes back to the workspace's. A change is recorded once."""
+    field by field; ``"inherit"`` goes back to the workspace's. A change is saved through the
+    settings store and recorded once."""
     from backend.app.services import drafts_policy, fork_sources
     from backend.app.services.activity import recorder
     ds = await _policy_source(session, ws_id, data_source_id)
-    governing = fork_sources.governing(ds)
-    before, after = drafts_policy.apply(ds, drafts_policy.changes_from(body))
-    # A fork's policy is its parent's (409 here); a parent's forks take its new one.
-    await fork_sources.follow_parent(session, ds, governing)
-    if after:
-        await _record_policy_change(session, "data_source", before, after,
-                                    **recorder.data_source_target(ds))
-    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+    await _policy_workspace(session, ws_id)
+    changes = drafts_policy.changes_from(body)
+    if ds.fork_of_data_source_id:
+        # A fork's policy is its parent's: 409 for a change of it.
+        governing = fork_sources.governing(ds)
+        drafts_policy.apply(ds, changes)
+        await fork_sources.follow_parent(session, ds, governing)
+    else:
+        async def record(s: AsyncSession, before: dict, after: dict) -> None:
+            await _record_policy_change(s, "data_source", before, after,
+                                        **recorder.data_source_target(ds))
+
+        # Written through to the old columns of the data source and of its forks.
+        with _settings_refusals():
+            await drafts_policy.save(session, "graph", ds.id, changes, actor=_user.id,
+                                     record=record, check=_settings_check(claims, ws_id))
+    return await _source_policy(session, ws_id, ds)
 
 
 @router.get("/data-sources/{data_source_id}/pull-requests", response_model=List[PrResponse])

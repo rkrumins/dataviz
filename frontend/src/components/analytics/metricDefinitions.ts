@@ -25,8 +25,11 @@ export interface MetricDefinition {
     /** The label as it appears on the tile — used as the popover heading. */
     title: string
     what: string
-    how: string
+    /** Optional for a word or a status, which explains itself without one. */
+    how?: string
     why?: string
+    /** The engineering terms behind a word, for the Technical view only. */
+    technical?: string
     /** Set when the measure only exists from a certain date onwards. */
     caveat?: string
 }

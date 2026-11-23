@@ -415,3 +415,51 @@ async def test_resolve_expired_global_admin_loses_implicit_allow(db_session):
     claims = await resolve(db_session, user_id)
     assert "system:admin" not in claims.global_perms
     assert not has_permission(claims, "system:users:manage")
+
+
+@pytest.mark.asyncio
+async def test_resolve_many_answers_as_resolve_does_for_each_person(db_session):
+    """Who a publish's watchers are, decided for hundreds at once (``digest.tell_pending``): each
+    person's claims from ``resolve_many`` are theirs from ``resolve`` — direct and team bindings,
+    two teams, an expired binding, the platform roles, a service account, and someone with none."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.services.permission_service import resolve_many
+
+    past = _iso(datetime.now(timezone.utc) - timedelta(hours=1))
+    people = {n: await _seed_user(db_session, f"usr_{n}") for n in
+              ("viewer", "teamed", "two_teams", "expired", "owner", "org", "nobody")}
+    finance = await group_repo.create_group(db_session, name="finance-many")
+    ops = await group_repo.create_group(db_session, name="ops-many")
+    for team, who in ((finance, "teamed"), (finance, "two_teams"), (ops, "two_teams")):
+        db_session.add(GroupMemberORM(group_id=team.id, user_id=people[who]))
+    await db_session.flush()
+    grants = [
+        ("user", people["viewer"], "workspace_viewer", "workspace", "ws_a", None),
+        ("group", finance.id, "workspace_member", "workspace", "ws_a", None),
+        ("group", ops.id, "workspace_admin", "workspace", "ws_b", None),
+        ("user", people["two_teams"], "workspace_viewer", "workspace", "ws_c", None),
+        ("user", people["expired"], "workspace_member", "workspace", "ws_a", past),
+        ("user", people["owner"], "super_admin", "global", None, None),
+        ("user", people["org"], "org_admin", "global", None, None),
+        ("user", "svc_reporting", "workspace_viewer", "workspace", "ws_a", None),
+        ("user", "svc_reporting", "org_reader", "global", None, None),
+    ]
+    for subject_type, subject_id, role, scope_type, scope_id, expires_at in grants:
+        await binding_repo.create_binding(
+            db_session, subject_type=subject_type, subject_id=subject_id, role_name=role,
+            scope_type=scope_type, scope_id=scope_id, expires_at=expires_at)
+
+    everyone = [*people.values(), "svc_reporting"]
+    many = await resolve_many(db_session, everyone + [people["viewer"], None])
+    assert sorted(many) == sorted(everyone)
+    for user_id in everyone:
+        one = await resolve(db_session, user_id)
+        assert (many[user_id].global_perms, many[user_id].ws_perms) == \
+            (one.global_perms, one.ws_perms), user_id
+        for ws in ("ws_a", "ws_b", "ws_c", "ws_none"):
+            assert has_permission(many[user_id], "workspace:datasource:read", workspace_id=ws) \
+                == has_permission(one, "workspace:datasource:read", workspace_id=ws), (user_id, ws)
+    assert not has_permission(many[people["expired"]], "workspace:datasource:read", workspace_id="ws_a")
+    assert has_permission(many[people["two_teams"]], "workspace:datasource:read", workspace_id="ws_b")
+    assert await resolve_many(db_session, []) == {}

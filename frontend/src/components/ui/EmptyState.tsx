@@ -33,12 +33,17 @@ export function EmptyState({ icon: Glyph, title, description, action, secondaryA
         </span>
       )}
       <p className={cn('font-semibold text-ink', compact ? 'text-xs' : 'text-sm')}>{title}</p>
-      {description && <p className={cn('text-ink-muted max-w-sm', compact ? 'text-[11px]' : 'text-xs')}>{description}</p>}
+      {description && <p className={cn('text-ink-secondary max-w-sm', compact ? 'text-[11px]' : 'text-xs')}>{description}</p>}
       {(action || secondaryAction) && (
         <div className={cn('flex items-center gap-2', compact ? 'mt-1' : 'mt-2')}>
-          {action && <Button size="sm" variant="primary" leftIcon={action.icon} onClick={action.onClick}>{action.label}</Button>}
+          {/* White on the accent is 4.47:1; on indigo-600 it is 6.3:1, AA in both themes. */}
+          {action && (
+            <Button size="sm" variant="primary" className="bg-indigo-600 hover:bg-indigo-700 hover:brightness-100" leftIcon={action.icon} onClick={action.onClick}>
+              {action.label}
+            </Button>
+          )}
           {secondaryAction && (
-            <Button size="sm" variant="ghost" leftIcon={secondaryAction.icon} onClick={secondaryAction.onClick}>
+            <Button size="sm" variant="ghost" className="text-ink-secondary" leftIcon={secondaryAction.icon} onClick={secondaryAction.onClick}>
               {secondaryAction.label}
             </Button>
           )}

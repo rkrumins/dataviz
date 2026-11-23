@@ -868,12 +868,17 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _signal_handler)
 
+    # Whatever this process counts (services/settings/signals.py), added to Redis every ten seconds.
+    from backend.app.services.settings import signals
+    signals.start_flusher()
+
     # Run the consumer loop
     try:
         await consumer.start()
     finally:
         logger.info("Consumer stopped — draining active jobs...")
         await consumer.drain(timeout=60.0)
+        await signals.stop_flusher()
         try:
             await cancel_listener.stop()
         except Exception:

@@ -481,6 +481,15 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:              # noqa: BLE001 — never fail startup
         logger.warning("metrics backend not installed: %s", exc)
 
+    # A versioned-graph setting's environment default that the setting can't take: said once here,
+    # as the setting then runs on its code default.
+    try:
+        from .services.versioning.config import warn_invalid_settings_env
+
+        warn_invalid_settings_env()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("versioned-graph settings: the environment was not checked: %s", exc)
+
     # Interactive reads first: when the breaker proxy sees FalkorDB starve a
     # read (queue full, server-side or client deadline), stamp the shared
     # read-pressure key so aggregation writers in other pods yield their
@@ -1782,6 +1791,12 @@ async def lifespan(_app: FastAPI):
         name="api-key-usage",
     )
 
+    # Signals (services/settings/signals.py): counted in this process's memory where they happen
+    # — reads, and the projection and transfer lanes when they run in-process — and added to Redis
+    # every ten seconds. Every process that counts flushes.
+    from .services.settings import signals as _signals
+    _signals.start_flusher()
+
     # Everything startup built lives as long as the process: take it out of
     # the garbage collector's reach. A full collection otherwise walks this
     # whole heap (~300k objects, 140-180ms on the event loop), and a request
@@ -2027,6 +2042,10 @@ async def lifespan(_app: FastAPI):
         await asyncio.wait_for(_usage_recorder.flush(), timeout=5.0)
     except Exception as exc:  # noqa: BLE001 — shutting down either way
         logger.warning("Final API key usage flush failed: %s", exc)
+
+    # And the signals counted since their last flush, while the bus Redis is still open.
+    from .services.settings import signals as _signals
+    await _signals.stop_flusher()
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the

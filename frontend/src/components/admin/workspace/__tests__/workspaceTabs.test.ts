@@ -20,7 +20,7 @@ describe('normalizeWorkspaceTab', () => {
         expect(normalizeWorkspaceTab(tab, null)).toEqual({ tab: 'data', section })
     })
 
-    it.each(['views', 'members', 'reviews', 'activity', 'settings'])('keeps %s as it was', (tab) => {
+    it.each(['views', 'members', 'reviews', 'versioned-graphs', 'activity', 'settings'])('keeps %s as it was', (tab) => {
         expect(normalizeWorkspaceTab(tab, null).tab).toBe(tab)
     })
 

@@ -477,6 +477,14 @@ export const guideEntries: GuideEntry[] = [
     description: 'What a rebuild measures before it writes, the limits you set, and what "would not fit" means',
     importFn: () => import('@docs/guide/ROLLUP_CAPACITY.md?raw'),
   },
+  {
+    slug: 'versioned-graph-settings',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Versioned Graph Settings',
+    description: 'Every setting for reads, updates, builds, memory, drafts and imports: what it does, when to change it, and what we recommend',
+    importFn: () => import('@docs/guide/VERSIONED_GRAPH_SETTINGS.md?raw'),
+  },
 
   // Reference
   {

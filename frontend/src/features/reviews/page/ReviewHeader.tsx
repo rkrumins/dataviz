@@ -12,7 +12,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { useFeature } from '@/store/features'
 import { RevertDialog } from '@/features/versioning/components/RollbackDialogs'
-import { PrKindIcon, PrStatusBadge, derivePrTitle } from '../components/PrMeta'
+import { PrKindIcon, PrStatusBadge, derivePrTitle, mergedAs } from '../components/PrMeta'
 import type { ReviewActions } from '../hooks/useReviewActions'
 import { approvalProgress, reviewerName, reviewerStates } from './readiness'
 
@@ -39,7 +39,8 @@ export function ReviewHeader({ wsId, actions, primaryAction, shortcuts }: {
   const canDismiss = canManage && !terminal && !merging
   const canWithdraw = !!sentBack && sentBack.by === user?.id
   const canDiscard = (isAuthor || isOwner) && rejected > 0 && !terminal
-  const canRevert = pr.status === 'merged' && canManage && canPublish && versioningEnabled && !!pr.resultingCommitId
+  const landedAs = mergedAs(pr)
+  const canRevert = pr.status === 'merged' && canManage && canPublish && versioningEnabled && !!landedAs
 
   return (
     <header aria-label="This review" className="shrink-0 border-b border-glass-border/60 bg-canvas">
@@ -156,11 +157,11 @@ export function ReviewHeader({ wsId, actions, primaryAction, shortcuts }: {
         </div>
       )}
 
-      {pr.resultingCommitId && (
+      {landedAs && (
         <RevertDialog
           open={reverting}
           commit={{
-            commit_id: pr.resultingCommitId, message: `Merge: ${derivePrTitle(pr)}`, kind: 'squash_publish',
+            commit_id: landedAs, message: `Merge: ${derivePrTitle(pr)}`, kind: 'squash_publish',
             actor: pr.mergedBy ?? pr.actor, created_at: pr.mergedAt ?? pr.updatedAt, stats: {},
           }}
           wsId={wsId}

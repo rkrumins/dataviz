@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Set, Union, TYPE_CHECKING
 
 from backend.app.services.background import spawn_detached
@@ -112,17 +113,27 @@ class ProjectionWorker:
         return await self._proj.project_pending()
 
     async def sweep_once(self):
-        """One pass of the idle-draft janitor (plan §17 #8); no-op without a service. What a swept
+        """One pass of the idle-draft janitor (plan §17 #8); no-op without a service. Open drafts
+        idle longer than their workspace's ``drafts.idleCloseDays`` are closed. What a swept
         draft held in views goes with it, as on abandon, and any draft whose views were left
         unsettled by its publish or abandon is settled (``draft_views``). Import/export artifacts
         older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store — but never the
         inputs a job may still read — and the staged rows of imports finished more than
         ``STAGING_GC_DAYS`` ago from ``import_rows``. Drafts merged or abandoned longer ago than
-        the retention window (``draft_retention``) have their changes removed, for at most
-        ``DRAFT_PRUNE_PASS_SECS`` a pass."""
+        their workspace's retention window (``draft_retention``) have their changes removed, for
+        at most ``DRAFT_PRUNE_PASS_SECS`` a pass. Each window is run once, for the graphs it holds
+        for (``settings.effective.by_workspace``); forever skips it, and while the settings can't
+        be read nothing is closed or removed."""
         if self._versioning is None:
             return []
-        swept = await self._versioning.sweep_idle_drafts()
+        from backend.app.services.settings import effective
+
+        swept = []
+        for days, workspace_ids, except_ids in await effective.by_workspace(
+                "drafts.idleCloseDays") or ():
+            if days != "forever":
+                swept += await self._versioning.sweep_idle_drafts(
+                    ttl_days=days, workspace_ids=workspace_ids, except_workspace_ids=except_ids)
         from backend.app.services import draft_views
 
         try:
@@ -138,11 +149,14 @@ class ProjectionWorker:
         except Exception:  # noqa: BLE001 — tried again next pass
             logger.exception("sweeping finished imports' staged rows failed")
         try:
-            from .draft_retention import retention_days
+            from .draft_retention import KEY
 
-            days = await retention_days()              # None: unread, so nothing is removed
-            if days:
-                await self._versioning.prune_closed_drafts(older_than_days=days)
+            deadline = time.monotonic() + config.DRAFT_PRUNE_PASS_SECS    # for every window
+            for days, workspace_ids, except_ids in await effective.by_workspace(KEY) or ():
+                if days != "forever":
+                    await self._versioning.prune_closed_drafts(
+                        older_than_days=days, budget_secs=max(0.0, deadline - time.monotonic()),
+                        workspace_ids=workspace_ids, except_workspace_ids=except_ids)
         except Exception:  # noqa: BLE001 — carried on next pass
             logger.exception("removing closed drafts' changes failed")
         try:
@@ -212,6 +226,7 @@ class ProjectionWorker:
             if config.LIVENESS_SECS > 0:
                 loops.append(self._liveness_loop())
             loops.append(self._retire_loop())
+            loops.append(self._tell_loop())
         if "transfer" in self._lanes:
             if self._transfers is not None:
                 loops.append(self._slot_loop(self._transfers, slots=config.TRANSFER_SLOTS,
@@ -360,7 +375,13 @@ class ProjectionWorker:
                 pass
 
     async def _poll_loop(self) -> None:
+        from backend.app.services.settings import effective
+
         while not self._stop.is_set():
+            # The projector's pacing reads the versioned-graph settings per statement, as this
+            # process last refreshed them (build_policy.current): refreshed here, each poll, never
+            # raising.
+            await effective.refresh()
             try:
                 await self.reconcile_once()
             except Exception:
@@ -441,6 +462,22 @@ class ProjectionWorker:
                 logger.exception("projection key retire loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.LIVENESS_SECS or 60)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _tell_loop(self) -> None:
+        """Tell the people watching each graph of the versions it published since they were told
+        (``digest.tell_pending``), off every commit's path: at most one unread notification per
+        graph each, nobody twice, and one worker at a time per graph."""
+        from . import digest
+
+        while not self._stop.is_set():
+            try:
+                await digest.tell_pending()
+            except Exception:
+                logger.exception("watcher telling loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=digest.TELL_POLL_SECS)
             except asyncio.TimeoutError:
                 pass
 

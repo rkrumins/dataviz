@@ -59,13 +59,16 @@ function findChromium() {
   return ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => existsSync(p)) ?? null
 }
 
+/** Vite's output without its colour codes: with CI set it prints "Local" in bold, between them. */
+const plain = (d) => String(d).replace(/\x1b\[[0-9;]*m/g, '')
+
 async function startVite() {
   const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'], { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Vite did not start in 60s')), 60_000)
-    vite.stdout.on('data', (d) => { if (String(d).includes('Local:')) { clearTimeout(timer); resolve() } })
+    vite.stdout.on('data', (d) => { if (plain(d).includes('Local:')) { clearTimeout(timer); resolve() } })
     vite.stderr.on('data', (d) => {
-      if (String(d).includes('is in use')) {
+      if (plain(d).includes('is in use')) {
         clearTimeout(timer)
         reject(new Error(`Port ${PORT} is already serving an older build. Stop it first:  pkill -f "vite --port ${PORT}"`))
       }
@@ -74,19 +77,38 @@ async function startVite() {
   return vite
 }
 
-/** A page of a headless Chromium on a throwaway profile, and a way to talk to it. */
+/** A page of a headless Chromium on a throwaway profile, and a way to talk to it. Chromium says on
+ *  stderr where its DevTools listen ("DevTools listening on ws://HOST:PORT/…"), which is where the
+ *  page is looked for; one that has opened no page is asked for one; one that never answers fails
+ *  with what it said. */
 async function openBrowser(bin) {
   const profile = mkdtempSync(join(tmpdir(), 'scale-shot-'))
   const chrome = spawn(bin, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars', `--remote-debugging-port=${CDP_PORT}`,
     `--user-data-dir=${profile}`, '--window-size=1440,940', 'about:blank',
-  ], { stdio: 'ignore', detached: true })
+  ], { stdio: ['ignore', 'ignore', 'pipe'], detached: true })
+  let said = ''
+  let devtools = null
+  let exited = null
+  chrome.stderr.on('data', (d) => {
+    said = (said + d).slice(-4000)
+    devtools ??= /DevTools listening on ws:\/\/([^/\s]+)\//.exec(said)?.[1] ?? null
+  })
+  chrome.on('exit', (code, signal) => { exited = signal ?? code })
   let target
-  for (let i = 0; i < 100 && !target; i++) {
-    try { target = (await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json()).find((t) => t.type === 'page') } catch { /* not up yet */ }
+  for (let i = 0; i < 600 && !target && exited === null; i++) {
+    const base = `http://${devtools ?? `127.0.0.1:${CDP_PORT}`}`
+    try {
+      target = (await (await fetch(`${base}/json/list`)).json()).find((t) => t.type === 'page')
+        ?? await (await fetch(`${base}/json/new?about:blank`, { method: 'PUT' })).json()
+    } catch { /* not answering yet */ }
     if (!target) await sleep(100)
   }
-  if (!target) throw new Error('Chromium did not open a page')
+  if (!target) {
+    try { process.kill(-chrome.pid, 'SIGTERM') } catch { /* gone */ }
+    throw new Error(`Chromium did not open a page ${exited === null ? 'in 60s' : `(it exited: ${exited})`}, `
+      + `${devtools ? `its DevTools on ${devtools}` : 'never saying where its DevTools listen'}. It said:\n${said.trim() || '(nothing)'}`)
+  }
   const ws = new WebSocket(target.webSocketDebuggerUrl)
   await new Promise((r) => ws.addEventListener('open', r, { once: true }))
   let id = 0

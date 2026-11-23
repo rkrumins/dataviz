@@ -9,12 +9,12 @@
  * can use. Every older link (`?tab=aggregation`, `?ds=…`) still lands in place
  * (see `workspaceTabs`).
  */
-import { useState, useEffect, useMemo, useRef, useCallback, useContext } from 'react'
+import { lazy, Suspense, useState, useEffect, useMemo, useRef, useCallback, useContext } from 'react'
 import { Navigate, useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Settings2, GitBranch, Eye, RefreshCw, Sparkles, Shapes, Activity,
-    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2,
+    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2, Layers,
 } from 'lucide-react'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
@@ -52,6 +52,7 @@ import { rankTags } from '@/lib/tags'
 import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
+import { SettingsSkeleton } from '@/components/admin/AdminVersionedGraphs/states'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
 import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/WorkspaceAggregationDashboard'
 import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
@@ -72,6 +73,10 @@ import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features
 import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
 import { useDataSourcesWithForks, useReviewInboxCounts } from '@/features/versioning/hooks/useVersioning'
 import { isForkDataSourceId } from '@/features/versioning/model/forks'
+
+// The Versioned graphs tab carries the settings kit: it loads when first opened.
+const WorkspaceVersionedGraphs = lazy(() => import('@/components/admin/AdminVersionedGraphs/WorkspaceVersionedGraphs')
+    .then((m) => ({ default: m.WorkspaceVersionedGraphs })))
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -137,9 +142,12 @@ export function WorkspaceDetailPage() {
             return next
         }, { replace: true })
     }, [setSearchParams])
-    // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
-    // disappears when the admin turns version control off.
+    // Reviews and Versioned graphs are versioning surfaces; the tabs (and their deep links)
+    // disappear when the admin turns version control off.
     const versioningEnabled = useFeature('versioningEnabled')
+    // Changes staged on the Versioned graphs tab: it stays mounted (hidden) while any are, so
+    // looking at another tab never drops them, and its tab says how many.
+    const [vgStaged, setVgStaged] = useState(0)
 
     // Letting people in opens the Members tab — admins and stewards; the
     // admins also remove people and set how people get in. The store's
@@ -577,7 +585,10 @@ export function WorkspaceDetailPage() {
         { id: 'overview', label: 'Overview', icon: Sparkles },
         { id: 'views', label: 'Views', icon: Eye, count: allWorkspaceViews.length },
         { id: 'data', label: 'Data', icon: Database, count: workspace.dataSources.length },
-        ...(versioningEnabled ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, alert: reviewsWaiting }] : []),
+        ...(versioningEnabled ? [
+            { id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, alert: reviewsWaiting },
+            { id: 'versioned-graphs' as const, label: 'Versioned graphs', icon: Layers },
+        ] : []),
         ...(canAddMembers ? [{ id: 'members' as const, label: 'People', icon: Users }] : []),
         ...(activityScope ? [{ id: 'activity' as const, label: 'Activity', icon: History }] : []),
         // The Playground's settings are its administrator's: a member manages only their own graphs.
@@ -660,7 +671,11 @@ export function WorkspaceDetailPage() {
                 <TabsList look="underline" aria-label="Workspace sections" className="gap-1 sm:gap-2 overflow-x-auto overflow-y-hidden custom-scrollbar" data-tour="workspace-tabs">
                     {tabs.map(tab => (
                         <TabsTrigger key={tab.id} value={tab.id} icon={tab.icon} className="px-3 h-11 shrink-0"
-                            badge={tab.alert ? (
+                            badge={tab.id === 'versioned-graphs' && vgStaged > 0 ? (
+                                <span className="ml-0.5 rounded-full bg-indigo-700 px-1.5 text-[10px] font-semibold leading-4 text-white dark:bg-indigo-500">
+                                    {vgStaged}<span className="sr-only"> not saved</span>
+                                </span>
+                            ) : tab.alert ? (
                                 <span className="ml-0.5 rounded-full bg-rose-500 px-1.5 text-[10px] font-bold leading-4 text-white">
                                     {tab.alert}<span className="sr-only"> waiting on you</span>
                                 </span>
@@ -871,6 +886,16 @@ export function WorkspaceDetailPage() {
                 </>
             )}
 
+            {/* ── Versioned graphs Tab (defaults, graphs, history) ── */}
+            {versioningEnabled && wsId && (activeTab === 'versioned-graphs' || vgStaged > 0) && (
+                <div hidden={activeTab !== 'versioned-graphs'}>
+                    <Suspense fallback={<div className="py-4"><SettingsSkeleton /></div>}>
+                        <WorkspaceVersionedGraphs workspaceId={wsId} workspaceName={workspace.name} onStagedChange={setVgStaged}
+                            onOpenDataSources={() => goTo('data', 'sources')} />
+                    </Suspense>
+                </div>
+            )}
+
             {/* ── People (RBAC) ───────────────────────────── */}
             {activeTab === 'members' && canAddMembers && wsId && (
                 <WorkspaceMembers workspaceId={wsId} canManage={canManageMembers} />
@@ -889,8 +914,8 @@ export function WorkspaceDetailPage() {
                     identityProperty={workspace.identityProperty}
                     nameProperty={workspace.nameProperty}
                     canEditIdentity={canManageDataSources}
-                    canEditPolicy={canManageMembers}
                     versioningEnabled={versioningEnabled}
+                    onOpenVersionedGraphs={() => goTo('versioned-graphs')}
                     onSaved={reload}
                 />
             )}

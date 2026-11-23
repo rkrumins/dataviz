@@ -567,17 +567,27 @@
         "POST /playground/join \u2014 refused while off",
         "GET /playground \u2014 says the Playground is off, and offers nothing",
         "GET /playground/samples, POST /playground/samples/{sample_id} \u2014 refused while off",
-        "POST /{ws_id}/versioning/blank-graphs in the Playground \u2014 starting a new graph there is refused"
+        "POST /playground/graphs (start a graph for your own data) \u2014 refused while off",
+        "POST /{ws_id}/versioning/blank-graphs in the Playground \u2014 starting a new graph there is refused",
+        "GET /playground/models and /playground/models/{id}/template \u2014 the semantic layers a member may build on, and their import templates \u2014 refused while off",
+        "POST /playground/models/match (with Suggest semantic layers) \u2014 scoring the layers on offer against a file \u2014 refused while off",
+        "POST /playground/layers, /playground/layers/{id}/share and /playground/layers/{id}/types \u2014 making, sharing and adding types to a semantic layer of your own \u2014 refused while off",
+        "Editing, publishing, deleting, importing into, exporting and reading the history of a Playground maker's own semantic layer without the semantic-layer switches \u2014 while off, the org's rules apply to it, and nobody but a platform admin changes it"
       ],
       "uiSurfaces": [
         "Playground \u2014 in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
         "Setting the Playground up, on Workspaces, for platform administrators",
-        "Start from a sample, under Your experiments in the Playground"
+        "Start from a sample, under Your experiments in the Playground",
+        "Bring your own data and Start a blank graph, under Your experiments (with Version control and Build lineage from scratch)",
+        "Your first steps \u2014 the Playground's builder checklist",
+        "The Playground chip on a view's header",
+        "The blank-graph wizard's way back to a sample or your own data, in the Playground"
       ],
       "stillAllowed": [
         "People already in the Playground keep their graphs and views; nothing is deleted",
+        "Semantic layers of their own are kept, and still read by them and the graphs built on them",
         "Leaving the Playground",
-        "Moving an experiment out into a workspace, or asking to"
+        "Moving an experiment out into a workspace, or asking to \u2014 its own semantic layer goes with it"
       ],
       "dependsOn": [
         "versioningEnabled",
@@ -672,7 +682,7 @@
       "serverGates": [
         "versioning_gate.py \u2014 every /graph write (drafts, commits, merges, reverts)",
         "versioned_write_provider.py \u2014 backstop on the write-through path",
-        "GET /playground/samples, POST /playground/samples/{sample_id} \u2014 starting from a sample"
+        "GET /playground/samples, POST /playground/samples/{sample_id}, POST /playground/graphs \u2014 a starter graph is a versioned graph (and a sample's first version and example draft)"
       ],
       "uiSurfaces": [
         "Canvas edit mode, drafts, reviews and history",
@@ -733,9 +743,9 @@
       "default": false,
       "options": null,
       "helpUrl": "/docs/versioning-forks-and-residency#16-turning-residency-on",
-      "adminHint": "Graph residency needs Version control on. Before turning it on, give every FalkorDB master a maxmemory and run this release on every pod, and set the classes and values you want under Admin \u2192 Infrastructure \u2192 Versioned graphs. Each change of this switch, the grace period, and every eviction and load are recorded in the activity log.",
+      "adminHint": "Graph residency needs Version control on. Before turning it on, give every FalkorDB master a maxmemory and run this release on every pod, and set the classes and values you want under Admin \u2192 Versioned graphs \u2192 Settings \u2192 Memory & residency. Each change of this switch, the grace period, and every eviction and load are recorded in the activity log.",
       "impactWhenOff": "Every graph stays loaded, as before residency. Turning it off brings evicted graphs back as memory allows \u2014 until then they read from Postgres \u2014 so make room first. The classes and the values are kept, and apply again once it is on.",
-      "impactWhenOn": "FalkorDB keeps each graph by its class \u2014 Always, Standard or Coldline \u2014 and by each master's memory. The first eviction waits 90 seconds after it is turned on. An evicted graph reads from Postgres, more slowly, until it is loaded again when it is needed, and loads wait for room on their master. Every FalkorDB master needs a maxmemory, and every pod must run this release first. The values are under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 Residency & eviction. Turning it off brings graphs back as memory allows.",
+      "impactWhenOn": "FalkorDB keeps each graph by its class \u2014 Always, Standard or Coldline \u2014 and by each master's memory. The first eviction waits 90 seconds after it is turned on. An evicted graph reads from Postgres, more slowly, until it is loaded again when it is needed, and loads wait for room on their master. Every FalkorDB master needs a maxmemory, and every pod must run this release first. The values are under Admin \u2192 Versioned graphs \u2192 Settings \u2192 Memory & residency. Turning it off brings graphs back as memory allows.",
       "sortOrder": 2,
       "deprecated": false,
       "stage": "experimental",
@@ -748,12 +758,47 @@
         "Admission on a new graph's first seed, a move, an Adopt and a package seed, and a new graph's class from the policy"
       ],
       "uiSurfaces": [
-        "The Residency & eviction card on Admin \u2192 Infrastructure \u2192 Versioned graphs: whether residency is on, its grace period, and the graphs being brought back",
-        "Each graph's class, Load now and Adopt controls in the versioned graphs list"
+        "The Memory & residency category on Admin \u2192 Versioned graphs \u2192 Settings: the Graph residency switch, and its settings marked Inactive while it is off",
+        "Each graph's class, Load now and Adopt in the list of every versioned graph on Admin \u2192 Versioned graphs"
       ],
       "stillAllowed": [
         "Every graph stays loaded, as before residency; an evicted graph reads from Postgres until it is brought back",
         "Setting classes and the residency values, Load now and Adopt",
+        "Nothing is deleted \u2014 Postgres is the source of truth"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
+      "key": "candidateKeysEnabled",
+      "name": "New-version builds",
+      "description": "A large publish, rebuild or move builds the graph's next version in a second FalkorDB key while the current one keeps serving, then switches readers to it. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/docs/versioning-projection-and-cache",
+      "adminHint": "New-version builds needs Version control on. Check that FalkorDB has room for a second copy of your largest graphs, and set the threshold and room under Admin \u2192 Versioned graphs \u2192 Settings \u2192 New-version builds, and the pacing under Updates & loading. Each build's steps, switches and failures are recorded in the activity log.",
+      "impactWhenOff": "Every change is written into the key that serves reads, as before: during a large import, readers may see the graph partly updated. Builds that haven't started copying are cancelled and their changes are written in place; builds already copying finish.",
+      "impactWhenOn": "A publish that changes more rows than the threshold, and rebuilds and moves of platform-owned keys, are built in a second key: readers keep the current version, complete, until the new one is checked and switched to. A copy needs room on its node for a second copy of the graph; with no room the build waits, or is seeded from Postgres elsewhere. The settings are under Admin \u2192 Versioned graphs \u2192 Settings \u2192 New-version builds.",
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Building a large publish, a rebuild or a move of a platform-owned key in a second FalkorDB key while the current one serves, then switching readers to it, in the versioning worker's projection pass"
+      ],
+      "uiSurfaces": [
+        "The New-version builds category on Admin \u2192 Versioned graphs \u2192 Settings: the New-version builds switch, and its settings marked Inactive while it is off",
+        "The graphs building a new version, counted and listed on Admin \u2192 Versioned graphs",
+        "Each graph's build progress in its Versioning tab, Data health and sync status"
+      ],
+      "stillAllowed": [
+        "Every change is written into the serving key, paced, as before",
+        "Changing the New-version build settings",
         "Nothing is deleted \u2014 Postgres is the source of truth"
       ],
       "dependsOn": [
@@ -954,7 +999,8 @@
       "posture": "capability",
       "serverGates": [
         "POST /blank-graphs \u2014 provision a lineage model with no data source",
-        "GET /playground/samples, POST /playground/samples/{sample_id} \u2014 a sample is a blank model"
+        "GET /playground/samples, POST /playground/samples/{sample_id} \u2014 a sample is a blank model",
+        "POST /playground/graphs \u2014 a graph started for your own data is a blank model"
       ],
       "uiSurfaces": [
         "Blank-model option in the View wizard",
@@ -1166,7 +1212,8 @@
         "DELETE /admin/ontologies/{id} \u2014 delete",
         "POST /admin/ontologies/{id}/restore",
         "POST /admin/ontologies/{id}/new-version",
-        "POST /admin/ontologies/import and /{id}/import \u2014 importing IS editing"
+        "POST /admin/ontologies/import and /{id}/import \u2014 importing IS editing",
+        "POST /admin/ontologies/{id}/approve \u2014 approving a workspace's layer for everyone"
       ],
       "uiSurfaces": [
         "Create / Edit / Delete controls on the semantic layer pages",
@@ -1176,7 +1223,8 @@
         "Publishing",
         "Cloning",
         "Exporting",
-        "Reading every layer"
+        "Reading every layer",
+        "A Playground maker's own layers, which they edit whatever this says"
       ],
       "dependsOn": []
     },
@@ -1199,14 +1247,15 @@
       "enforcedServerSide": true,
       "posture": "security",
       "serverGates": [
-        "Every semantic-layer write (create, update, delete, restore, new-version, publish, clone, import) \u2014 a non-admin is refused unless this is on"
+        "Every semantic-layer write (create, update, delete, restore, new-version, publish, clone, import, approve) \u2014 a non-admin is refused unless this is on"
       ],
       "uiSurfaces": [
         "Edit controls are hidden from non-admins on the semantic layer pages"
       ],
       "stillAllowed": [
         "Admins can always manage layers",
-        "Everyone can read layers"
+        "Everyone can read layers",
+        "A Playground maker manages their own layers whatever this says"
       ],
       "dependsOn": [
         "semanticLayerEditMode"
@@ -1239,7 +1288,8 @@
       ],
       "stillAllowed": [
         "Editing layers in the UI editor",
-        "Exporting"
+        "Exporting",
+        "A Playground maker importing into their own layer, or starting one from a layer file"
       ],
       "dependsOn": [
         "semanticLayerEditMode"
@@ -1270,7 +1320,8 @@
         "Export button on the semantic layer pages"
       ],
       "stillAllowed": [
-        "Reading and editing layers in the UI"
+        "Reading and editing layers in the UI",
+        "A Playground maker exporting their own layers"
       ],
       "dependsOn": []
     },
@@ -1293,7 +1344,8 @@
       "enforcedServerSide": true,
       "posture": "capability",
       "serverGates": [
-        "POST /admin/ontologies/suggest \u2014 score layers against a graph"
+        "POST /admin/ontologies/suggest \u2014 score layers against a graph",
+        "POST /playground/models/match \u2014 score the Playground's layers against a file"
       ],
       "uiSurfaces": [
         "Suggest-from-graph step in the onboarding and data-source wizards",
@@ -1331,7 +1383,8 @@
         "History and audit tabs on a semantic layer"
       ],
       "stillAllowed": [
-        "History is hidden, not deleted \u2014 every version is retained and returns when this is switched back on"
+        "History is hidden, not deleted \u2014 every version is retained and returns when this is switched back on",
+        "A Playground maker reading the history of their own layers"
       ],
       "dependsOn": []
     },
@@ -1793,6 +1846,7 @@
     "versioningEnabled": true,
     "forksEnabled": false,
     "residencyEnabled": false,
+    "candidateKeysEnabled": false,
     "importInMemoryReconcile": false,
     "traceEnabled": true,
     "graphExportEnabled": true,

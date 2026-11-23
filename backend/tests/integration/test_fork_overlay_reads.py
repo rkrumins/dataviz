@@ -218,14 +218,19 @@ def test_a_request_on_a_fork_reads_its_version_and_root_once(forks_on):
                     await engine.provider.get_node("A")
 
             await request()                                     # warm: the delta is cached
-            engine = db.get_engine().sync_engine
-            event.listen(engine, "before_cursor_execute", record)
+            # Both pools: the lookups that route a read run on one of their own.
+            engines = (db.get_engine().sync_engine, db.get_route_engine().sync_engine)
+            for engine in engines:
+                event.listen(engine, "before_cursor_execute", record)
             try:
                 await request()
             finally:
-                event.remove(engine, "before_cursor_execute", record)
+                for engine in engines:
+                    event.remove(engine, "before_cursor_execute", record)
             return len(sent)
 
         root, fork = await cost(parent_ds), await cost(fork_ds)
-        assert fork <= root + 8, (root, fork)
+        # Each process keeps a graph's route (route_cache), so neither request reads it: the fork's
+        # own plan (its version, its ceiling and its root's store, in one session) is the difference.
+        assert fork <= root + 12, (root, fork)
     _run(case)

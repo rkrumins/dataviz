@@ -67,6 +67,8 @@ vi.mock('../ReadRouteChip', () => ({ ReadRouteChip: () => null }))
 vi.mock('../RefreshingBadge', () => ({ RefreshingBadge: () => null }))
 vi.mock('../CommitDialog', () => ({ CommitDialog: () => null }))
 vi.mock('../PublishReceiptBanner', () => ({ PublishReceiptBanner: () => null }))
+vi.mock('../DigestChip', () => ({ DigestChip: () => null }))
+vi.mock('../DigestSheet', () => ({ DigestSheet: () => null }))
 vi.mock('../ViewVersioningPanel', () => ({ ViewVersioningPanel: () => null }))
 vi.mock('../ChangesPanel', () => ({ ChangeCountChips: () => null }))
 vi.mock('../ForkStrip', () => ({

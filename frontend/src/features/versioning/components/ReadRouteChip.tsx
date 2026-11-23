@@ -9,12 +9,16 @@
  * A draft always says it: it is an overlay of the
  * draft's changes on whatever serves published, and the draft bar is shown anyway. A fork reads
  * through its root's store; one too far from its parent to lay over (`readsFrom: 'postgres'`) is
- * served from Postgres until it is merged or catches up, and says why.
+ * served from Postgres until it is merged or catches up, and says why. While the newer version is
+ * written and the server says how far it is (`progress`), the chip adds that: "63% · about 4 min
+ * left".
  */
 import { Database } from 'lucide-react'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { usePersonaMode } from '@/store/persona'
 import { useProjectionWatermark } from '../hooks/useVersioning'
+import { UpdateProgress } from './UpdateProgress'
+import { describeProgress } from './updateProgressWords'
 
 export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
   workspaceId: string
@@ -28,16 +32,28 @@ export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
   // FalkorDB serving an earlier version of published, complete, while the newer one is written.
   const older = route.main === 'falkordb' && !wm.fresh && wm.served != null
   if (!isDraft && route.main === 'falkordb' && !older) return null
+  // How far the newer version is, when the server can say: its percentage and time left. Not for a
+  // fork too far from its parent to lay over it, whose reads its parent's update doesn't move.
+  const progress = !wm.fresh && wm.readsFrom !== 'postgres' && wm.progress
+    && describeProgress(wm.progress).bare ? wm.progress : null
+  // The chip's words, then how far: on one line while there is room, beneath them when there isn't.
+  const said = (words: string) => (progress ? (
+    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+      <span>{words}</span>
+      <UpdateProgress progress={progress} variant="chip" withVersion={false} className="text-ink-secondary" />
+    </span>
+  ) : words)
   // The Business view names no store. FalkorDB serving published is the steady state there, under
   // a draft overlay too, and the header's sync chip says when it is an earlier version; Postgres
   // standing in for it means only that reads are slower for now.
   if (!technical) {
     if (route.main === 'falkordb') return null
     return (
-      <HoverTip className="inline-flex" label="Reads stay correct while it catches up">
-        <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
+      <HoverTip className="inline-flex" label="Reads stay correct while it catches up"
+        detail={progress ? 'They may be slower until then' : undefined}>
+        <span className="flex min-w-0 items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
           <Database className="w-3 h-3" />
-          Catching up — may be slower
+          {progress ? said('Catching up') : 'Catching up — may be slower'}
         </span>
       </HoverTip>
     )
@@ -68,9 +84,9 @@ export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
             ? 'Reads stay correct, only slower, and search does not reach it'
             : 'Reads stay correct, only slower, until then'}
     >
-      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
+      <span className="flex min-w-0 items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
         <Database className="w-3 h-3" />
-        {isDraft ? `${base} · draft overlay` : base}
+        {said(isDraft ? `${base} · draft overlay` : base)}
       </span>
     </HoverTip>
   )

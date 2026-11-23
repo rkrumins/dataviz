@@ -94,15 +94,15 @@ async def test_reviewer_candidates_are_the_members_who_can_approve(test_client, 
 
 
 async def test_the_caller_is_a_candidate_only_where_they_may_approve_what_they_open(
-        test_client, db_session, fake_user):
+        test_client, db_session, fake_user, settings_world):
     await _members(db_session, fake_user)
-    ws = await db_session.get(WorkspaceORM, "ws1")
-    ws.review_self_approval = False
+    settings_world.set("drafts.selfApproval", "workspace", "ws1", False)
+    settings_world.set("drafts.selfApproval", "graph", "ds_open", True)
     db_session.add_all([WorkspaceORM(id="ws2", name="Two"),
                         ProviderORM(id="prov_1", name="Prod graph", provider_type="falkordb")])
     await db_session.flush()
     db_session.add(WorkspaceDataSourceORM(id="ds_open", workspace_id="ws1", provider_id="prov_1",
-                                          graph_name="g_open", label="Open", review_self_approval=True))
+                                          graph_name="g_open", label="Open"))
     db_session.add(WorkspaceDataSourceORM(id="ds_else", workspace_id="ws2", provider_id="prov_1",
                                           graph_name="g_else", label="Elsewhere"))
     await db_session.commit()

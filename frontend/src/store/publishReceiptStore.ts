@@ -14,8 +14,9 @@ import { create } from 'zustand'
 import type { ChangeCounts } from '@/features/versioning/model/changeModel'
 
 export interface PublishReceipt {
-  /** The squash commit that landed on main — the drill-down target. Null when nothing was
-   *  committed: main held the changes already (`outcome` unchanged). */
+  /** The squash commit that landed on main — the drill-down target. When nothing was committed
+   *  (`outcome` unchanged: main held the changes already), main's head, which holds them, and not a
+   *  drill-down target. Null only from an older server's blank answer. */
   commitId: string | null
   /** What it did to main; `unchanged`: nothing new was published. */
   outcome?: 'published' | 'unchanged'

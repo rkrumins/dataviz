@@ -109,13 +109,13 @@ describe('the workspace page tabs', () => {
 
     it('shows a viewer only what a viewer uses', () => {
         renderPage('/workspaces/ws1')
-        expect(tabNames()).toEqual(['Overview', 'Views', 'Data', 'Reviews'])
+        expect(tabNames()).toEqual(['Overview', 'Views', 'Data', 'Reviews', 'Versioned graphs'])
     })
 
     it('adds People, Activity and Settings for a workspace admin', () => {
         for (const p of ['workspace:admin', 'workspace:members:add', 'workspace:datasource:manage']) granted.add(p)
         renderPage('/workspaces/ws1')
-        expect(tabNames()).toEqual(['Overview', 'Views', 'Data', 'Reviews', 'People', 'Activity', 'Settings'])
+        expect(tabNames()).toEqual(['Overview', 'Views', 'Data', 'Reviews', 'Versioned graphs', 'People', 'Activity', 'Settings'])
     })
 
     it.each([

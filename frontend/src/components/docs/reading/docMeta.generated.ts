@@ -329,7 +329,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {
-    "updated": "2026-11-05",
+    "updated": "2026-11-22",
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
@@ -409,7 +409,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
   "editing-in-a-draft": {
-    "updated": "2026-11-21",
+    "updated": "2026-11-22",
     "path": "docs/guide/EDITING_IN_A_DRAFT.md"
   },
   "review-center": {
@@ -471,6 +471,10 @@ export const guideMeta: Record<string, DocMeta> = {
   "rollup-capacity": {
     "updated": "2026-11-01",
     "path": "docs/guide/ROLLUP_CAPACITY.md"
+  },
+  "versioned-graph-settings": {
+    "updated": "",
+    "path": "docs/guide/VERSIONED_GRAPH_SETTINGS.md"
   },
   "ways-of-working": {
     "updated": "2026-11-01",

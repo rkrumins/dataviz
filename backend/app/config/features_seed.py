@@ -782,8 +782,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "evicted graph reads from Postgres, more slowly, until it is loaded again when it is "
             "needed, and loads wait for room on their master. Every FalkorDB master needs a "
             "maxmemory, and every pod must run this release first. The values are under Admin → "
-            "Infrastructure → Versioned graphs → Residency & eviction. Turning it off brings "
-            "graphs back as memory allows."
+            "Versioned graphs → Settings → Memory & residency. Turning it off brings graphs back "
+            "as memory allows."
         ),
         "category_id": "lineage",
         "type": "boolean",
@@ -795,10 +795,48 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "admin_hint": (
             "Graph residency needs Version control on. Before turning it on, give every FalkorDB "
             "master a maxmemory and run this release on every pod, and set the classes and values "
-            "you want under Admin → Infrastructure → Versioned graphs. Each change of this switch, "
-            "the grace period, and every eviction and load are recorded in the activity log."
+            "you want under Admin → Versioned graphs → Settings → Memory & residency. Each change "
+            "of this switch, the grace period, and every eviction and load are recorded in the "
+            "activity log."
         ),
         "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "candidateKeysEnabled",
+        "name": "New-version builds",
+        "description": (
+            "A large publish, rebuild or move builds the graph's next version in a second FalkorDB "
+            "key while the current one keeps serving, then switches readers to it. Needs Version "
+            "control."
+        ),
+        "impact_when_off": (
+            "Every change is written into the key that serves reads, as before: during a large "
+            "import, readers may see the graph partly updated. Builds that haven't started copying "
+            "are cancelled and their changes are written in place; builds already copying finish."
+        ),
+        "impact_when_on": (
+            "A publish that changes more rows than the threshold, and rebuilds and moves of "
+            "platform-owned keys, are built in a second key: readers keep the current version, "
+            "complete, until the new one is checked and switched to. A copy needs room on its node "
+            "for a second copy of the graph; with no room the build waits, or is seeded from "
+            "Postgres elsewhere. The settings are under Admin → Versioned graphs → Settings → "
+            "New-version builds."
+        ),
+        "category_id": "lineage",
+        "type": "boolean",
+        # OFF by default: a build doubles a graph's memory on its node while it runs, so a
+        # deployment opts in once its FalkorDB has the room and every pod runs this release.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": "/docs/versioning-projection-and-cache",
+        "admin_hint": (
+            "New-version builds needs Version control on. Check that FalkorDB has room for a "
+            "second copy of your largest graphs, and set the threshold and room under Admin → "
+            "Versioned graphs → Settings → New-version builds, and the pacing under Updates & "
+            "loading. Each build's steps, switches and failures are recorded in the activity log."
+        ),
+        "sort_order": 5,
         "deprecated": False,
     },
     {

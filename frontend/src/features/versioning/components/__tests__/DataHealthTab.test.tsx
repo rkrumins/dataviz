@@ -199,6 +199,33 @@ describe('DataHealthTab', () => {
     expect(screen.getByText(/Rebuilt and verified — 40 items and 12 connections checked/)).toBeInTheDocument()
   })
 
+  it('follows a rebuild built beside the key to its switch, the graph in sync throughout', () => {
+    // Read mode beside: the graph stays idle and in sync while the new copy is built, so the
+    // status alone never said it was running, and the watch never ended.
+    const building = { id: 'build_1', step: 'seeding' as const, reason: 'rebuild' as const, rebuild: 'operator' as const }
+    watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', candidate: building }
+    rebuildMutate.mockImplementation((_v: unknown, opts: any) =>
+      opts?.onSuccess?.({ started: true, alreadyRunning: false, beside: true, watermark }))
+    const { rerender } = renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild fast read layer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }))
+    expect(screen.getByText(/Rebuilding in a new copy… everyone keeps the current version/)).toBeInTheDocument()
+
+    // Poll ticks: still building — still running, however many ticks.
+    for (const step of ['seeding', 'catching_up', 'switching'] as const) {
+      watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', candidate: { ...building, step } }
+      rerender(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
+      expect(screen.getByText(/Rebuilding in a new copy/)).toBeInTheDocument()
+    }
+    expect(reconcileMutate).not.toHaveBeenCalled()
+
+    // Switched: no build, in sync — done, and verified.
+    watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', candidate: null }
+    rerender(<DataHealthTab wsId="ws1" graphId="g1" canManage />)
+    expect(reconcileMutate).toHaveBeenCalledWith({ deep: false }, expect.anything())
+    expect(screen.getByText(/Rebuilt and verified — 40 items and 12 connections checked/)).toBeInTheDocument()
+  })
+
   it('lands on a terminal failed state with the recorded reason and a working Retry', () => {
     const { rerender } = renderTab()
     fireEvent.click(screen.getByRole('button', { name: 'Rebuild fast read layer' }))

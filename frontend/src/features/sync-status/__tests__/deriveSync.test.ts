@@ -115,3 +115,58 @@ it('shortens a revision id for display', () => {
   expect(shortRevision(rev.commitId)).toBe('cmt_01M3AH4A…')
   expect(shortRevision('cmt_1')).toBe('cmt_1')
 })
+
+describe('deriveSync — what readers get while a newer version lands', () => {
+  it('says a graph read "always the latest" shows the newest version from the system of record, by choice', () => {
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: null, readMode: 'latest' }), NOW)
+    expect(v).toMatchObject({ tone: 'busy', chip: 'Latest #11 · read from the database',
+      headline: 'Showing the newest version from the system of record while the graph updates' })
+    const graph = v.lanes[1]
+    expect(graph.lines.join(' ')).toMatch(/always shows the newest version/)
+    expect(graph.lines.join(' ')).not.toMatch(/until it catches up/)
+  })
+
+  it('says, updating in place, that parts of the new version can show before the rest', () => {
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, readMode: 'in_place' }), NOW)
+    expect(v.chip).toBe('Showing #9 · writing #11')
+    expect(v.lanes[1].lines.join(' ')).toMatch(/Parts of version #11 can show before the rest of it is written/)
+    const beside = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, readMode: 'beside' }), NOW)
+    expect(beside.lanes[1].lines.join(' ')).not.toMatch(/Parts of version/)
+  })
+
+  it('goes by the mode in force: switch when ready chosen with New-version builds off is written in place', () => {
+    const buildsOff = [{ code: 'builds_off', text: 'New-version builds is off', fix: { feature: 'candidateKeysEnabled', to: true } }]
+    const chosen = { readMode: 'in_place' as const, readModeDeclared: 'beside' as const, readModeSource: 'workspace' as const, readModeWhy: buildsOff }
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, ...chosen }), NOW)
+    expect(v.chip).toBe('Showing #9 · writing #11')
+    expect(v.lanes[1].lines.join(' ')).toMatch(/Parts of version #11 can show before the rest of it is written/)
+    // A build left from before builds went off is not one views wait for: the change is written in place.
+    const left = deriveSync(versioned({ projected: 9, fresh: false, status: 'idle', served: 9, ...chosen,
+      candidate: { step: 'catching_up', seq: 10, attempts: 0 } }), NOW)
+    expect(left.headline).toBe('Showing an earlier version while the graph updates')
+    expect(left.lanes[1].lines.join(' ')).not.toMatch(/built beside it/)
+  })
+
+  it('says, switching when ready, that views show exactly one version while the next is built beside it', () => {
+    const building = (candidate: NonNullable<NonNullable<SyncStatus['versioned']>['candidate']>) =>
+      deriveSync(versioned({ projected: 9, fresh: false, status: 'idle', served: 9, readMode: 'beside', candidate }), NOW)
+    const v = building({ step: 'catching_up', seq: 10, attempts: 0 })
+    expect(v).toMatchObject({ tone: 'busy', chip: 'Showing #9 · building #11',
+      headline: 'Building the new version beside the one views show' })
+    expect(v.lanes[1].lines.join(' ')).toMatch(/exactly version #9 while version #11 is built beside it and checked, then all switch to it at once/)
+    expect(v.detail).toMatch(/until version #11 is built and checked beside it, then switch to it at once/)
+    expect(building({ step: 'copying' }).chip).toBe('Showing #9 · copying to build #11')
+    // Seeded from the system of record instead of copied: said, with how far it has written.
+    const seeding = building({ step: 'seeding', seq: 0, progress: { done: 30, total: 120 } })
+    expect(seeding.chip).toBe('Showing #9 · preparing to build #11')
+    expect(seeding.lanes[1].progress).toBe(25)
+    expect(building({ step: 'catching_up', progress: { done: 1, total: 2 } }).lanes[1].progress).toBeNull()
+    expect(building({ step: 'switching', seq: 11 }).chip).toBe('Showing #9 · switching to #11')
+    const waiting = building({ step: 'queued', waiting: 'no room for a copy on its node (capacity)' })
+    expect(waiting.chip).toBe('Showing #9 · waiting to build #11')
+    expect(waiting.lanes[1].lines.join(' ')).toMatch(/Waiting: no room for a copy/)
+    const failed = building({ step: 'copying', attempts: 1, error: 'the node went away mid-copy' })
+    expect(failed.tone).toBe('warn')
+    expect(failed.lanes[1].lines.join(' ')).toMatch(/Attempt 1 failed: the node went away mid-copy · trying again/)
+  })
+})

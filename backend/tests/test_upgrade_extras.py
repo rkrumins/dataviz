@@ -49,10 +49,11 @@ def test_the_plan_says_what_an_upgrade_would_do():
     behind = _plan(_below(script, head))
     assert behind["verdict"] == "upgrade" and behind["wouldRun"] == [head]
 
-    # #670's stamp: placed exactly, then everything the heads need that it doesn't have.
-    placed = _plan(["20261116_1200_graph_watch"])
-    assert placed["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
-    have = schema_plan.ancestors(script, ["20261113_1400_gv_ps_candidate"])
+    # Dev's stamp: placed exactly, at what both ways it can have come about ran, then everything the
+    # heads need that it doesn't have.
+    placed = _plan(["20261119_1200_merge_members_set"])
+    assert placed["placement"]["stamps"] == ["20261118_1000_member_sets", "20261119_1100_gv_change_sets"]
+    have = schema_plan.ancestors(script, ["20261118_1000_member_sets", "20261119_1100_gv_change_sets"])
     assert set(placed["wouldRun"]) == {r.revision for r in script.walk_revisions()} - have
     assert placed["wouldRun"][-1] == head                   # ancestors first
 
@@ -119,6 +120,7 @@ def test_the_plan_is_what_the_job_then_does(scratch_db):
     assert _job(scratch_db, "upgrade").returncode == 0
     assert json.loads(_job(scratch_db, "plan", "--json").stdout)["verdict"] == "up_to_date"
 
+    # Behind head, with several lines to run: the last of #670's own.
     _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
     plan = json.loads(_job(scratch_db, "plan", "--json").stdout)
     out = _job(scratch_db, "upgrade")
@@ -257,7 +259,7 @@ def test_the_admin_schema_status_reads_the_database_live(scratch_db, monkeypatch
     assert {"stamped", "ran"} & {h["kind"] for h in status["history"]}
 
     # Another build's stamp: shown, with where the upgrade would place it and what it would run.
-    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261116_1200_graph_watch'")
+    _sql(scratch_db, "UPDATE alembic_version SET version_num = '20261119_1200_merge_members_set'")
     status = schema_status()
-    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261113_1400_gv_ps_candidate"]
+    assert not status["atHead"] and status["plan"]["placement"]["stamps"] == ["20261118_1000_member_sets", "20261119_1100_gv_change_sets"]
     assert status["plan"]["wouldRun"][-1] == head

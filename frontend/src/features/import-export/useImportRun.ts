@@ -43,6 +43,12 @@ export function heldForRows(job: Job | null): boolean {
   return summaryOf(job)?.failure?.code === 'rows_refused'
 }
 
+/** A replace stopped after its first rows, which found almost nothing by its identifier: nothing
+ *  deleted, those rows on the draft. Sent with allowMassDelete, it goes on. */
+export function matchedNothing(job: Job | null): boolean {
+  return summaryOf(job)?.failure?.code === 'identifier_matched_nothing'
+}
+
 /** For a job matched by a property alone whose refused rows have a urn but not the property: the
  *  identifier that finds them by their urn (`prop.<name>,urn`); else null. */
 export function byUrnFix(job: Job | null): string | null {

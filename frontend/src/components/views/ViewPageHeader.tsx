@@ -85,6 +85,7 @@ import {
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ViewReviewsButton } from '@/features/versioning/components/ViewReviewsButton'
+import { GraphWatchButton } from '@/features/versioning/components/WatchButtons'
 import { ViewPrIndicator } from '@/features/versioning/components/ViewPrIndicator'
 import { useViewPrCounts } from '@/features/versioning/hooks/useVersioning'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
@@ -813,6 +814,17 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         none), so it must not get a route into it either. */}
                     {!readOnly && (
                         <ViewReviewsButton
+                            workspaceId={view.workspaceId}
+                            dataSourceId={view.dataSourceId ?? null}
+                            viewId={view.id}
+                            className={actionButtonClass}
+                        />
+                    )}
+
+                    {/* Watching the graph behind the view: for anyone who reads it, in either
+                        view of the product — news of a publish is not a technical matter. */}
+                    {!readOnly && (
+                        <GraphWatchButton
                             workspaceId={view.workspaceId}
                             dataSourceId={view.dataSourceId ?? null}
                             viewId={view.id}

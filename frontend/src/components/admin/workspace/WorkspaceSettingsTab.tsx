@@ -2,27 +2,28 @@
  * WorkspaceSettingsTab — how this workspace behaves, in one place.
  *
  * These used to sit above the data-source grid for everyone who opened the
- * workspace — node-identity defaults (`urn` / `name` inheritance), the drafts
- * and reviews policy, drafts whose owner left — so a reader came for their
+ * workspace — node-identity defaults (`urn` / `name` inheritance), drafts whose
+ * owner left — so a reader came for their
  * views and met configuration first. They are the business of the people who
  * run the workspace, so they live here, each with a sentence saying what it
- * decides; each block still decides for itself who may change it.
+ * decides; each block still decides for itself who may change it. How drafts and
+ * reviews work is set on the Versioned graphs tab, with the rest of its settings.
  */
 import type { ComponentType, ReactNode } from 'react'
 import { Fingerprint, GitPullRequestArrow } from 'lucide-react'
 import { WorkspaceNodeIdentityDefaults } from './WorkspaceNodeIdentityDefaults'
-import { WorkspaceDraftsPolicy } from './WorkspaceDraftsPolicy'
 import { DraftsWhoseOwnerLeft } from './DraftsWhoseOwnerLeft'
 
 export function WorkspaceSettingsTab({
-    wsId, identityProperty, nameProperty, canEditIdentity, canEditPolicy, versioningEnabled, onSaved,
+    wsId, identityProperty, nameProperty, canEditIdentity, versioningEnabled, onOpenVersionedGraphs, onSaved,
 }: {
     wsId: string
     identityProperty?: string | null
     nameProperty?: string | null
     canEditIdentity: boolean
-    canEditPolicy: boolean
     versioningEnabled: boolean
+    /** Opens the Versioned graphs tab, where drafts and reviews are set. */
+    onOpenVersionedGraphs?: () => void
     onSaved: () => void
 }) {
     return (
@@ -45,9 +46,14 @@ export function WorkspaceSettingsTab({
                 <SettingsGroup
                     icon={GitPullRequestArrow}
                     title="Drafts and reviews"
-                    description="Whether new drafts start private or public, and who may approve and merge a review — and drafts left behind by people who have gone."
+                    description="Drafts left behind by people who have gone, to hand on."
                 >
-                    <WorkspaceDraftsPolicy wsId={wsId} canEdit={canEditPolicy} />
+                    <p className="text-xs text-ink-muted leading-relaxed">
+                        Whether new drafts start private or public, and who may approve and merge a review, is set on{' '}
+                        {onOpenVersionedGraphs
+                            ? <button type="button" onClick={onOpenVersionedGraphs} className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Versioned graphs</button>
+                            : 'Versioned graphs'}.
+                    </p>
                     <DraftsWhoseOwnerLeft wsId={wsId} />
                 </SettingsGroup>
             )}

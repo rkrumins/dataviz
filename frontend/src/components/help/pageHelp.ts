@@ -37,6 +37,7 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/admin/infrastructure', slugs: ['governance-ops', 'rollup-capacity'] },
   { path: '/admin/redis', slugs: ['governance-ops'] },
   { path: '/admin/graph-store', slugs: ['graph-store-topology', 'rollup-capacity'] },
+  { path: '/admin/versioned-graphs', slugs: ['versioned-graph-settings'] },
   { path: '/admin/branding', slugs: ['governance-ops'] },
   { path: '/admin/features', slugs: ['feature-switches'] },
   { path: '/admin/users', slugs: ['users-access'] },

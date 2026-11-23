@@ -4,12 +4,17 @@
  * the graph holds that history doesn't). The watermark and placement hooks and the projection
  * mutations are mocked; the actions only render when the caller says the viewer may manage, and
  * Bring into history only when it also passes the data source, for a viewer who may publish.
+ * What readers get is the read mode in force: where it was chosen, or what was chosen, where and
+ * why it isn't in force; the watermark's when it says why, else the settings' answer for the graph
+ * (the settings hooks are mocked too; labels come from the registry's generated catalogue).
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { DriftReport, Watermark } from '@/services/versioningApiService'
 import type { GraphPlacementResponse } from '@/services/graphStoreService'
+import { CATALOGUE } from '@/components/settings/catalogue'
+import { SettingsRequestError } from '@/services/settingsService'
 
 const notify = vi.fn()
 const reconcileMutate = vi.fn()
@@ -20,6 +25,8 @@ const refetch = vi.fn()
 let wmQ: { data?: Watermark; isLoading: boolean; isError: boolean }
 let placementQ: { data?: GraphPlacementResponse; isLoading: boolean; isError: boolean }
 const placementCalls: Array<string | null> = []
+let settingsQ: { data?: { values: Record<string, unknown> }; error?: unknown }
+const settingsAsked: Array<{ enabled?: boolean }> = []
 
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('../../hooks/useVersioning', () => ({
@@ -27,6 +34,14 @@ vi.mock('../../hooks/useVersioning', () => ({
   useReconcileProjection: () => ({ mutate: reconcileMutate, isPending: false }),
   useRebuildProjection: () => ({ mutate: rebuildMutate, isPending: false }),
   useBringIntoHistory: () => ({ mutate: bringMutate, isPending: false }),
+}))
+vi.mock('@/services/settingsService', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/settingsService')>(),
+  useSettingsSchema: () => ({ data: CATALOGUE }),
+  useSettingsValues: (_place: unknown, opts: { enabled?: boolean } = {}) => {
+    settingsAsked.push(opts)
+    return { data: undefined, error: null, ...settingsQ }
+  },
 }))
 vi.mock('@/components/admin/shared/useGraphStoreTopology', () => ({
   useGraphPlacementByGraph: (graphId: string | null) => {
@@ -82,6 +97,8 @@ beforeEach(() => {
   bringMutate.mockReset()
   refetch.mockReset()
   placementCalls.length = 0
+  settingsAsked.length = 0
+  settingsQ = {}
   wmQ = { data: { ...WM }, isLoading: false, isError: false }
   placementQ = { data: PLACEMENT, isLoading: false, isError: false }
 })
@@ -208,7 +225,17 @@ describe('ProjectionHealthCard', () => {
     expect(screen.getByText(/No data is lost/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Rebuild now' }))
     expect(rebuildMutate).toHaveBeenCalled()
-    expect(notify).toHaveBeenCalledWith('info', expect.stringMatching(/rebuild started/i))
+    expect(notify).toHaveBeenCalledWith('info', 'Rebuild started.')
+  })
+
+  it('says a rebuild built in a new copy keeps everyone on the current version until it switches', () => {
+    rebuildMutate.mockImplementation((_v: unknown, opts: { onSuccess: (r: unknown) => void }) =>
+      opts.onSuccess({ started: true, alreadyRunning: false, beside: true, watermark: WM }))
+    renderCard(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild now' }))
+    expect(notify).toHaveBeenCalledWith('info',
+      'Rebuild started in a new copy. Everyone keeps the current version until it is checked and switched to.')
   })
 
   it('says what a rebuild of the customer\'s own graph changes, and what it leaves', () => {
@@ -272,5 +299,56 @@ describe('ProjectionHealthCard', () => {
     wmQ.data = { ...CUSTOMER }
     renderCard(true, 'ds1')
     expect(screen.queryByRole('button', { name: 'Bring into history' })).not.toBeInTheDocument()
+  })
+
+  describe('what readers get', () => {
+    const READS = CATALOGUE.settings.find((x) => x.key === 'reads.mode')!
+    const title = (id: string) => READS.choices.find((c) => c.id === id)!.title
+    const buildsOff = CATALOGUE.why.builds_off!.text
+    const readers = () => screen.getByText('Readers get').nextElementSibling as HTMLElement
+
+    it('shows the mode in force, and what was chosen, where and why, from a watermark that says why', () => {
+      wmQ.data = { ...WM, readMode: 'in_place', readModeDeclared: 'beside', readModeSource: 'graph',
+        readModeWhy: [{ code: 'builds_off', text: buildsOff, fix: null }] }
+      renderCard()
+      expect(readers()).toHaveTextContent(title('in_place'))
+      expect(screen.getByText(`Chosen: ${title('beside')}`).parentElement).toHaveTextContent('From This graph')
+      expect(screen.getByText(buildsOff)).toBeInTheDocument()
+      expect(settingsAsked.every((o) => o.enabled === false)).toBe(true)
+    })
+
+    it('says where the mode was chosen when it is the one in force', () => {
+      wmQ.data = { ...WM, readMode: 'latest', readModeDeclared: 'latest', readModeSource: 'workspace', readModeWhy: [] }
+      renderCard()
+      // The mode's promise is read out to a screen reader with it, where the pointer gets a tip.
+      const promise = READS.choices.find((c) => c.id === 'latest')!.promise
+      expect(readers()).toHaveTextContent(`${title('latest')}: ${promise}From This workspace`)
+      expect(screen.queryByText(/^Chosen:/)).not.toBeInTheDocument()
+    })
+
+    it('asks the settings for the graph while the watermark doesn’t say why', () => {
+      // An older watermark sends the mode chosen; the settings say it updates in place while builds are off.
+      wmQ.data = { ...WM, readMode: 'beside', readModeSource: 'workspace' }
+      settingsQ = { data: { values: { 'reads.mode': { key: 'reads.mode', effective: 'in_place', declared: 'beside', source: 'workspace',
+        status: 'adjusted', why: [{ code: 'builds_off', text: buildsOff, fix: null }] } } } }
+      renderCard()
+      expect(settingsAsked.some((o) => o.enabled === true)).toBe(true)
+      expect(readers()).toHaveTextContent(title('in_place'))
+      expect(screen.getByText(`Chosen: ${title('beside')}`).parentElement).toHaveTextContent('From This workspace')
+      expect(screen.getByText(buildsOff)).toBeInTheDocument()
+    })
+
+    it('says a fork reads as the graph it was forked from', () => {
+      wmQ.data = { ...WM, readMode: 'latest' }
+      settingsQ = { error: new SettingsRequestError('A fork follows its root graph’s settings', { status: 409, type: 'follows_root' }) }
+      renderCard()
+      expect(readers()).toHaveTextContent('The same as the graph it was forked from')
+    })
+
+    it('says "—" and why when the settings can’t be read', () => {
+      settingsQ = { error: new SettingsRequestError('The settings store couldn’t be read', { status: 500 }) }
+      renderCard()
+      expect(readers()).toHaveTextContent('Couldn’t be read: The settings store couldn’t be read')
+    })
   })
 })

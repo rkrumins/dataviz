@@ -16,12 +16,13 @@
  * trash and back. On a fork's own tab, the fork strip sits at the top.
  * Its header says when editing is paused, and someone who both publishes and manages pauses or
  * resumes it, naming the revision they saw.
- * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
- * data source's own; a workspace admin overrides one or goes back to the workspace's, and only
- * those are sent. Anyone else reads it.
- * Its Imports section shows the graph's import settings (ImportSettingsFields has its own spec), and
- * a workspace admin's change is saved for this graph.
- * The data hooks are stubbed; the card itself has its own spec.
+ * Its Settings section summarises the graph's settings and opens all of them in the graph's
+ * settings drawer (GraphSettingsSummary has its own spec); it replaces the separate drafts-and-
+ * reviews and imports blocks, which are no longer on the tab.
+ * Its header says what changed since you last looked (DigestChip), which opens the list of it
+ * (DigestSheet), with no comparison here: there is no canvas. A watcher's notification opens the tab
+ * with the list showing (`whatsnew=1`), and closing it takes that off the address.
+ * The data hooks are stubbed; the cards themselves have their own specs.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -29,7 +30,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 let canManage = true
 let canPublish = true
-let isAdmin = true
 let forksOn = true
 let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
@@ -48,14 +48,9 @@ const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPr
 const freezeMutate = vi.fn()
 let freezeError: Error | null
 let commitLog: { commits: Array<Record<string, unknown>>; userNames?: Record<string, string>; apiKeyNames?: Record<string, string> }
-let dsPolicy: Record<string, unknown> | undefined
-const policyPut = vi.fn()
-let importSettings: Record<string, unknown> | undefined
-const importsPut = vi.fn()
-const useSetImportSettings = vi.fn((..._args: unknown[]) => ({ mutateAsync: importsPut, isPending: false }))
 
 vi.mock('@/store/auth', () => ({
-  usePermission: (p: string) => (p === 'workspace:admin' ? isAdmin : p.endsWith(':publish') ? canPublish : canManage),
+  usePermission: (p: string) => (p.endsWith(':publish') ? canPublish : canManage),
 }))
 vi.mock('@/store/features', () => ({ useFeature: (key: string) => (key === 'forksEnabled' ? forksOn : true) }))
 vi.mock('../ForkDialog', () => ({
@@ -89,12 +84,6 @@ vi.mock('../../hooks/useVersioning', () => ({
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
   useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
-  useDataSourceDraftsPolicy: () => ({ data: dsPolicy }),
-  useSetDataSourceDraftsPolicy: () => ({ mutateAsync: policyPut, isPending: false }),
-}))
-vi.mock('@/features/import-export/useImportSettings', () => ({
-  useImportSettings: () => ({ data: importSettings }),
-  useSetImportSettings: (...args: unknown[]) => useSetImportSettings(...args),
 }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/versioningApiService')>(),
@@ -110,6 +99,25 @@ vi.mock('@/features/reviews/components/PrListRow', () => ({
   PrListRow: ({ pr }: { pr: { title: string } }) => <div>{pr.title}</div>,
 }))
 vi.mock('@/features/reviews/components/PrDetailDrawer', () => ({ PrDetailDrawer: () => null }))
+vi.mock('../GraphSettingsSummary', () => ({
+  GraphSettingsSummary: ({ wsId, graphId, label }: { wsId: string; graphId: string; label?: string }) =>
+    <div data-testid="settings-summary" data-ws={wsId} data-graph={graphId} data-label={label ?? ''} />,
+}))
+vi.mock('../DigestChip', () => ({
+  DigestChip: ({ graphId, onOpen }: { graphId: string; onOpen: () => void }) =>
+    <button type="button" data-graph={graphId} onClick={onOpen}>3 new versions since your last visit</button>,
+}))
+vi.mock('../DigestSheet', () => ({
+  DigestSheet: ({ open, graphId, mainBranchId, onOpenChange, onCompare }: {
+    open: boolean; graphId: string; mainBranchId: string | null
+    onOpenChange: (open: boolean) => void; onCompare?: unknown
+  }) => open ? (
+    <div role="dialog" aria-label="Since your last visit" data-graph={graphId} data-main={mainBranchId ?? ''}
+      data-compare={String(!!onCompare)}>
+      <button type="button" onClick={() => onOpenChange(false)}>Close</button>
+    </div>
+  ) : null,
+}))
 vi.mock('../ProjectionHealthCard', () => ({
   ProjectionHealthCard: ({ graphId, showActions, dataSourceId }: {
     graphId: string; showActions?: boolean; dataSourceId?: string
@@ -129,7 +137,7 @@ function Where() {
 const renderTab = (dataSourceId = 'ds1') =>
   render(
     <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning']}>
-      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} />
+      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} label="Sales" />
       <Where />
     </MemoryRouter>,
   )
@@ -137,7 +145,6 @@ const renderTab = (dataSourceId = 'ds1') =>
 beforeEach(() => {
   canManage = true
   canPublish = true
-  isAdmin = true
   forksOn = true
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
   resolveError = null
@@ -155,11 +162,6 @@ beforeEach(() => {
   freezeMutate.mockReset()
   freezeError = null
   commitLog = { commits: [] }
-  dsPolicy = undefined
-  policyPut.mockReset().mockResolvedValue({})
-  importSettings = undefined
-  importsPut.mockReset().mockResolvedValue({})
-  useSetImportSettings.mockClear()
 })
 
 describe('DataSourceVersioningTab — projection health', () => {
@@ -482,71 +484,34 @@ describe('DataSourceVersioningTab — forks', () => {
   })
 })
 
-describe('DataSourceVersioningTab — drafts and reviews', () => {
-  beforeEach(() => {
-    dsPolicy = {
-      overrides: { defaultVisibility: null, levels: 'public_only', selfApproval: null, selfMerge: null,
-        requiredApprovals: null, threadsHold: null },
-      workspace: { defaultVisibility: 'private', levels: null, selfApproval: false, selfMerge: null,
-        requiredApprovals: 2, threadsHold: null },
-      effective: {
-        defaultVisibility: 'public', levels: 'public_only', selfApproval: false, selfMerge: true,
-        requiredApprovals: 2, threadsHold: false,
-        sources: { defaultVisibility: 'data_source', levels: 'data_source', selfApproval: 'workspace', selfMerge: 'default' },
-      },
-    }
+describe('DataSourceVersioningTab — settings', () => {
+  it('summarises the graph’s settings, for its drawer named after the data source', () => {
+    renderTab()
+    const summary = screen.getByTestId('settings-summary')
+    expect(summary).toHaveAttribute('data-graph', 'g1')
+    expect(summary).toHaveAttribute('data-ws', 'ws1')
+    expect(summary).toHaveAttribute('data-label', 'Sales')
   })
 
-  it('shows each setting as the workspace’s, naming what it is, or as this data source’s own', () => {
+  it('shows it to everyone: the drawer says who may change what', () => {
+    canManage = false
+    canPublish = false
     renderTab()
-    expect(screen.getByLabelText('New drafts start')).toHaveDisplayValue('Use the workspace’s setting (Private)')
-    expect(screen.getByLabelText('Drafts may be')).toHaveDisplayValue('Public only')
-    expect(screen.getByLabelText('Whoever opens a review may approve it')).toHaveDisplayValue('Use the workspace’s setting (No)')
-    // The workspace sets none: it takes the default.
-    expect(screen.getByLabelText('Whoever opens a review may merge it')).toHaveDisplayValue('Use the workspace’s setting (Yes)')
-    expect(screen.getByLabelText('Approvals a review needs')).toHaveDisplayValue('Use the workspace’s setting (2 approvals)')
-    expect(screen.getByText('Drafts may only be public, so new drafts start public.')).toBeInTheDocument()
+    expect(screen.getByTestId('settings-summary')).toBeInTheDocument()
   })
 
-  it('lets a workspace admin override a setting, or go back to the workspace’s, sending only those', async () => {
+  it('has no separate drafts-and-reviews or imports blocks any more', () => {
     renderTab()
-    fireEvent.change(screen.getByLabelText('Drafts may be'), { target: { value: 'inherit' } })
-    fireEvent.change(screen.getByLabelText('Whoever opens a review may merge it'), { target: { value: 'false' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    await waitFor(() => expect(policyPut).toHaveBeenCalledWith({ levels: 'inherit', selfMerge: false }))
-  })
-
-  it('is read-only to someone who isn’t a workspace admin', () => {
-    isAdmin = false
-    renderTab()
-    expect(screen.getByLabelText('Drafts may be')).toBeDisabled()
-    expect(screen.getByLabelText('New drafts start')).toBeDisabled()
-    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
-  })
-})
-
-describe('DataSourceVersioningTab — imports', () => {
-  const values = { identifier: 'entity_id', replaceMinLive: 1000, replaceDeleteFraction: 0.5,
-    replaceCreateFraction: 0.5, replaceMinMatchFraction: 0.05 }
-
-  it('shows the graph’s import settings and saves an admin’s change for this graph', async () => {
-    importSettings = {
-      dataSourceId: 'ds1', overrides: { identifier: null, replaceMinLive: null, replaceDeleteFraction: null,
-        replaceCreateFraction: null, replaceMinMatchFraction: null },
-      platform: values, effective: { ...values, sources: {} }, replaceGuard: true, followsParent: false,
-      matchingProperties: [], maxMatchingProperties: 10,
-    }
-    renderTab()
-    expect(screen.getByText('Imports')).toBeInTheDocument()
-    expect(useSetImportSettings).toHaveBeenCalledWith('ws1', 'g1')
-    fireEvent.change(screen.getByLabelText('Match existing items by'), { target: { value: 'urn' } })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Save' }).at(-1)!)
-    await waitFor(() => expect(importsPut).toHaveBeenCalledWith({ identifier: 'urn' }))
-  })
-
-  it('is hidden when the settings can’t be read', () => {
-    renderTab()
+    expect(screen.queryByText('Drafts and reviews')).toBeNull()
     expect(screen.queryByText('Imports')).toBeNull()
+    expect(screen.queryByLabelText('Drafts may be')).toBeNull()
+    expect(screen.queryByLabelText('Match existing items by')).toBeNull()
+  })
+
+  it('has no summary while version control is off', () => {
+    resolved = undefined
+    renderTab()
+    expect(screen.queryByTestId('settings-summary')).toBeNull()
   })
 })
 
@@ -570,5 +535,32 @@ describe('DataSourceVersioningTab — recent history', () => {
     expect(screen.getByText('Service account')).toBeInTheDocument()
     expect(screen.getByText('Nightly loader')).toBeInTheDocument()
     expect(screen.getAllByText('Service account')).toHaveLength(1)   // a person by hand: no chip
+  })
+})
+
+
+describe('DataSourceVersioningTab — what changed since you last looked', () => {
+  it('opens from the chip in its header, with no comparison here', () => {
+    renderTab()
+    expect(screen.queryByRole('dialog', { name: 'Since your last visit' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '3 new versions since your last visit' }))
+    const sheet = screen.getByRole('dialog', { name: 'Since your last visit' })
+    expect(sheet).toHaveAttribute('data-graph', 'g1')
+    expect(sheet).toHaveAttribute('data-main', 'b_main')
+    expect(sheet).toHaveAttribute('data-compare', 'false')
+  })
+
+  it('a watcher’s notification opens it, and closing it takes that off the address', () => {
+    render(
+      <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning&whatsnew=1']}>
+        <DataSourceVersioningTab wsId="ws1" dataSourceId="ds1" label="Sales" />
+        <Where />
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('dialog', { name: 'Since your last visit' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog', { name: 'Since your last visit' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1?ds=ds1&dstab=versioning')
+    expect(screen.getByTestId('where').textContent).not.toContain('whatsnew')
   })
 })

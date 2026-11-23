@@ -64,9 +64,10 @@ The rest lives on tabs. You see only the tabs you can use:
 | **Views** | Oversee every view: visibility, owners, bulk changes and publication requests | Everyone who can open the workspace |
 | **Data** | **Sources** — the graphs that feed this workspace. **Data model** — what changed in their ontologies. **Processing** — how fresh each source's connections are, and rebuilding them. **Trends** — how counts are changing | Everyone who can open the workspace. Adding sources and rebuilding need data-source permission; **Trends** needs a built-in workspace role |
 | **Reviews** | Review merge requests across the workspace's versioned sources | Only while **Version control** is on — it is by default |
+| **Versioned graphs** | Set the defaults this workspace's versioned graphs follow, within the platform's limits; see what each graph sets itself; read every change ([Versioned Graph Settings](/guide/versioned-graph-settings)) | Only while **Version control** is on. Everyone who can open the workspace reads them; workspace admins change them and see their history |
 | **People** | Decide who can get in, with which role, and answer their requests | Workspace admins and stewards, Org Admins and Super Admins |
 | **Activity** | See who ran, changed or granted what in this workspace — when, and why | Workspace admins, Org Admins, Org Auditors and Super Admins |
-| **Settings** | Set how entities are recognised, and how drafts and reviews work | Workspace admins and anyone who manages its data sources |
+| **Settings** | Set how entities are recognised, and hand on drafts whose owner left (how drafts and reviews work is on **Versioned graphs**) | Workspace admins and anyone who manages its data sources |
 
 > **Business or Technical:** the page follows the **Business / Technical** switch
 > at the top of the app. In **Technical** it also shows identifiers, node and edge
@@ -75,7 +76,7 @@ The rest lives on tabs. You see only the tabs you can use:
 > **Older links still work:** a link to a former tab, such as `?tab=aggregation`
 > or `?tab=members`, opens the matching place: **Data → Processing**, or **People**.
 
-> **If you don't see Reviews:** **Version control** is switched off in
+> **If you don't see Reviews or Versioned graphs:** **Version control** is switched off in
 > **Administration → Features** — see [Feature
 > Switches](/guide/feature-switches). **If you don't see People:** you aren't
 > an admin or steward of this workspace.

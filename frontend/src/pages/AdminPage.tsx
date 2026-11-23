@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, KeySquare, Network, History, Palette, Database, LineChart, HardDrive, Bot,
+    UserCog, Users2, KeyRound, KeySquare, Network, History, Palette, Database, LineChart, HardDrive, Bot, GitBranch,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission, usePermissionsReady } from '@/store/auth'
@@ -42,6 +42,7 @@ const adminGroups = [
             { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
             { path: 'redis', label: 'Redis & Graph Store', icon: Database, description: 'Streams, cache & default graph endpoints — auth, TLS, provenance' },
             { path: 'graph-store', label: 'Graph store', icon: HardDrive, description: 'Shards, replicas, memory and where every graph lives' },
+            { path: 'versioned-graphs', label: 'Versioned graphs', icon: GitBranch, description: 'Read modes, memory, builds, drafts and imports — every setting, and every graph' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'telemetry', label: 'Telemetry', icon: LineChart, description: 'Product usage & content gaps' },
@@ -85,6 +86,7 @@ export function AdminPage() {
     const infrastructureVisible = useNavPermission(useAdminSectionSpec('infrastructure'))
     const redisVisible = useNavPermission(useAdminSectionSpec('redis'))
     const graphStoreVisible = useNavPermission(useAdminSectionSpec('graph-store'))
+    const versionedGraphsVisible = useNavPermission(useAdminSectionSpec('versioned-graphs'))
     const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
     const telemetryVisible     = useNavPermission(useAdminSectionSpec('telemetry'))
@@ -102,6 +104,7 @@ export function AdminPage() {
         infrastructure: infrastructureVisible,
         redis:         redisVisible,
         'graph-store': graphStoreVisible,
+        'versioned-graphs': versionedGraphsVisible,
         branding:      brandingVisible,
         features:      featuresVisible,
         telemetry:     telemetryVisible,

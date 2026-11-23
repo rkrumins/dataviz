@@ -95,6 +95,7 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     overview:       { kind: 'perm', perm: 'system:admin' },
     infrastructure: { kind: 'perm', perm: 'system:admin' },
     'graph-store':  { kind: 'perm', perm: 'system:admin' },
+    'versioned-graphs': { kind: 'perm', perm: 'system:admin' },
     branding:      { kind: 'perm', perm: 'system:admin' },
     features:      { kind: 'perm', perm: 'system:admin' },
     telemetry:     { kind: 'perm', perm: 'system:audit:read' },

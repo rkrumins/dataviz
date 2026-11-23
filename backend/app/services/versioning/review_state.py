@@ -143,6 +143,28 @@ def apply_rule(reviewers: Sequence[Mapping], standing_count: int, rule: ReviewRu
             "missing": missing, "status": "approved" if not missing else "pending"}
 
 
+def asked_of(me: str, groups, requests: Sequence[Mapping]) -> List[Mapping]:
+    """The requests of a review that ask ``me``: their own, or a team's they are in (``groups``)."""
+    return [r for r in requests if (r["subject_type"], r["subject_id"]) == ("user", me)
+            or (r["subject_type"] == "group" and r["subject_id"] in groups)]
+
+
+def waits_on(me: str, author: Optional[str], asked: Sequence[Mapping], st: Standing) -> bool:
+    """Whether a live review waits on ``me``, as the review inbox's ``needs_review`` has it: they
+    are ``asked`` (:func:`asked_of`), it isn't theirs (``author``), and a request of theirs still
+    waits for them to review it as it is now. A team's request waits on its members until one of
+    them approves it, since it was asked."""
+    if not asked or author == me:
+        return False
+    by_subject = {(x["type"], x["id"]): x for x in st.reviewers}
+    waiting = [r for r in asked if r["subject_type"] == "user" or not (
+        (g := by_subject.get(("group", r["subject_id"]))) and g["state"] == "approved"
+        and (g["at"] or "") >= (r["requested_at"] or ""))]
+    mine = st.reviewed.get(me)
+    return bool(waiting) and not (mine is not None and st.current(me) and all(
+        (mine["at"] or "") >= (r["requested_at"] or "") for r in waiting))
+
+
 def shown_status(status: str, approval_status: Optional[str]) -> str:
     """A review's status as its approvals leave it: an otherwise mergeable review reads approved
     once its approvals are met, and back to mergeable when they no longer are."""

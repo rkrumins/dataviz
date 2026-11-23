@@ -15,8 +15,12 @@ FalkorDB>=1.7.1,<2
 # renames any of those turns the whole feature into a silent no-op: every
 # read back on the master, no error and no log. The provider's topology
 # line reports the replica share, which is what would show it, but a
-# ceiling is what stops it happening unattended.
-redis>=8.1.0,<9
+# ceiling is what stops it happening unattended. Below 8.2 for now: 8.2 moved
+# ``READ_COMMANDS`` (which tests/test_falkordb_replica_reads.py checks holds no
+# GRAPH command) from ``redis.cluster`` to ``redis.commands.cluster``, and
+# fakeredis 2.40, the newest, breaks on it (``'method_descriptor' object has
+# no attribute '__closure__'``). Lift it once both are moved along.
+redis>=8.1.0,<8.2
 # C parser for every FalkorDB/Redis reply. Without it redis-py parses in pure
 # Python: a 2,000-node trace-closure page spent ~1.2 s parsing ~300k reply
 # lines on the event loop (the event_loop_lag warnings). redis-py picks it up

@@ -9,16 +9,19 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
-    Float,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    PrimaryKeyConstraint,
+    Sequence,
     Text,
     UniqueConstraint,
     and_,
+    func,
     text,
 )
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import relationship
 
 from .engine import Base
@@ -345,6 +348,167 @@ class PlatformSettingsORM(Base):
             f"<PlatformSettings identity={self.identity_property!r} "
             f"name={self.name_property!r}>"
         )
+
+
+# ------------------------------------------------------------------ #
+# setting_values / setting_changes / settings_imports                  #
+# (the settings store: ``backend.app.services.settings.store``)        #
+# ------------------------------------------------------------------ #
+
+#: Every write to ``setting_values`` takes the next number, so a process reloads only the rows
+#: written since it last read (``rev > :last``). ``create_all`` makes both sequences before the
+#: tables. The defaults are spelled ``func.nextval`` / ``func.now`` so the SQLite test harness can
+#: still ``create_all`` (it wraps them in parentheses; Postgres gets them as written).
+_SETTING_VALUES_REV = "setting_values_rev_seq"
+_SETTING_CHANGES_ID = "setting_changes_id_seq"
+Sequence(_SETTING_VALUES_REV, metadata=Base.metadata)
+Sequence(_SETTING_CHANGES_ID, metadata=Base.metadata)
+
+
+class SettingValueORM(Base):
+    """One value chosen for a setting, at one scope.
+
+    Code says what a setting is (``backend.app.config.versioned_graph_settings``); this table
+    holds only what the platform, a workspace or a graph chose. ``scope_id`` is ``''`` for the
+    platform, else the workspace's id, or the data source's id for its versioned graph. ``value``
+    NULL means nothing is chosen here, and the scope above decides: the one marker for "inherit"
+    (``"unlimited"`` and ``"forever"`` are values). ``limits``, on platform rows only, bound what
+    workspace admins may choose below (``allowed``, ``range``, ``lock``); NULL takes the
+    setting's default limits. ``version`` is the value's own, for optimistic concurrency; ``rev``
+    the domain's change counter. Rows are never deleted.
+    """
+
+    __tablename__ = "setting_values"
+
+    domain = Column(Text, nullable=False)
+    key = Column(Text, nullable=False)
+    scope = Column(Text, nullable=False)
+    scope_id = Column(Text, nullable=False)
+    value = Column(JSONB(none_as_null=True), nullable=True)
+    limits = Column(JSONB(none_as_null=True), nullable=True)
+    version = Column(Integer, nullable=False)
+    rev = Column(BigInteger, nullable=False, server_default=func.nextval(_SETTING_VALUES_REV))
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("domain", "key", "scope", "scope_id", name="pk_setting_values"),
+        # A process's reload: what was written since it last read.
+        Index("ix_setting_values_rev", "domain", "rev"),
+        # A workspace's or a graph's own values.
+        Index("ix_setting_values_scope", "domain", "scope", "scope_id"),
+        CheckConstraint("scope IN ('platform','workspace','graph')",
+                        name="ck_setting_values_scope"),
+        CheckConstraint("(scope = 'platform') = (scope_id = '')",
+                        name="ck_setting_values_scope_id"),
+        CheckConstraint("limits IS NULL OR scope = 'platform'",
+                        name="ck_setting_values_limits"),
+    )
+
+
+class SettingChangeORM(Base):
+    """One value's change, before and after (its value and its limits), under the change set of
+    the save it was part of: who, why (``X-Activity-Reason``), and how — ``api``, ``legacy_api``
+    (an old endpoint), ``migration`` (copied from where it was saved before the store) or
+    ``revert``. ``version`` is the value's after the change."""
+
+    __tablename__ = "setting_changes"
+
+    id = Column(BigInteger, primary_key=True, server_default=func.nextval(_SETTING_CHANGES_ID))
+    change_set = Column(UUID(as_uuid=True), nullable=False)
+    domain = Column(Text, nullable=False)
+    key = Column(Text, nullable=False)
+    scope = Column(Text, nullable=False)
+    scope_id = Column(Text, nullable=False)
+    before_value = Column(JSONB(none_as_null=True), nullable=True)
+    after_value = Column(JSONB(none_as_null=True), nullable=True)
+    before_limits = Column(JSONB(none_as_null=True), nullable=True)
+    after_limits = Column(JSONB(none_as_null=True), nullable=True)
+    version = Column(Integer, nullable=False)
+    actor = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    source = Column(Text, nullable=False)
+    at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_setting_changes_set", "change_set"),
+        # History, newest first, of one scope or one setting.
+        Index("ix_setting_changes_scope", "domain", "scope", "scope_id", "id"),
+        Index("ix_setting_changes_key", "domain", "key", "id"),
+        CheckConstraint("source IN ('api','legacy_api','migration','revert')",
+                        name="ck_setting_changes_source"),
+    )
+
+
+class SettingsImportORM(Base):
+    """A one-time import into the settings store that has run, by name, with what it did."""
+
+    __tablename__ = "settings_imports"
+
+    name = Column(Text, primary_key=True)
+    at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    detail = Column(JSONB(none_as_null=True), nullable=True)
+
+
+# ------------------------------------------------------------------ #
+# graph_seen / graph_watches                                           #
+# (what changed since you last looked, and watching: ``graph_digest``) #
+# ------------------------------------------------------------------ #
+
+class GraphSeenORM(Base):
+    """How far one person has looked at a versioned graph: the version of its published line they
+    marked seen, and when. Keyed by the data source (one versioned graph each). The marker only
+    moves forward (``graph_watch_repo.mark_seen``)."""
+
+    __tablename__ = "graph_seen"
+
+    user_id = Column(Text, nullable=False)
+    data_source_id = Column(Text, nullable=False)
+    seen_seq = Column(BigInteger, nullable=False)
+    seen_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "data_source_id", name="pk_graph_seen"),
+    )
+
+
+class GraphWatchORM(Base):
+    """One person watching a versioned graph (``entity_urn`` NULL) or one entity in it (its urn):
+    a publish that changes what they watch tells them in their Inbox. NULLs are distinct to a
+    unique constraint, so ``uq_graph_watches_graph`` holds "the whole graph" to one row."""
+
+    __tablename__ = "graph_watches"
+
+    id = Column(Text, primary_key=True, default=lambda: f"gw_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)
+    data_source_id = Column(Text, nullable=False)
+    entity_urn = Column(Text, nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "data_source_id", "entity_urn", name="uq_graph_watches"),
+        Index("uq_graph_watches_graph", "user_id", "data_source_id", unique=True,
+              postgresql_where=text("entity_urn IS NULL"),
+              sqlite_where=text("entity_urn IS NULL")),
+        # Who to tell when a graph is published.
+        Index("ix_graph_watches_ds", "data_source_id", "entity_urn"),
+    )
+
+
+class GraphWatchToldORM(Base):
+    """How far a watched versioned graph's watchers have been told of the versions its published
+    line gained (``digest.tell_pending``, in the versioning worker): all of them up to
+    ``told_seq``; a round in progress up to ``round_to``, through the watcher ``round_through`` (by
+    user id), saved with each batch it tells. ``told_seq`` NULL: not read yet, so the worker starts
+    it at the graph's head. Keyed by the data source, like ``graph_watches``."""
+
+    __tablename__ = "graph_watch_told"
+
+    data_source_id = Column(Text, primary_key=True)
+    told_seq = Column(BigInteger, nullable=True)
+    round_to = Column(BigInteger, nullable=True)
+    round_through = Column(Text, nullable=True)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
 # ------------------------------------------------------------------ #
@@ -856,14 +1020,16 @@ class WorkspaceDataSourceORM(Base):
     review_required_approvals = Column(Integer, nullable=True)
     review_threads_hold = Column(Boolean, nullable=True)
     # This source's import settings (``backend.app.services.import_settings``): what an import's rows
-    # find their entities by when it names no identifier (``entity_id``, ``urn`` or ``prop.<name>``),
-    # and the replace guard's limits. NULL = the platform's (``GRAPHVER_IMPORT_IDENTIFIER``,
-    # ``IMPORT_REPLACE_*``).
+    # find their entities by when it names no identifier (``entity_id``, ``urn``, ``prop.<name>`` or
+    # ``prop.<name>,urn``), and the replace guard's limits. NULL = the platform's
+    # (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``).
     import_identifier = Column(Text, nullable=True)
     import_replace_min_live = Column(Integer, nullable=True)
-    import_replace_delete_fraction = Column(Float, nullable=True)
-    import_replace_create_fraction = Column(Float, nullable=True)
-    import_replace_min_match_fraction = Column(Float, nullable=True)
+    # DOUBLE_PRECISION, not Float: Postgres stores ``FLOAT`` as double precision and reflection reads
+    # it back so, which ``upgrade verify-schema`` would call a type mismatch.
+    import_replace_delete_fraction = Column(DOUBLE_PRECISION, nullable=True)
+    import_replace_create_fraction = Column(DOUBLE_PRECISION, nullable=True)
+    import_replace_min_match_fraction = Column(DOUBLE_PRECISION, nullable=True)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means

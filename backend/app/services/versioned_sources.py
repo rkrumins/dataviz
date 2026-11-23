@@ -238,8 +238,9 @@ class PinnedGraph:
 
 
 async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
-    """Every versioned graph projected into provider ``provider_id``, or with an old key there a
-    move left waiting to be dropped (``retired_keys``), by graph id.
+    """Every versioned graph projected into provider ``provider_id``, building a new version
+    there (``candidate_provider``), or with an old key there a move left waiting to be dropped
+    (``retired_keys``), by graph id.
 
     The provider guards ask this: deleting a provider strands these graphs, and moving it to
     another server leaves their watermarks describing keys that server does not hold. Trashed
@@ -261,6 +262,7 @@ async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
                    .correlate(GraphORM).exists())
             .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
             .where(or_(ProjectionStateORM.falkor_provider == provider_id,
+                       ProjectionStateORM.candidate_provider == provider_id,
                        ProjectionStateORM.retired_keys.contains([{"provider": provider_id}])))
             .order_by(GraphORM.id)
         )).all()
@@ -284,7 +286,9 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     to a key a move may have dropped. A graph versioned since the set was cached reads its own
     key until the next refresh, which comes before a move can drop that key
     (``RETIRE_GRACE_SECS`` > ``CACHE_TTL_SECS``). With no set at all (graphver down and nothing
-    cached) the source reads its own key. The pin read is uncached, and a failure raises."""
+    cached) the source reads its own key. The pin is the graph's route as of now
+    (``route_cache``: read from Postgres again once a write has moved it), and a failure to read
+    it raises."""
     try:
         # A fork's ``dsfork_…`` source is versioned from its first moment: never waits for the set.
         versioned = (ds_id.startswith("dsfork_")
@@ -295,32 +299,21 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     if not versioned:
         return provider_id, graph_name
 
-    from sqlalchemy import select
-
+    from backend.app.services.versioning import route_cache
     from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
-    from backend.app.services.versioning.db import get_session_factory
-    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
-    async with get_session_factory()() as session:
-        of_source = GraphORM.data_source_id == ds_id
-        if ds_id.startswith("dsfork_"):
-            # A fork has no key of its own to read: its root parent's pin, up a fork of a fork.
-            root, parent = None, await session.scalar(select(GraphORM.fork_parent_graph_id).where(
-                of_source, GraphORM.deleted_at.is_(None)))
-            while parent:
-                root, parent = parent, await session.scalar(
-                    select(GraphORM.fork_parent_graph_id).where(GraphORM.id == parent))
-            of_source = GraphORM.id == root
-        row = (await session.execute(
-            select(GraphORM.id, ProjectionStateORM.falkor_provider,
-                   ProjectionStateORM.falkor_graph_name)
-            .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
-            .where(of_source, GraphORM.deleted_at.is_(None))
-        )).first()
-    if row is None or row[2] in (None, f"gv_{row[0]}"):
+    # Read from Postgres on the route engine, when it is read at all: reads that fill the graph pool
+    # can't stop this lookup, nor every read with it.
+    route = await route_cache.route_of_source(ds_id)
+    if ds_id.startswith("dsfork_"):
+        # A fork has no key of its own to read: its root parent's pin, up a fork of a fork.
+        route = await route_cache.route_of_graph(route.root_id) if route and route.root_id else None
+    if (route is None or route.deleted
+            or route.falkor_graph_name in (None, f"gv_{route.graph_id}")):
         return provider_id, graph_name
-    pin_provider = row[1] if row[1] not in (None, "", DEFAULT_FALKOR_PROVIDER) else provider_id
-    return pin_provider, row[2]
+    pin_provider = (route.falkor_provider if route.falkor_provider not in
+                    (None, "", DEFAULT_FALKOR_PROVIDER) else provider_id)
+    return pin_provider, route.falkor_graph_name
 
 
 def serves_pin(served, pin_provider: Optional[str], pin_name: Optional[str],
@@ -410,6 +403,12 @@ class ProjectorHealth:
     # The version the key holds whole (``projection_state.served_commit_seq``), which a rebuild
     # in place keeps serving; NULL when it holds none, or on a row from before the column.
     served_commit_seq: Optional[int] = None
+    # The read mode its projection state holds (the graph's own until the graphs' values are in
+    # the settings store), its workspace, whose settings it resolves through, and whether its
+    # copy is the platform's (``build_policy.read_mode_for``).
+    read_mode: Optional[str] = None
+    workspace_id: Optional[str] = None
+    platform_copy: bool = False
 
     @property
     def commits_behind(self) -> int:
@@ -483,11 +482,17 @@ class ProjectorHealth:
         """The key serves reads of main a version of it, rollups included (``serving_seq``,
         ``versioning/service.py``): its head, or while it catches up or rebuilds in place, the
         version it last published. Not while it is written from nothing, out of FalkorDB, or past
-        ``GRAPHVER_READ_MAX_LAG``."""
+        the graph's ``reads.maxVersionsBehind`` — nor behind its head at all for a graph read
+        ``latest`` — by its read mode as it resolves from this process's settings, as
+        :func:`projector_health` last refreshed them."""
+        from backend.app.services.versioning import build_policy
         from backend.app.services.versioning.service import serving_seq
 
+        mode = build_policy.read_mode_for(workspace_id=self.workspace_id,
+                                          data_source_id=self.data_source_id,
+                                          platform_copy=self.platform_copy, own=self.read_mode)
         return serving_seq(self.projected_commit_seq or 0, self.main_head_commit_seq or 0,
-                           self.status, self.served_commit_seq) is not None
+                           self.status, self.served_commit_seq, mode.max_lag) is not None
 
     @property
     def current(self) -> bool:
@@ -509,9 +514,18 @@ async def projector_health(
 
     Raises :class:`ProjectorHealthUnavailable` on any failure. There is no
     stale-serving and no fail-open dict — see the exception's docstring.
+
+    Each call also brings this process's versioned-graph settings up to date
+    (``build_policy.resolve``: Redis at most every two seconds), which each
+    graph's :attr:`ProjectorHealth.serving` resolves its read mode from — so a
+    process that reads no route, the aggregation control plane's sweep, still
+    goes by a saved read mode.
     """
     global _health_cache, _health_cache_at
 
+    from backend.app.services.versioning import build_policy
+
+    await build_policy.resolve()
     now = time.monotonic()
     if _health_cache is not None and (now - _health_cache_at) < ttl_secs:
         return _health_cache
@@ -537,6 +551,9 @@ async def projector_health(
                     ProjectionStateORM.falkor_graph_name,
                     ProjectionStateORM.status,
                     ProjectionStateORM.served_commit_seq,
+                    ProjectionStateORM.read_mode,
+                    GraphORM.workspace_id,
+                    ProjectionStateORM.owns_falkor_graph,
                 )
                 .outerjoin(
                     ProjectionStateORM,
@@ -558,10 +575,13 @@ async def projector_health(
                 status=status,
                 checked_at=checked_at,
                 served_commit_seq=None if served is None else int(served),
+                read_mode=read_mode,
+                workspace_id=workspace_id,
+                platform_copy=bool(owned),
             )
             for (
                 ds_id, graph_id, head, projected, last_error, falkor_name,
-                status, served,
+                status, served, read_mode, workspace_id, owned,
             ) in rows
             if ds_id
         }

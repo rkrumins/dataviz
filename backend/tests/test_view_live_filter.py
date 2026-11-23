@@ -28,12 +28,12 @@ ALLOWED = {
     "services/view_transfer/importing.py": 1,
     # What a draft changes in views, which includes the views waiting in it.
     "services/draft_views.py": 2,
-    # A bulk property job's notice names the view its draft was opened from (or its search's),
-    # to the draft's owner: that view may be staged in that draft.
-    "services/versioning/import_export/job_notices.py": 1,
     # A view's library, by id, behind its route's access check: a view staged in a draft keeps
     # its rules on that draft (``branchId``).
     "services/view_library.py": 1,
+    # The view a bulk property job ran on, by id, named in the notice its own owner gets: a view
+    # staged in the job's draft is theirs to see.
+    "services/versioning/import_export/job_notices.py": 1,
 }
 
 

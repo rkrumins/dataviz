@@ -674,10 +674,12 @@ function Done({ name, summary, keptInDraft, wsId, graphId, jobId }: {
     jobId: string | null
 }) {
     const publish = summary?.publish
+    // Why its publish was skipped: a sentence, or the publish route's refusal with its message.
+    const why = typeof publish?.reason === 'string' ? publish.reason : publish?.reason?.message
     const said = keptInDraft
         ? 'It’s in a draft: open it to review the changes, then publish them.'
         : publish?.state === 'skipped'
-            ? `It waits in a draft for you to review: ${publish.reason?.message ?? 'it couldn’t be published by itself.'}`
+            ? `It waits in a draft for you to review: ${why ?? 'it couldn’t be published by itself.'}`
             : publish?.state === 'queued' ? 'It’s being published, and opens as it is in a moment.' : 'It’s published, ready to explore.'
     return (
         <section aria-label="Done" className="space-y-4">

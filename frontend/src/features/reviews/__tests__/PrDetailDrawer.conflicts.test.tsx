@@ -90,8 +90,7 @@ describe('PrDetailDrawer — merge conflicts', () => {
 
     expect(await screen.findByText('Reading 1 entity…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Merge with resolutions/ })).toBeDisabled()
-    // The read starts just after the drawer says so: wait for it rather than race it.
-    await waitFor(() => expect(api.getChangeEntry).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(api.getChangeEntry).toHaveBeenCalledTimes(1))   // read in an effect, after it renders
     expect(api.getChangeEntry).toHaveBeenCalledWith('ws1', 'g1', { branchId: 'br_1' }, 'e2')
     expect(api.getMergeRequestDiff).not.toHaveBeenCalled()
 

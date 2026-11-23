@@ -146,6 +146,8 @@ export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
   // Rebuild lifecycle: 'running' once we've kicked one; terminal 'done' (fresh again after
   // observed progress) or 'failed' (idle + behind, with the recorded reason when there is one).
   const [rebuildPhase, setRebuildPhase] = useState<'idle' | 'running' | 'done' | 'failed'>('idle')
+  // The rebuild is built in a new copy while readers keep the current version (read mode beside).
+  const [beside, setBeside] = useState(false)
   const [failReason, setFailReason] = useState<string | null>(null)
   const [verified, setVerified] = useState<DriftReport | null>(null)
   const sawProgress = useRef(false)
@@ -171,7 +173,10 @@ export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
   // "idle & behind & no reason" polls would only ever count one grace tick.
   useEffect(() => {
     if (rebuildPhase !== 'running' || !wm) return
+    // A rebuild built beside the key that serves (read mode beside) leaves the graph idle and in
+    // sync until it switches: under way while the watermark carries the build.
     const isActive = wm.status === 'projecting' || wm.status === 'rebuilding' || wm.status === 'reseeding'
+      || !!wm.candidate
     if (isActive || wm.fresh === false) sawProgress.current = true
     if (isActive) {
       idleTicks.current = 0
@@ -229,6 +234,7 @@ export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
         setReport(null)
         setVerified(null)
         setFailReason(null)
+        setBeside(res.beside === true)
         sawProgress.current = false
         idleTicks.current = 0
         setRebuildPhase('running')
@@ -525,9 +531,11 @@ export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
         {rebuildPhase === 'running' && (
           <div className="mt-3 flex items-center gap-1.5 text-[12px] font-medium text-ink-muted">
             <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-            {progressPct !== null
-              ? `Rebuilding… ${progressDone.toLocaleString()} of ${progressTotal.toLocaleString()} items`
-              : 'Rebuilding… this can take a few minutes for large models.'}
+            {beside
+              ? 'Rebuilding in a new copy… everyone keeps the current version until it is checked and switched to.'
+              : progressPct !== null
+                ? `Rebuilding… ${progressDone.toLocaleString()} of ${progressTotal.toLocaleString()} items`
+                : 'Rebuilding… this can take a few minutes for large models.'}
           </div>
         )}
         {rebuildPhase === 'done' && (

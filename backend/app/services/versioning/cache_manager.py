@@ -26,7 +26,7 @@ from typing import Awaitable, Callable, List, Optional
 
 from sqlalchemy import select, func, update
 
-from . import config, db, residency_policy
+from . import config, db, residency_policy, route_cache
 from .messaging import get_broker_redis
 from .models import GraphORM, ProjectionStateORM, _now
 from .service import bootstrap_unfinished
@@ -67,9 +67,15 @@ def _evictable() -> tuple:
     is never dropped. Nor is a tombstoned graph's, nor one still at genesis (head ≤ 1: its version
     control is being enabled, is paused, failed, or is being seeded — its key is the data source's
     own graph or a half-built copy, and a reseed from genesis would empty it), nor one whose
-    bootstrap is unfinished. Both subqueries correlate to the projection row being tested."""
+    bootstrap is unfinished, nor one idle between the passes of a window in flight
+    (``window_rows``): dropped, its key would lose the pages written and the version it serves.
+    Nor one building a new version beside its key (``candidate_state``): its readers stay on the
+    serving key until the switch, and the build's key is copied from it. Both subqueries correlate
+    to the projection row being tested."""
     return (
         ProjectionStateORM.status == "idle",
+        ProjectionStateORM.window_rows.is_(None),
+        ProjectionStateORM.candidate_state.is_(None),
         ProjectionStateORM.owns_falkor_graph.is_(True),
         select(1).where(GraphORM.id == ProjectionStateORM.graph_id,
                         GraphORM.deleted_at.is_(None),
@@ -205,6 +211,12 @@ class CacheManager:
             if row is None:
                 return False
             name, provider_id, epoch = row
+            # Each process routes reads by the graph's route as it last read it until the graph's
+            # token moves (route_cache): the key goes only once they have been told.
+            if not await route_cache.announce([graph_id]):
+                await self._put_back(graph_id, epoch, projected)
+                logger.info("not evicting graph %s: its readers could not be told", graph_id)
+                return False
             if reason and await self._read_since(graph_id, epoch, projected):
                 return False
             if name:
@@ -239,6 +251,14 @@ class CacheManager:
             leased = True
         if not leased:
             return False
+        await self._put_back(graph_id, epoch, projected)
+        logger.info("not evicting graph %s: a read took its lease as it was being evicted",
+                    graph_id)
+        return True
+
+    async def _put_back(self, graph_id: str, epoch: int, projected: int) -> None:
+        """Undo an eviction whose key is still there: the graph as it was, while the row is still
+        the eviction's (``epoch``)."""
         async with self._session() as s:
             await s.execute(
                 update(ProjectionStateORM)
@@ -248,9 +268,6 @@ class CacheManager:
                         served_commit_seq=projected or None, evicted_reason=None,
                         epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
                 .execution_options(synchronize_session=False))
-        logger.info("not evicting graph %s: a read took its lease as it was being evicted",
-                    graph_id)
-        return True
 
     async def _retire_later(self, graph_id: str, name: str, provider_id: Optional[str]) -> None:
         """Put a key whose drop failed in the graph's ``retired_keys``, due now, for the retire

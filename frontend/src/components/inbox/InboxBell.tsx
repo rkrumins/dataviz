@@ -368,6 +368,12 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-indigo-500',
         tile: 'bg-indigo-500/10',
     },
+    // A graph you watch, or an entity in it, has a new version.
+    'watch.new_version': {
+        Icon: Eye,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
     // A review you are part of: you were asked to review it, it was
     // approved, sent back for changes, commented on, merged, or closed.
     'review.requested': {

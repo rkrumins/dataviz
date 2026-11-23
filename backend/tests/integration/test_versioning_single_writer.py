@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy import func, select
 
 from backend.app.providers import versioned_write_provider as vwp
-from backend.app.services.versioning import config as vconfig, db, models
+from backend.app.services.versioning import config as vconfig, db, models, route_cache
 from backend.app.services.versioning.models import NodeVersionORM
 from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
 from backend.common.models.graph import GraphEdge, GraphNode
@@ -195,6 +195,8 @@ def primary(monkeypatch):
     monkeypatch.setattr(data_source_repo, "get_data_source_orm", _no_ds)
     monkeypatch.setattr(ContextEngine, "_resolve_ontology", _noop)
     monkeypatch.setattr(GraphVersioningService, "projection_watermark", _fresh)
+    # What routes the read: the graph's route as this process keeps it.
+    monkeypatch.setattr(route_cache.RouteSnapshot, "state", lambda self: _fresh(self, self.graph_id))
 
     async def engine(ds, inner, branch_id=None):
         picked["ds"] = ds
