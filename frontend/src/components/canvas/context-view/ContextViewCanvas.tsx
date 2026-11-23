@@ -168,6 +168,8 @@ import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
+import { CanvasStatusStack } from './CanvasStatusStack'
+import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
 import { keepClearOfDrawer, shiftToClear } from './drawerClearance'
@@ -4429,6 +4431,8 @@ export function ContextViewCanvas({
   // recovers), so it is safe at this component's top level; it is read by JSX
   // only and is in no memo's dependency array.
   const projectionCatchUp = useProjectionCatchUp(dataSourceId, aggregationStaleReason)
+  // A load that came back short, said in this canvas's own status stack.
+  const providerPill = useCanvasProviderPill()
   // The summaries — the connections between collapsed items — the answer
   // lacks, when the source is not simply behind (the banner above says that
   // better): 'missing' when the source has none, or only ones an older
@@ -7286,86 +7290,98 @@ export function ContextViewCanvas({
             />
         )}
 
-        {/* THE CAPSULE — the board narrates while the trace computes (D4).
-            Visible from the FIRST click: the session opens instantly but the
-            overlay only draws once the model holds the focus, and the walk
-            then runs hands-free for as long as the flow is wide. Pointer
-            events only on its own buttons (the board underneath stays
-            interactive), and — like the dock — no AnimatePresence: it
-            unmounts with the trace. Keyed on the focus so a new trace
-            re-arms the finished beat. */}
-        {traceActive && canvasTrace.progress && (
-          <TraceWalkIndicator
-            key={traceSeedKey(canvasTrace.tracedUrns)}
-            // A combined trace is known before anything lands: say what it is.
-            subject={combinedTrace ? tracedLabel ?? undefined : undefined}
-            phase={canvasTrace.progress.phase}
-            nodes={canvasTrace.progress.nodes}
-            flows={canvasTrace.progress.flows}
-            requests={canvasTrace.progress.requests}
-            pending={canvasTrace.progress.pending}
-            error={canvasTrace.progress.error}
-            upCount={overlay.view?.counts.up ?? 0}
-            downCount={overlay.view?.counts.down ?? 0}
-            onCancel={exitCanvasTrace}
-            onContinue={canvasTrace.continuePastCheckpoint}
-            onRetry={canvasTrace.retryWalk}
-          />
-        )}
+        {/* THE TOP OF THE CANVAS — one status stack (CanvasStatusStack): the
+            banners, then what the canvas is showing, in flow; what it is doing
+            floats just below. Each lane most important first. Everything here
+            used to place itself, and any two of them could cover each other or
+            slide under the columns. */}
+        <CanvasStatusStack
+          notices={<>
+            {/* A load that came back short, over data still on screen —
+                from CanvasRouter, which holds its retry. First: it is about
+                everything else on the board. */}
+            {providerPill}
 
-        {/* Narrowed — the canvas shows part of the view, and says so for as
-            long as it does. Same top slot as the trace capsule and the connect
-            pill, which win it while they are up: a trace is then what is read,
-            and connecting is a moment. */}
-        {narrowEnabled && narrowApplied && !traceActive && narrowViewId
-          && !(canvasWritable && (edgeConnect.state.mode === 'armed' || (edgeConnect.state.mode === 'idle' && edgeConnect.state.tool))) && (
-          <NarrowChip
-            applied={narrowApplied}
-            onEdit={() => openNarrow({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })}
-            onClear={clearNarrow}
-            link={canShareNarrow(narrowApplied.spec) ? () => narrowLink(narrowApplied.spec, narrowApplied.seedsLabel) : undefined}
-            onRetry={() => { void narrowNow(narrowApplied) }}
-            onSaveAsView={canSaveAsView
-              ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
-              : undefined}
-          />
-        )}
+            {/* Narrowed — the canvas shows part of the view, and says so for as
+                long as it does, connecting included: the canvas is still
+                narrowed then. Not during a trace, which draws its own picture
+                rather than the narrowed one. */}
+            {narrowEnabled && narrowApplied && !traceActive && narrowViewId && (
+              <NarrowChip
+                applied={narrowApplied}
+                onEdit={() => openNarrow({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })}
+                onClear={clearNarrow}
+                link={canShareNarrow(narrowApplied.spec) ? () => narrowLink(narrowApplied.spec, narrowApplied.seedsLabel) : undefined}
+                onRetry={() => { void narrowNow(narrowApplied) }}
+                onSaveAsView={canSaveAsView
+                  ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
+                  : undefined}
+              />
+            )}
+          </>}
+          activity={<>
+            {/* THE CAPSULE — the board narrates while the trace computes (D4).
+                Visible from the FIRST click: the session opens instantly but the
+                overlay only draws once the model holds the focus, and the walk
+                then runs hands-free for as long as the flow is wide. Pointer
+                events only on its own buttons (the board underneath stays
+                interactive), and — like the dock — no AnimatePresence: it
+                unmounts with the trace. Keyed on the focus so a new trace
+                re-arms the finished beat. */}
+            {traceActive && canvasTrace.progress && (
+              <TraceWalkIndicator
+                key={traceSeedKey(canvasTrace.tracedUrns)}
+                // A combined trace is known before anything lands: say what it is.
+                subject={combinedTrace ? tracedLabel ?? undefined : undefined}
+                phase={canvasTrace.progress.phase}
+                nodes={canvasTrace.progress.nodes}
+                flows={canvasTrace.progress.flows}
+                requests={canvasTrace.progress.requests}
+                pending={canvasTrace.progress.pending}
+                error={canvasTrace.progress.error}
+                upCount={overlay.view?.counts.up ?? 0}
+                downCount={overlay.view?.counts.down ?? 0}
+                onCancel={exitCanvasTrace}
+                onContinue={canvasTrace.continuePastCheckpoint}
+                onRetry={canvasTrace.retryWalk}
+              />
+            )}
 
-        {/* Connect mode — what a click-to-connect is waiting for, and the way
-            out. Same top slot as the trace capsule: the two never coexist
-            (a trace makes the canvas read-only). */}
-        {canvasWritable && (edgeConnect.state.mode === 'armed' || (edgeConnect.state.mode === 'idle' && edgeConnect.state.tool)) && (
-          <ConnectModePill
-            phase={edgeConnect.state.mode === 'armed' ? 'armed' : 'tool'}
-            sourceLabel={(() => {
-              const id = edgeConnect.state.sourceId
-              if (!id) return null
-              const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
-              return (n?.data?.label as string) || null
-            })()}
-            sourceCount={edgeConnect.state.sourceIds.length}
-            targetCount={edgeConnect.state.targets.length}
-            nudge={edgeConnect.state.nudge}
-            tool={edgeConnect.state.tool}
-            onLinkTargets={() => edgeConnect.commitTargets()}
-            onClearTargets={edgeConnect.clearTargets}
-            onCancel={edgeConnect.cancel}
-            onExitTool={() => edgeConnect.setTool(false)}
-            onSearchTarget={() => {
-              // The keyboard path: the same link, its target chosen from a searchable list.
-              const id = edgeConnect.state.sourceId
-              if (!id) return
-              const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
-              edgeConnect.cancel()
-              useCreateLinkStore.getState().open({
-                sourceUrn: (n?.data?.urn as string) || id,
-                anchor: { x: Math.round(window.innerWidth / 2) - 150, y: 140 },
-              })
-            }}
-          />
-        )}
-
-
+            {/* Connect mode — what a click-to-connect is waiting for, and the way
+                out. Never beside the trace capsule: a trace makes the canvas
+                read-only. */}
+            {canvasWritable && (edgeConnect.state.mode === 'armed' || (edgeConnect.state.mode === 'idle' && edgeConnect.state.tool)) && (
+              <ConnectModePill
+                phase={edgeConnect.state.mode === 'armed' ? 'armed' : 'tool'}
+                sourceLabel={(() => {
+                  const id = edgeConnect.state.sourceId
+                  if (!id) return null
+                  const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+                  return (n?.data?.label as string) || null
+                })()}
+                sourceCount={edgeConnect.state.sourceIds.length}
+                targetCount={edgeConnect.state.targets.length}
+                nudge={edgeConnect.state.nudge}
+                tool={edgeConnect.state.tool}
+                onLinkTargets={() => edgeConnect.commitTargets()}
+                onClearTargets={edgeConnect.clearTargets}
+                onCancel={edgeConnect.cancel}
+                onExitTool={() => edgeConnect.setTool(false)}
+                onSearchTarget={() => {
+                  // The keyboard path: the same link, its target chosen from a searchable list.
+                  const id = edgeConnect.state.sourceId
+                  if (!id) return
+                  const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+                  edgeConnect.cancel()
+                  useCreateLinkStore.getState().open({
+                    sourceUrn: (n?.data?.urn as string) || id,
+                    anchor: { x: Math.round(window.innerWidth / 2) - 150, y: 140 },
+                  })
+                }}
+              />
+            )}
+          </>}
+        >
         {/* Connections-still-catching-up banner — THE EXPLANATION THAT WAS
             MISSING. When a source's read cache trails its published history,
             main reads fall back to the version log and the connections
@@ -7384,7 +7400,7 @@ export function ContextViewCanvas({
             data-canvas-interactive
             data-testid="lineage-catching-up"
             role="status"
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-start gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-start gap-2"
           >
             <span className="font-medium shrink-0">Connections are still catching up.</span>
             <span>{catchUpMessage(projectionCatchUp.commitsBehind)}</span>
@@ -7400,7 +7416,7 @@ export function ContextViewCanvas({
             data-canvas-interactive
             data-testid="canvas-summaries-banner"
             role="status"
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2"
           >
             {summariesGap === 'missing'
               ? 'Connections between collapsed items haven’t been summarised for this source yet — open an item to see the connections inside it.'
@@ -7417,7 +7433,7 @@ export function ContextViewCanvas({
         {((aggregationTruncated && !projectionCatchUp.catchingUp && !readPressure && !summariesGap) || edgesTruncated) && (
           <div
             data-canvas-interactive
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2"
           >
             <span className="font-medium">Showing the largest relationships — narrow the selection to see more.</span>
           </div>
@@ -7431,7 +7447,7 @@ export function ContextViewCanvas({
           <div
             data-canvas-interactive
             data-testid="canvas-read-pressure-banner"
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2"
           >
             <span className="font-medium">
               {readPressure === 'query_memory'
@@ -7462,7 +7478,7 @@ export function ContextViewCanvas({
           <div
             data-canvas-interactive
             data-testid="canvas-provider-reconnecting-banner"
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2"
           >
             <span className="font-medium">
               Reconnecting to the graph store — the node holding this graph is restarting.
@@ -7481,7 +7497,7 @@ export function ContextViewCanvas({
             workspaceId={scopeWsId ?? undefined}
             dataSourceId={dataSourceId ?? undefined}
             subject="this canvas"
-            className="mx-4 mt-2 z-20"
+            className="mx-4 mt-2"
           />
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the
@@ -7490,7 +7506,7 @@ export function ContextViewCanvas({
         {aggregationStaleReason === 'source_changed' && (
           <div
             data-canvas-interactive
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2"
           >
             <span className="font-medium">Source data changed — lineage is being recomputed. Showing the previous rollup.</span>
           </div>
@@ -7505,7 +7521,7 @@ export function ContextViewCanvas({
         {(edgeFetchFailures > 0 || aggregationError) && (
           <div
             data-canvas-interactive
-            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2"
           >
             <span className="font-medium">Some relationships could not be loaded — the canvas may be incomplete.</span>
             <button
@@ -7521,11 +7537,17 @@ export function ContextViewCanvas({
         )}
         {/* Warning: missing ontology configuration */}
         {schema && containmentEdgeTypes.length === 0 && edges.length > 0 && (
-          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20">
+          <div className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2">
             <span className="font-medium">No containment types configured.</span>
             <span className="text-amber-600 dark:text-amber-500">Hierarchy is disabled — all nodes appear flat. Configure your ontology to enable parent-child nesting.</span>
           </div>
         )}
+        {/* A subset view whose matches can't be listed says why, above its columns. */}
+        <SubsetIssueBanner issue={subsetView ? (searchViewsOn ? subsetIssue : 'off')
+          // A view that follows another shows that view's layers: none at all means it is gone.
+          : followsBase && sortedLayers.length === 0 ? 'base_missing' : null} />
+        </CanvasStatusStack>
+
         {/* Bulk import — uploads a file onto the current draft (server-side), then
              hands off to the Changes tab where the added/updated/deleted entities are
              reviewed and published just like manual edits. */}
@@ -7981,11 +8003,6 @@ export function ContextViewCanvas({
         )}
 
 
-        {/* A subset view whose matches can't be listed says why, above its columns. */}
-        <SubsetIssueBanner issue={subsetView ? (searchViewsOn ? subsetIssue : 'off')
-          // A view that follows another shows that view's layers: none at all means it is gone.
-          : followsBase && sortedLayers.length === 0 ? 'base_missing' : null} />
-
         {/* Layer Columns. The wrapper exists so the edge fades can be
             anchored to the SCROLLER's box rather than to canvas-body,
             whose in-flow banners would otherwise offset them. */}
@@ -8097,8 +8114,8 @@ export function ContextViewCanvas({
 
 
           {/*
-            z-30 + pointer-events-none on the columns wrapper:
-            - z-30 puts the columns ABOVE the hit-test layer (z-20 in
+            z-canvas (30) + pointer-events-none on the columns wrapper:
+            - z-canvas puts the columns ABOVE the hit-test layer (z-20 in
               LineageFlowOverlay), so node cards win pointer events when the
               cursor is over them — even when an edge stroke passes
               geometrically over the same pixel.
@@ -8119,7 +8136,7 @@ export function ContextViewCanvas({
               not a column gap: no line runs between them, so the room a
               line needs to curve would only push layers off screen. */}
           <div
-            className="flex h-full min-h-0 relative z-30 gap-12 pointer-events-none [&>[data-folded]+[data-folded]]:-ml-[42px]"
+            className="flex h-full min-h-0 relative z-canvas gap-12 pointer-events-none [&>[data-folded]+[data-folded]]:-ml-[42px]"
             style={{
               paddingLeft: EXTREMITY_EDGE_GUTTER_PX,
               paddingRight: EXTREMITY_EDGE_GUTTER_PX,
