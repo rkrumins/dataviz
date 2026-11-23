@@ -21,6 +21,7 @@ Postgres: ``integration/test_graph_digest_live.py``.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -584,3 +585,28 @@ async def test_a_pass_reads_the_markers_a_page_at_a_time_and_tells_every_graph(t
     assert await digest.tell_pending() == 3
     assert sorted(t[5] for t in (await _told(s))["usr_bob"]) == ["ds_1", "ds_2", "ds_3"]
     assert [await _mark(s, ds) for ds in ("ds_1", "ds_2", "ds_3")] == [(216, None, None)] * 3
+
+
+async def test_the_projection_lane_tells_watchers_and_stops_when_asked(monkeypatch):
+    """The versioning worker's projection lane runs the telling pass (every ``TELL_POLL_SECS``);
+    a worker that is stopped stops it."""
+    from backend.app.services.versioning import worker as worker_module
+
+    passes = []
+    w = worker_module.ProjectionWorker(SimpleNamespace(), lanes={"projection"})
+
+    async def nothing(*_a, **_kw):
+        return None
+
+    async def tell(**kw):
+        passes.append(kw)
+        w.stop()
+        return 0
+
+    monkeypatch.setattr(worker_module, "ensure_consumer_group", nothing)
+    for name in ("_reclaim_pending", "_poll_loop", "_stream_loop", "_sweep_loop", "_liveness_loop",
+                 "_retire_loop", "_capacity_loop"):
+        monkeypatch.setattr(w, name, nothing)
+    monkeypatch.setattr(digest, "tell_pending", tell)
+    await asyncio.wait_for(w.run(), 5)
+    assert passes == [{}]

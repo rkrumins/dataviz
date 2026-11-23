@@ -951,7 +951,7 @@ async def _lane_loops(monkeypatch) -> set:
     import backend.app.services.versioning.worker as worker_module
     monkeypatch.setattr(worker_module, "ensure_consumer_group", nothing)
     for name in ("_reclaim_pending", "_poll_loop", "_stream_loop", "_sweep_loop",
-                 "_liveness_loop", "_retire_loop"):
+                 "_liveness_loop", "_retire_loop", "_tell_loop"):
         monkeypatch.setattr(worker, name, nothing)
     monkeypatch.setattr(worker, "_evict_loop", lambda: noted("count budget"))
     monkeypatch.setattr(worker, "_capacity_loop", lambda: noted("capacity"))
