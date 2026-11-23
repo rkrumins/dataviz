@@ -11,6 +11,9 @@ import { act, render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { PERSONA_INTRO_KEY, markPersonaIntroSeen } from '@/components/persona/personaIntro'
+import { usePersonaStore } from '@/store/persona'
+
 import { PropertyManagerButton, PROPERTY_MANAGER_SEEN_KEY } from '../PropertyManagerButton'
 
 const HINT = /New — Property Manager/
@@ -26,8 +29,18 @@ function mount(props: Partial<React.ComponentProps<typeof PropertyManagerButton>
 }
 
 describe('PropertyManagerButton first-run coachmark', () => {
-    beforeEach(() => { localStorage.clear() })
+    // The Business view's intro has been seen: this card waits for it (see the last case).
+    beforeEach(() => { localStorage.clear(); localStorage.setItem(PERSONA_INTRO_KEY, '1') })
     afterEach(() => { cleanup() })
+
+    it("waits while the Business view's own intro is showing, then takes its turn", () => {
+        localStorage.removeItem(PERSONA_INTRO_KEY)
+        usePersonaStore.setState({ mode: 'business' })
+        mount()
+        expect(screen.queryByText(HINT)).toBeNull()
+        act(() => { markPersonaIntroSeen() })
+        expect(screen.getByText(HINT)).toBeTruthy()
+    })
 
     it('on first run the coachmark renders OUTSIDE the header, fixed to the viewport', () => {
         const { header } = mount()
