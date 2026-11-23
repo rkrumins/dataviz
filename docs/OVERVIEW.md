@@ -446,6 +446,8 @@ timeline
                           : Off-screen partner trays + root pagination past 200 per layer
         Trace & Search    : Trace up to 25 entities as one picture
                           : Advanced Search and Display Rules with view libraries
+        Conversations     : Questions on views and data sources, routed to their owners and data contacts (preview)
+                          : People's profiles, and an Inbox of questions waiting on you
     section Change Control (Shipped)
         Versioning        : Drafts, review & merge (PR-style), publish
                           : Revert ("Undo this change") + restore ("Restore to this point")
@@ -467,7 +469,7 @@ timeline
         Views             : Server-side membership for the placement contract
         Integrations      : Additional provider adapters (Apache Atlas, dbt, Airflow)
                           : Event-streaming lineage ingestion
-        Collaboration     : Comments and annotations
+        Collaboration     : Annotations on the canvas, and email or chat delivery
 ```
 
 ### Forward-Looking Work
@@ -482,7 +484,8 @@ timeline
 | Integrations | Event-streaming lineage ingestion | Partly covered — a drift probe notices an external load within about a minute, and a refresh endpoint takes push notice ([External Change Notification](features/external-change-notification.md)) |
 | Enterprise | GraphQL API layer | Not started — `backend/app/graphql/types.py` is an unused sketch |
 | Enterprise | A general access-policy engine | Not started — workspace-scoped roles, group bindings, custom roles and per-view grants cover most needs today |
-| Collaboration | Comments and annotations | Not started — change proposals ship as versioning pull requests with reviewers |
+| Collaboration | Conversations | Shipped as a preview behind `conversationsEnabled` (off by default) — questions on views and data sources reach their owners and data contacts, with replies, accepted answers, reminders, an Inbox and people's profiles ([Asking Questions](/guide/asking-questions)); change proposals ship as versioning pull requests with reviewers |
+| Collaboration | Annotations on the canvas; email or chat delivery and notification preferences | Not started — questions are answered in the app and its Inbox only |
 
 > **Note:** Every shipped deployment runs the process split: web, worker and control-plane processes (`SYNODIC_ROLE`), plus the versioning worker and the stats service, as separate services in Compose and on Kubernetes, where they autoscale. The single-process `dev` role is only the fallback when `SYNODIC_ROLE` is unset — for example, uvicorn run on the host. The end-state items still open are in [Scaling Architecture](architecture-when-scaling.md).
 

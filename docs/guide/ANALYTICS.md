@@ -1,7 +1,7 @@
 # Analytics
 
 *For Administrators, and anyone else who can open Analytics.* Find out how the
-platform is growing and being used, read each of the six tabs with
+platform is growing and being used, read each of the eight tabs with
 confidence, and understand what is hidden from whom — and why. The last
 section is for everyone: usage figures on the views you can open.
 
@@ -36,8 +36,8 @@ flowchart TB
    on the calendar, then select **Apply range**. Both dates are included, a
    range can span up to 365 days, and it's compared with the same number of
    days just before it.
-4. Select a tab: **Overview**, **Growth**, **Engagement**, **Content**,
-   **Health** or **Workspaces**.
+4. Select a tab: **Overview**, **Growth**, **Data**, **Engagement**,
+   **Content**, **Collaboration**, **Health** or **Workspaces**.
 
 The tab and the period are part of the page address, so copying the address
 shares exactly what you are looking at.
@@ -54,14 +54,16 @@ header says how old they are; hover the time for the exact moment.
 
 ---
 
-## The six tabs
+## The eight tabs
 
 | Tab | The question it answers | What you'll find |
 | --- | --- | --- |
 | **Overview** | How is the platform doing overall? | **What changed**; **Daily active**, **Weekly active**, **Monthly active** and **Stickiness**; **Total users**, **Workspaces**, **Views** and **View opens**; growth and activity over time; **Most active people**, **Most popular views** and **Busiest workspaces**; **Platform scale**; **Data sources onboarded**. |
 | **Growth** | Are we growing, and do people stay? | **New accounts**, **New workspaces**, **Activation rate** and **Time to first view**; **Cumulative growth, indexed**; **How people arrive**; **Account status**; **Growth accounting** (**New**, **Returning**, **Resurrected**, **Went dormant**); **Retention by signup cohort**. |
+| **Data** | What does the platform hold, and is it described? | **Entities**, **Relationships**, **Sources onboarded** and **Under version control**; growth by workspace and by kind of source; **Biggest movers**; onboarding and **Time to first build**; version control; **How sources are described**; **Requests** for data and for workspaces. |
 | **Engagement** | Are people actually using it? | **Active users**, **Stickiness**, **View opens**, **Actions taken**, **Traces run**, **Traces that found lineage**, **Graph searches** and **Searches that matched**; the **Activation funnel**; **What people do**; **Sign-ins**; **Most active people**. |
 | **Content** | What has been built, and does anyone open it? | **Views**, **Shared openly**, **Top-10 share**, **Not opened** and **Semantic layers**; **Who can see what**; **Kinds of view**; **Top builders**; **Views created**; **Most popular views**. |
+| **Collaboration** | Are people's questions answered, and what do they ask about? | **Questions asked**, **Answer rate**, **Time to first reply**, **Time to an accepted answer**, **Waiting over a week**, **People asking**, **People answering**, **Replies posted** and **Asked privately**; **Asked and answered**; **Most discussed views**; **Data sources with the most questions**; **Workspaces asking most**; **People who answer most**; **Longest-waiting questions**. |
 | **Health** | Can people trust the data and reach it? | Refresh outcomes (**Refresh success**, **Failed refreshes**, **Sources refreshed**, **Never refreshed**); access (**Pending requests**, **Median time to approve**, **Invite acceptance**, **Invites sent**); semantic coverage (**Sources with a semantic layer**, **Sources drifting**, **Entity types modelled**). |
 | **Workspaces** | Which workspaces are thriving, quiet or empty? | **What the estate is made of** (**Workspaces**, **Yours to open**, **Gone quiet**, **No data source**, plus **How big they are** and **How many people are in them**); a table of every workspace with **Members**, **Views**, **New**, **Active**, **Opens**, **Actions**, **Nodes** and **Last active**. |
 
@@ -100,17 +102,103 @@ says nothing rather than invent a finding.
 
 ---
 
+## Read Collaboration
+
+**Collaboration** counts the questions people ask about views and data
+sources (see [Asking Questions](/guide/asking-questions)) and how they are
+answered.
+
+```mermaid
+flowchart LR
+  Q["A question is asked"] --> R["Someone else replies"]
+  R --> A["A reply is accepted as the answer"]
+  Q -.->|"No accepted answer after seven days"| W["Waiting over a week"]
+```
+
+- **Questions asked** counts the questions asked in your period, against the
+  same number of days before it. Below it, *N counted in all* is every
+  question since questions began.
+- **Answer rate** is the share of those questions that now have an accepted
+  answer. A question closed after its answer was accepted still counts as
+  answered.
+- **Time to first reply** is the middle wait for the first reply from someone
+  other than the person who asked. **Time to an accepted answer** is the
+  middle wait until a reply was accepted.
+- **Waiting over a week** counts questions that are still open, with no
+  accepted answer, more than seven days after they were asked — as of now,
+  whatever period you picked. *N open now* counts every open question.
+- **People asking**, **People answering** and **Replies posted** say how many
+  people take part. Replying to your own question doesn't make you someone
+  who answers.
+- **Asked privately** is the share of questions only their participants, the
+  subject's maintainers and the workspace's admins can see.
+
+Below the figures:
+
+- **Asked and answered** draws the questions asked each day and how many of
+  them have an accepted answer now.
+- **Most discussed views** and **Data sources with the most questions** rank
+  views and sources by questions asked plus replies posted in your period,
+  with how many of their questions are open. A view's name opens the view; a
+  source's name opens its **Questions** tab.
+- **Workspaces asking most** ranks workspaces by questions about their views
+  and sources, with the share answered and the time to a first reply. Select
+  a row to look inside that workspace.
+- **People who answer most** ranks people by accepted answers, then by
+  replies to other people's questions.
+- **Longest-waiting questions** lists the oldest open questions with their
+  age in days and how many replies they have. Select one to open the
+  conversation.
+
+Deleted conversations, archived ones, and those about a view or source that
+has since been deleted are not counted.
+
+If nobody has asked a question yet, the tab says *No questions yet* and links
+to [Asking Questions](/guide/asking-questions). If questions are switched off
+on your deployment (**Questions and conversations** on **Administration →
+Features**), it says *Questions are switched off*; if some were asked before
+they were switched off, it shows those, with a note.
+
+> **Note:** If you hold an Analytics permission, **Longest-waiting questions**
+> also quotes each question and who asked it — except private questions,
+> whose words never appear in Analytics for anyone.
+
+---
+
+## Read how sources are described, and requests
+
+Two sections at the end of **Data**:
+
+- **How sources are described** — the share of connected sources with a
+  description (**Described**), with at least one tag (**Tagged**), that name
+  an Owner or a Steward (**Named contacts**), and that are **Certified**;
+  how sources are marked for **Trust** and **Classification**; the **Most
+  used tags**; and the same shares **By workspace** for the workspaces with
+  the most sources. Forks are not counted. A source whose contacts are worked
+  out from its permissions, rather than named, doesn't count as having named
+  contacts. To improve these figures, see [Describing Data](/guide/describing-data).
+- **Requests** — for data requests (see [Requesting Data](/guide/requesting-data)):
+  **Asked for** in your period, **Connected** and declined in your period,
+  **Open now** by urgency, and **Time to connect**. For workspace requests
+  (see [Requesting a Workspace](/guide/requesting-a-workspace)):
+  **Submitted**, **Approved** and declined, **Open now** — including those
+  waiting on the person who asked for changes — and **Time to a decision**.
+
+---
+
 ## Look inside one workspace
 
 1. Select the **Workspaces** tab.
 2. Select a workspace's row. A panel opens with its **Views**, **View
    opens**, **Active users** and **Actions**, then **Activity over time**,
    **Views created**, **Who can see what**, **Kinds of view**, **Most opened
-   here**, **Top contributors** and **Graph scale**.
+   here**, **Top contributors**, **Questions** (with its **Most discussed
+   views** and **Sources with the most questions**), **What it holds**,
+   **Graph scale** and **How its sources are described**.
 3. Close the panel with its close button.
 
 You can also jump here by selecting a workspace in another tab's leaderboard,
-such as **Busiest workspaces**. A workspace's name links into the workspace
+such as **Busiest workspaces** or **Workspaces asking most**. A workspace's name links into the workspace
 itself only if you can open it.
 
 ---
@@ -133,13 +221,19 @@ Three things are always true:
 - **Analytics never changes access.** It can hide a name, but it never opens
   a workspace or view you couldn't open anyway.
 
+On **Collaboration**, who answers, who asked and what they asked are shown
+only to people with an Analytics permission, whatever **What everyone can
+see** is set to. Everyone else sees the counts, the views and sources they
+can see by name, and the age of each waiting question — a question about
+something they can't see, or a private one, is listed without its subject.
+
 Four switches on **Administration → Features** decide the rest (see
 [Feature Switches](/guide/feature-switches#analytics)):
 
 | Switch | Default | What people without an Analytics permission get |
 | --- | --- | --- |
 | **Analytics for everyone** | Off | Off: no Analytics at all. On: the redacted section described here. |
-| **What everyone can see** | **Show colleagues** | **Aggregate only**: counts and trends, nobody named. **Show colleagues**: also leaderboards and names — **Most active people**, **Top builders**, and **Top contributors** in workspaces they belong to. **Show colleagues and operations**: also refresh outcomes and access requests on **Health**. |
+| **What everyone can see** | **Show colleagues** | **Aggregate only**: counts and trends, nobody named. **Show colleagues**: also leaderboards and names — **Most active people**, **Top builders**, and **Top contributors** in workspaces they belong to. **Show colleagues and operations**: also refresh outcomes and access requests on **Health**, and **Requests** on **Data**. |
 | **Show every workspace in Analytics** | Off | Off: workspaces they aren't in appear as **Restricted workspace** rows — counted in the totals, name and figures hidden. On: every workspace is named, with its figures. It's reporting only; it grants no access. |
 | **Let people contact each other from Analytics** | Off | On: an email link beside a popular view's creator (for views the reader can see) and beside contributors in workspaces they belong to — never on the platform-wide activity ranking, and only when **What everyone can see** names colleagues. |
 
@@ -151,7 +245,8 @@ Four switches on **Administration → Features** decide the rest (see
 When a panel is withheld from you, it keeps its place and says why instead
 of looking empty — for example **Individual activity is hidden**, **Top
 builders is hidden**, **Refresh outcomes are hidden**, **Access requests are
-hidden** or **Contributors are hidden**. The shape behind the message is a
+hidden**, **Contributors are hidden**, **People who answer most is
+hidden** or **Requests are hidden**. The shape behind the message is a
 placeholder; no real figures reach your browser. Views you can't open appear
 in rankings as **Restricted view**.
 
@@ -201,6 +296,10 @@ only — no names — so no permission or privacy setting applies.
 
 - [Feature Switches](/guide/feature-switches#analytics) — when you want to
   open Analytics to everyone or change what it shows.
+- [Asking Questions](/guide/asking-questions) — when **Collaboration** shows
+  questions waiting and you want to answer them.
+- [Describing Data](/guide/describing-data) — when **How sources are
+  described** shows sources with no description or contacts.
 - [Requesting Access](/guide/requesting-access) — when you've asked for a
   workspace and want to follow your request.
 - [Data Freshness & Ingestion](/guide/data-freshness) — when **Health** shows

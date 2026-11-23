@@ -29,6 +29,8 @@ import { useLoadingNotification } from '@/components/ui/notifications'
 
 // UX-first interaction components (shared across canvases)
 import { CanvasContextMenu, type ContextMenuAction, type ContextMenuTarget } from './CanvasContextMenu'
+import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
+import { QuestionRowMark } from '@/features/discussions/QuestionRowMark'
 import { compareSelectionAction, menuSelection } from './selectionMenu'
 import { SelectionBar } from './context-view/SelectionBar'
 import { StagedChangesPanel } from './context-view/StagedChangesPanel'
@@ -67,6 +69,7 @@ import { CanvasDisplayMenu } from './context-view/header/DisplayMenu'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
+import { useCanvasReveal } from '@/store/canvasReveal'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { usePersonaMode } from '@/store/persona'
@@ -151,6 +154,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { parentMap, childMap, rootNodes: hierarchyRoots, nodeMap } = useContainmentHierarchy({
     nodes, edges, isContainmentEdge,
   })
+
+  // "Ask about this" on a node — nothing while questions are off.
+  const askAboutNode = useAskAboutNode()
 
   // Unified Trace System (shared hook handles merge + auto-expand)
   const trace = useCanvasTrace({
@@ -353,6 +359,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const expandToNode = useCallback((nodeId: string) => {
     if (revealRows([nodeId])) selectNode(nodeId)
   }, [revealRows, selectNode])
+  // "Show on canvas" from a question opens the path the same way.
+  useCanvasReveal(expandToNode)
 
   // The rows on screen, in the order they are drawn: a collapsed subtree contributes nothing.
   const visibleRowIds = useMemo(() => {
@@ -723,6 +731,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        onAskAboutNode={askAboutNode}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
@@ -1036,6 +1045,8 @@ function HierarchyContainer({
           {/* Display-rule tags — shared premium chip cluster (same as the
               other canvases). */}
           <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
+          {/* Questions asked about this row (nothing otherwise). */}
+          <QuestionRowMark urn={node.urn ?? node.id} label={node.name} />
 
           {/* Details on demand — hover-visible, and kept on the selected row. */}
           {offerDetails && (

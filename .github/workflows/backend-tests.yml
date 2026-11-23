@@ -35,8 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     # Both steps took 19 to 24 min on main and the PRs on it (Nov 2026), and no broker runs here, so
     # a test that touches it waits out the client's retries; at 25 a job was cancelled as its last
-    # step ended.
-    timeout-minutes: 35
+    # step ended. At 35, a slow runner cut one off mid-step (its others took 27 to 34 min).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

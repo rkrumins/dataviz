@@ -60,10 +60,11 @@ export function useAdminFeatures() {
   /** True when the save landed. The page says WHAT changed — it is the only
    *  place that knows the feature's name and how to put it back. */
   const handleChange = useCallback(
-    async (key: string, value: unknown) => {
+    async (key: string, value: unknown, alongside: Record<string, unknown> = {}) => {
       const current = dataRef.current
       if (!current) return false
-      const next = { ...current.values, [key]: value }
+      // `alongside`: other switches saved in the same write — what turning this one on needs.
+      const next = { ...current.values, ...alongside, [key]: value }
       setData({ ...current, values: next })
       setSavingKey(key)
       try {

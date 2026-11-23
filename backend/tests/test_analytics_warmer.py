@@ -51,8 +51,9 @@ async def test_a_warm_pass_fills_the_keys_readers_look_up(db_session, monkeypatc
     await analytics_warmer.warm_once(db_session, ttl=900)
 
     for days in analytics_warmer.WARM_WINDOWS:
-        # Every surface the warmer knows — the Data and Usage tabs included.
-        for surface in ("summary", "workspaces", "data", "usage"):
+        # Every surface the warmer knows — the Data, Usage and Collaboration
+        # tabs included.
+        for surface in ("summary", "workspaces", "data", "usage", "collaboration"):
             key = analytics_cache.document_key(surface, {"days": days})
             assert analytics_cache._memory_get(key) is not None, (
                 f"{surface}/{days}d was not warmed into the key readers use"

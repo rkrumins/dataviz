@@ -39,6 +39,7 @@ import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
+import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
 import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, specKey, type PresetId } from '@/features/narrow/model'
 import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
@@ -75,6 +76,7 @@ import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
 import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
+import { useCanvasReveal } from '@/store/canvasReveal'
 import { ChangeNavigator } from './ChangeNavigator'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
@@ -1772,6 +1774,11 @@ export function ContextViewCanvas({
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const [showImportDialog, setShowImportDialog] = useState(false)
+  // The graph's types, which a simple file's types are matched to (and the ones it lacks named).
+  const importTypes = useMemo(() => schema ? {
+    entity: schema.entityTypes.map(t => ({ id: t.id, name: t.name })),
+    relationship: schema.relationshipTypes.map(t => ({ id: t.id, name: t.name })),
+  } : undefined, [schema])
   const [showExportDialog, setShowExportDialog] = useState(false)
   // The view itself, exported for another environment: its design alone, or with its data.
   const [viewExport, setViewExport] = useState<'view' | 'data' | null>(null)
@@ -1815,6 +1822,38 @@ export function ContextViewCanvas({
         { label: 'Review changes', onClick: () => useStagedChangesStore.getState().openReviewPanel('saved') })
     }
   }, [queryClient, rereadBranchView, notifyImport])
+  // ADD MORE DATA (`?import=1`, from a Playground graph's card or the end of "New data source from
+  // a file"): once the graph is known, the import opens in a draft — the open one, or one opened
+  // now — after a pending layout edit is saved, as the header's Import does. The dialog reads the
+  // draft from the branch store as it renders, so it opens only once the draft is switched to.
+  const [initialImport] = useState(() => new URLSearchParams(window.location.search).get('import') === '1')
+  const importAsked = useRef(false)
+  useEffect(() => {
+    if (!initialImport || importAsked.current || !graphId || !scopeWsId) return
+    importAsked.current = true
+    const forget = () => {
+      const params = new URLSearchParams(window.location.search)
+      params.delete('import')
+      const qs = params.toString()
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    }
+    void (async () => {
+      const draft = useBranchStore.getState().isDraftMode() || !!(await ensureDraftOpen())
+      if (!draft) {
+        // A past revision says so itself (ensureDraftOpen); anything else is said here.
+        if (!useBranchStore.getState().revision) {
+          notifyImport('warning', versioningEnabled
+            ? 'Adding data opens a draft of this graph, and none could be opened: you may not be allowed to change it.'
+            : 'Adding data needs version control, which is turned off here.')
+        }
+        forget()
+        return
+      }
+      await flushLayoutSave()
+      setShowImportDialog(true)
+      forget()
+    })()
+  }, [initialImport, graphId, scopeWsId, versioningEnabled, flushLayoutSave, notifyImport])
   // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
   // Properties panel read) catches up ASYNCHRONOUSLY, serving the version it last finished until
   // then. The view page re-hydrates when it finishes, for every viewer and canvas
@@ -4597,6 +4636,8 @@ export function ContextViewCanvas({
     if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
     return revealAndFocus(nodeId, revealOpts)
   }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
+  // "Show on canvas" from a question: the same reveal, rows not drawn yet included.
+  useCanvasReveal(revealOnCanvas)
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -7494,6 +7535,7 @@ export function ContextViewCanvas({
             graphId={graphId}
             branchId={useBranchStore.getState().currentBranchId ?? undefined}
             viewId={activeView?.id}
+            types={importTypes}
             onClose={() => { setShowImportDialog(false); void refreshAfterImport() }}
             onReviewChanges={() => {
               setShowImportDialog(false)
@@ -8437,6 +8479,7 @@ export function ContextViewCanvas({
         } : undefined}
         onTraceNode={(id) => startCanvasTrace(id)}
         onFocusConnections={openLens}
+        onAskAboutNode={useAskAboutNode()}
         onExportNode={exportWithChildren ? (id) => {
           // The selection it is part of, or the entity right-clicked alone.
           const selection = selectedNodeIds.filter(isSelectableNode)

@@ -26,7 +26,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const perms = new Set<string>()
 let workspaces: unknown[] = []
@@ -58,6 +58,7 @@ import { ViewBuiltOn } from '../ViewBuiltOn'
 import { providerService } from '@/services/providerService'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import type { View } from '@/services/viewApiService'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 const mockGetProvider = vi.mocked(providerService.get)
 const mockGetOntology = vi.mocked(ontologyDefinitionService.get)
@@ -348,5 +349,24 @@ describe('the provider rung holds its place while it resolves', () => {
     settle({ id: 'prov_1', name: 'Prod Graph', providerType: 'falkordb' })
     expect(await screen.findByText('Prod Graph')).toBeTruthy()
     expect(screen.queryByTestId('rung-skeleton-provider')).toBeNull()
+  })
+})
+
+describe('the data source carries its trust', () => {
+  afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+
+  it('badges the rung with its status and sensitivity while data source details are on', () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, dataSourceMetadataEnabled: true } })
+    renderBuiltOn(viewFixture({ dataSourceTrustStatus: 'certified', dataSourceClassification: 'restricted' }))
+    const source = rung('Data source')
+    expect(within(source).getByText('Certified')).toBeTruthy()
+    expect(within(source).getByText('Restricted')).toBeTruthy()
+    expect(screen.getByText(/Its badges say whether its Owner or Stewards have certified it/)).toBeTruthy()
+  })
+
+  it('shows none while the switch is off', () => {
+    renderBuiltOn(viewFixture({ dataSourceTrustStatus: 'deprecated', dataSourceClassification: 'internal' }))
+    expect(within(rung('Data source')).queryByText('Deprecated')).toBeNull()
+    expect(within(rung('Data source')).queryByText('Internal')).toBeNull()
   })
 })

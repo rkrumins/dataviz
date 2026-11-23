@@ -8,6 +8,7 @@
 import { useState } from 'react'
 import { ChevronRight, GitMerge, AlertTriangle, Plus, Minus, PencilLine, XCircle, Check, X, Loader2, MessageSquare, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { workspaceColor } from '@/lib/workspaceColor'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { DateTime } from '@/components/ui/DateTime'
 import type { PullRequest } from '@/services/versioningApiService'
@@ -75,12 +76,15 @@ export function PrListRow({
   wsId,
   pr,
   sourceLabel,
+  workspace,
   onOpen,
 }: {
   wsId: string
   pr: PullRequest
   /** Which data source this PR belongs to (shown in the workspace inbox). */
   sourceLabel?: string
+  /** Which workspace it lives in — shown when the list spans workspaces. */
+  workspace?: { id: string; name: string }
   onOpen: () => void
 }) {
   const branchName = pr.sourceBranchName?.trim() || (isDraftMr(pr) ? 'draft' : pr.sourceBranchId?.slice(0, 8)) || 'fork'
@@ -148,6 +152,12 @@ export function PrListRow({
             <GitMerge className="w-3 h-3 text-ink-muted/60 shrink-0" />
             <span className="text-ink-muted">{pr.targetBranch}</span>
           </span>
+          {workspace && (
+            <span className={cn('inline-flex items-center rounded-full border px-1.5 py-px text-[10.5px] font-semibold truncate max-w-[160px]',
+              workspaceColor(workspace.id).bg, workspaceColor(workspace.id).text, workspaceColor(workspace.id).border)}>
+              {workspace.name}
+            </span>
+          )}
           {sourceLabel && (<><span className="text-ink-muted/40">·</span><span className="truncate max-w-[160px]">{sourceLabel}</span></>)}
           <span className="text-ink-muted/40">·</span>
           <ChangeCount wsId={wsId} pr={pr} />

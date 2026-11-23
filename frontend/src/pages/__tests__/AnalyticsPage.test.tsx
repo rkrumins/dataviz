@@ -18,6 +18,7 @@ import { AnalyticsPage } from '@/pages/AnalyticsPage'
 import { DEFAULT_RANGE_DAYS } from '@/components/analytics/RangePicker'
 import { analyticsService } from '@/services/analyticsService'
 import { useAuthStore } from '@/store/auth'
+import { COLLAB_PRIVILEGED } from '@/harness/analyticsFixtures'
 
 // jsdom has no matchMedia, and the charts ask it which palette to draw with.
 // A browser always answers; the test environment has to be told to.
@@ -52,6 +53,7 @@ vi.mock('@/services/analyticsService', async (importOriginal) => {
             getWorkspace: vi.fn(),
             getData: vi.fn(),
             getUsage: vi.fn(),
+            getCollaboration: vi.fn(),
         },
     }
 })
@@ -314,6 +316,7 @@ describe('AnalyticsPage', () => {
         vi.mocked(analyticsService.getWorkspace).mockResolvedValue({} as never)
         vi.mocked(analyticsService.getData).mockResolvedValue(DATA as never)
         vi.mocked(analyticsService.getUsage).mockResolvedValue(USAGE as never)
+        vi.mocked(analyticsService.getCollaboration).mockResolvedValue(COLLAB_PRIVILEGED)
     })
 
     it('resolves the active tab from the URL', async () => {
@@ -798,6 +801,7 @@ describe('AnalyticsPage', () => {
     it('fetches each document only on the tabs that draw from it', async () => {
         vi.mocked(analyticsService.getData).mockClear()
         vi.mocked(analyticsService.getUsage).mockClear()
+        vi.mocked(analyticsService.getCollaboration).mockClear()
         renderAt('/analytics?tab=overview')
         await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalled())
         expect(analyticsService.getData).not.toHaveBeenCalled()
@@ -806,6 +810,27 @@ describe('AnalyticsPage', () => {
         renderAt('/analytics?tab=content')
         await waitFor(() => expect(analyticsService.getUsage).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS)))
         expect(analyticsService.getData).not.toHaveBeenCalled()
+        expect(analyticsService.getCollaboration).not.toHaveBeenCalled()
+    })
+
+    it('opens the Collaboration tab on its own document, even when the summary fails', async () => {
+        vi.mocked(analyticsService.getData).mockClear()
+        vi.mocked(analyticsService.getSummary).mockRejectedValue(new Error('summary down'))
+        renderAt('/analytics?tab=collaboration')
+
+        expect(await screen.findByRole('heading', { name: 'Questions and answers' })).toBeInTheDocument()
+        expect(screen.getByRole('tab', { name: /collaboration/i })).toHaveAttribute('aria-selected', 'true')
+        expect(analyticsService.getCollaboration).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS))
+        expect(analyticsService.getData).not.toHaveBeenCalled()
+        expect(screen.queryByText(/summary down/)).toBeNull()
+    })
+
+    it('says so when the Collaboration document cannot be read', async () => {
+        vi.mocked(analyticsService.getCollaboration).mockRejectedValue(new Error('questions down'))
+        renderAt('/analytics?tab=collaboration')
+        // A backoff away: the hook retries once before giving up.
+        expect(await screen.findByText('questions down', undefined, { timeout: 5000 })).toBeInTheDocument()
+        expect(screen.getByText(/Couldn't load analytics/i)).toBeInTheDocument()
     })
 
     it('opens the Data tab on its own document, even when the summary fails', async () => {

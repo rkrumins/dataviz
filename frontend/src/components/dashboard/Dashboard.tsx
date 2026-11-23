@@ -15,6 +15,12 @@
  * read profiling and turn it on under Preferences — off by default, because this
  * page is where business users land.
  *
+ * The Business / Technical toggle chooses what leads (DashboardLead): the
+ * reader's own to-dos — reviews, requests, the Playground — in the Business
+ * view; in the Technical view, for whoever can read a data source, how the data
+ * is doing (what failed, what is building, the connections, what changed),
+ * with the profiling findings beside it.
+ *
  * Everything is now wired to real endpoints. This page previously shipped
  * several placeholders that LOOKED like data:
  *   • "Jump Back In" was `views.filter(v => !v.isDefault).slice(0, 8)` — the first
@@ -54,6 +60,8 @@ import { TemplateGrid } from './TemplateGrid'
 import { DashboardSemanticLayers } from './DashboardSemanticLayers'
 import { DashboardOnboarding } from './DashboardOnboarding'
 import { DashboardJoinWorkspace } from './DashboardJoinWorkspace'
+import { DashboardLead } from './DashboardLead'
+import { useLeadsWithDataHealth } from './dataHealth'
 import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -115,7 +123,11 @@ export function Dashboard() {
     const isOnboarding = (workspaces?.length ?? 0) === 0 && !onboardingDismissedAt
     // No workspace and no way to create one: the way in is joining one.
     const canCreateWorkspace = useAuthStore(s => s.can('system:workspaces:create'))
-    const needsToJoin = (workspaces?.length ?? 0) === 0 && !canCreateWorkspace
+    // The Playground is a sandbox, not a team's workspace: someone in it alone still needs a way in.
+    const teamWorkspaces = (workspaces ?? []).filter(w => w.kind !== 'playground')
+    const needsToJoin = teamWorkspaces.length === 0 && !canCreateWorkspace
+    // The Technical view leads with data health, profiling findings included.
+    const leadsWithHealth = useLeadsWithDataHealth()
 
     const handleSelectHit = useCallback((hit: SearchHit) => {
         if (searchQuery.trim()) recordRecentSearch(searchQuery)
@@ -253,7 +265,17 @@ export function Dashboard() {
                     />
                 </motion.div>
 
-                {/* 2. Your work — ONE section, not three.
+                {/* 2. What leads: the reader's own to-dos (Business), or how their data
+                       is doing (Technical) — the persona toggle decides, and says so. */}
+                <motion.div
+                    initial={{ opacity: 0, y: MOTION.sectionY }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: MOTION.sectionStagger * 0.5, ...MOTION.sectionEntry }}
+                >
+                    <DashboardLead />
+                </motion.div>
+
+                {/* 3. Your work — ONE section, not three.
                        Unfinished drafts, pinned views and recently visited all
                        answered the same question ("which view do I open?") and
                        overlapped so heavily that ~8 views were drawn ~15 times down
@@ -268,7 +290,7 @@ export function Dashboard() {
                     <DashboardWorkHub />
                 </motion.div>
 
-                {/* 3. Activity — full width, and now the SECOND thing you see.
+                {/* 4. Activity — full width, right below the reader's work.
                        It gets the room it needs (a readable timeline plus its
                        summary) rather than being squeezed into a sidebar. */}
                 <motion.div
@@ -280,7 +302,7 @@ export function Dashboard() {
                     <DashboardActivityFeed />
                 </motion.div>
 
-                {/* 4. Active environments (the user's business areas) */}
+                {/* 5. Active environments (the user's business areas) */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
                     animate={{ opacity: 1, y: 0 }}
@@ -289,7 +311,7 @@ export function Dashboard() {
                     <WorkspaceGrid workspaces={workspaces} summary={summary} />
                 </motion.div>
 
-                {/* 5. At-a-glance numbers — live values, their 30-day trend, and a
+                {/* 6. At-a-glance numbers — live values, their 30-day trend, and a
                        sheet with what is behind each */}
                 <motion.div
                     initial={{ opacity: 0, y: MOTION.sectionY }}
@@ -297,10 +319,10 @@ export function Dashboard() {
                     transition={{ delay: MOTION.sectionStagger * 4, ...MOTION.sectionEntry }}
                 >
                     <InsightCards summary={summary} trend={trend} ontologies={ontologies} />
-                    <NeedsAttention />
+                    {!leadsWithHealth && <NeedsAttention />}
                 </motion.div>
 
-                {/* 6. Layout templates — when an admin has them on */}
+                {/* 7. Layout templates — when an admin has them on */}
                 {templatesOn && (
                     <motion.div
                         initial={{ opacity: 0, y: MOTION.sectionY }}
@@ -311,7 +333,7 @@ export function Dashboard() {
                     </motion.div>
                 )}
 
-                {/* 7. Semantic layers — the REAL ones, from the same cache the
+                {/* 8. Semantic layers — the REAL ones, from the same cache the
                        Semantic Layers page reads, each card opening its layer.
                        It used to render through the starter-TEMPLATE grid: the cards
                        weren't clickable, and it inherited a category filter no

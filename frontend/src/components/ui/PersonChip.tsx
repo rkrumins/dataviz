@@ -4,7 +4,8 @@
  * A face and a name, where a record holds only an id: who triggered a run, who
  * added a member, who acted. Hovering spells the person out — the larger
  * face, their email, their id, and whether the account is gone. The name
- * links to them in User Management.
+ * links to their profile while conversations are on, else to them in User
+ * Management.
  *
  * The rules the activity log set for naming people hold here too:
  *
@@ -26,6 +27,7 @@ import { Bot } from 'lucide-react'
 import { isServiceAccountId, serviceAccountHref } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import { usePersonLookup } from '@/hooks/usePerson'
+import { useFeature } from '@/store/features'
 
 import { HoverTip } from './HoverTip'
 import { Skeleton } from './Skeleton'
@@ -58,6 +60,9 @@ export const personHref = (id: string) => `/admin/users?user=${encodeURIComponen
 /** Where whoever an id names is looked after: a service account has its own page. */
 export const accountHref = (id: string) => isServiceAccountId(id) ? serviceAccountHref(id) : personHref(id)
 
+/** A person's profile — what they own, the data they look after, how to ask them. */
+export const profileHref = (id: string) => `/people/${encodeURIComponent(id)}`
+
 export function PersonChip({ id, person, size = 'sm', showEmail = false, caption, link = true, className }: {
     id: string
     /** The person as the record names them; omitted, they are looked up. */
@@ -72,6 +77,7 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
     className?: string
 }) {
     const lookup = usePersonLookup(person === undefined ? id : null)
+    const profiles = useFeature('conversationsEnabled')
     const failed = person === undefined && lookup.isError
     const who: PersonRef | null | undefined = person === undefined ? (failed ? null : lookup.data) : person
     const s = SIZES[size]
@@ -148,14 +154,14 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
             }
             detail={deleted
                 ? 'This account has been deleted. It is still named here: the record is of what happened.'
-                : link ? (account ? 'Opens its own page.' : 'Opens their account in User Management.') : undefined}
+                : link ? (account ? 'Opens its own page.' : profiles ? 'Opens their profile.' : 'Opens their account in User Management.') : undefined}
             className={cn(OUTER, className)}
         >
             <span className={cn('group/person inline-flex min-w-0 max-w-full items-center', s.gap)}>
                 {face(cn(s.avatar, 'font-bold ring-1 ring-black/[0.04] dark:ring-white/[0.08]', deleted && 'grayscale opacity-70'))}
                 <span className="min-w-0 leading-tight">
                     {link ? (
-                        <a href={accountHref(id)} onClick={(e) => e.stopPropagation()} className="outline-none focus-visible:underline">
+                        <a href={!account && profiles ? profileHref(id) : accountHref(id)} onClick={(e) => e.stopPropagation()} className="outline-none focus-visible:underline">
                             {nameNode}
                         </a>
                     ) : nameNode}

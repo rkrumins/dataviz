@@ -8,6 +8,11 @@ One set of handlers, mounted twice:
   on the server (``audience = 'workspace' AND workspace_id = :ws``), so no
   query parameter can widen it, and the raw payload is never returned there.
 
+And one more, narrower still: ``/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/
+activity/events`` — a source's history for everyone who can read it, only the
+allow-listed changes to the source (``catalogue.SOURCE_HISTORY_TYPES``), with no
+emails, correlation, API keys, payload or details.
+
 Each has ``events`` (keyset pages, newest first), ``events/newer`` (the live
 "N new" count), ``events/{id}`` (one event and what else happened with it),
 ``summary`` (the insight band, cached for a minute), ``catalogue`` (what can be
@@ -34,14 +39,16 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.v1.feature_gate import require_feature
 from backend.app.auth.dependencies import requires
 from backend.app.common.activity_context import provenance_for
 from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.db.engine import get_db_session, get_readonly_db_session
 from backend.app.db.repositories import activity_repo, analytics_repo, user_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
-from backend.app.services import activity_retention
+from backend.app.services import activity_retention, data_source_metadata
 from backend.app.services.activity import catalogue, names, recorder, summaries
+from backend.app.services.data_source_contacts import live_source
 from backend.auth_service.interface import User
 from backend.common.models.activity import (
     ActivityCatalogue,
@@ -58,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 workspace_router = APIRouter()
+#: ``/admin/workspaces/{ws_id}/data-sources/{ds_id}/activity`` — one source's history, for
+#: everyone who can read it (``workspace:datasource:read``; ``dataSourceMetadataEnabled``).
+source_router = APIRouter()
 
 #: Free-text search reads payloads, so it is held to a window this long.
 _SEARCH_MAX_DAYS = 92
@@ -529,3 +539,45 @@ def _mount(r: APIRouter, scope_dependency) -> None:
 
 _mount(router, _platform_scope)
 _mount(workspace_router, _workspace_scope)
+
+
+# ── One data source's history ────────────────────────────────────────
+
+
+def _for_every_reader(e: ActivityEvent) -> ActivityEvent:
+    """An event as anyone who can read the source may see it: nobody's email, no request
+    correlation, no API key, no payload, no details."""
+    bare = {"email": None}
+    return e.model_copy(update={
+        "correlation_id": None, "api_key_id": None, "api_key_name": None, "payload": None, "details": {},
+        "actor": e.actor.model_copy(update=bare) if e.actor else None,
+        "subject": e.subject.model_copy(update=bare) if e.subject else None,
+    })
+
+
+@source_router.get(
+    "/events", response_model=ActivityPage, response_model_by_alias=True,
+    dependencies=[Depends(require_feature(data_source_metadata.FLAG, default=False))],
+)
+async def list_data_source_history(
+    ws_id: str = Path(..., max_length=128),
+    ds_id: str = Path(..., max_length=128),
+    cursor: Optional[str] = Query(None, max_length=200),
+    limit: int = Query(30, ge=1, le=50),
+    _user: User = Depends(requires("workspace:datasource:read", workspace="ws_id")),
+    session: AsyncSession = Depends(get_readonly_db_session),
+) -> ActivityPage:
+    """A live source's history, newest first: the allow-listed changes to it
+    (``catalogue.SOURCE_HISTORY_TYPES``), including those from before it moved here."""
+    await live_source(session, ws_id, ds_id)
+    f = ActivityFilter(data_source_id=ds_id, audience=catalogue.AUDIENCE_WORKSPACE,
+                       event_types=catalogue.SOURCE_HISTORY_TYPES)
+    try:
+        rows, next_cursor = await activity_repo.list_events(session, f, cursor=cursor, limit=limit)
+    except activity_repo.InvalidCursor:
+        raise HTTPException(400, "Malformed cursor")
+    events = await _events(session, rows, full=False)
+    # A request answered before the source moved here belongs to the workspace it was asked in;
+    # its title is not this workspace's to read (the move itself still shows).
+    events = [e for e in events if e.event_type != "workspace.data_request.connected" or e.workspace_id == ws_id]
+    return ActivityPage(events=[_for_every_reader(e) for e in events], next_cursor=next_cursor)

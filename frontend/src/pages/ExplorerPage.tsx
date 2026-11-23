@@ -16,12 +16,14 @@ import {
   Compass, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw, ListFilter,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
 import { useAnyWorkspacePermission, useAuthStore } from '@/store/auth'
-import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { useExplorerViews, type ExplorerFilters } from '@/hooks/useExplorerViews'
+import { parseSort } from '@/components/explorer/sortOptions'
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useViewUsage } from '@/hooks/useContentInsights'
-import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
+import { useSubjectCounts } from '@/features/discussions/useDiscussions'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
@@ -95,6 +97,9 @@ const STAGGER_STYLE = `
 }
 `
 
+/** No views selected — one reference, so a list change reads as "nothing" without a new Set. */
+const NO_SELECTION = new Set<string>()
+
 // ─── URL Param Helpers ──────────────────────────────────────────────────────
 
 /** The list's own settings in the address. The filters are read by
@@ -102,7 +107,7 @@ const STAGGER_STYLE = `
  *  "Browse in Explorer" link and saved filters write in the same spelling. */
 function parseSearchParams(params: URLSearchParams) {
   return {
-    sort: (params.get('sort') as SortOption) ?? 'recently-modified',
+    sort: parseSort(params.get('sort')),
     layout: (params.get('layout') as 'grid' | 'list') ?? 'grid',
   }
 }
@@ -148,16 +153,23 @@ export function ExplorerPage() {
   // endpoint isn't hit on every keystroke.
   const visitFrom = visit?.from
   const visitTo = visit?.to
+  // "Recent" means the past seven days as of opening the page, so the Recent list
+  // keeps one query (and the pages already scrolled in) for the whole visit.
+  const [recentSince] = useState(() => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
   const resolveCtx = useMemo(
     () => ({
       currentUserId: currentUser?.id ?? null,
       today,
       visit: visitFrom && visitTo ? { from: visitFrom, to: visitTo } : null,
+      recentSince,
     }),
-    [currentUser?.id, today, visitFrom, visitTo],
+    [currentUser?.id, today, visitFrom, visitTo, recentSince],
   )
+  // The tiles are shortcuts to a category (Total: none), so each counts what
+  // clicking it shows — the current filters with the tile's own category, not
+  // the one open now.
   const statsParams = useMemo(
-    () => toQueryParams(resolveFilters(filterState, resolveCtx)),
+    () => toQueryParams(resolveFilters({ ...filterState, category: null }, resolveCtx)),
     [filterState, resolveCtx],
   )
   const { stats: catalogStats, isFetching: statsFetching } = useViewStats(statsParams)
@@ -169,6 +181,15 @@ export function ExplorerPage() {
     : 'gap-4'
 
   const [searchInput, setSearchInput] = useState(filterState.search)
+  // The box follows the address when something else moves it — the sidebar's
+  // Explorer link, a command-palette search — but not when the move is the box's
+  // own debounced write landing while the reader is still typing.
+  const [committedSearch, setCommittedSearch] = useState(filterState.search)
+  const [seenSearch, setSeenSearch] = useState(filterState.search)
+  if (filterState.search !== seenSearch) {
+    setSeenSearch(filterState.search)
+    if (filterState.search !== committedSearch) setSearchInput(filterState.search)
+  }
   const searchRef = useRef<HTMLInputElement>(null)
   const { recents, record: recordRecent, remove: removeRecent, clear: clearRecents } = useRecentSearches()
   // The box can hold a token being typed (`by:al`), which is not search text.
@@ -183,7 +204,24 @@ export function ExplorerPage() {
   const openViewPreview = useCallback((v: View) => { setPreviewEditMode(false); setPreviewView(v) }, [])
   const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // A selection belongs to the list it was made in. A new category, filter or
+  // sort is a new list — views picked under All must not still be selected under
+  // Deleted, where Delete is permanent. Only the layout keeps it.
+  const listKey = useMemo(() => {
+    const p = new URLSearchParams(searchKey)
+    p.delete('layout')
+    return p.toString()
+  }, [searchKey])
+  const [selection, setSelection] = useState<{ listKey: string; ids: Set<string> }>(
+    () => ({ listKey, ids: new Set() }),
+  )
+  const selectedIds = selection.listKey === listKey ? selection.ids : NO_SELECTION
+  const setSelectedIds = useCallback((next: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+    setSelection(prev => {
+      const current = prev.listKey === listKey ? prev.ids : NO_SELECTION
+      return { listKey, ids: typeof next === 'function' ? next(current) : next }
+    })
+  }, [listKey])
   const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
@@ -276,7 +314,10 @@ export function ExplorerPage() {
   useEffect(() => {
     if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current)
     searchSyncTimer.current = setTimeout(() => {
-      if (searchText !== latestFilters.current.search) setFilterState(prev => ({ ...prev, search: searchText }))
+      if (searchText !== latestFilters.current.search) {
+        setCommittedSearch(searchText)
+        setFilterState(prev => ({ ...prev, search: searchText }))
+      }
     }, 350)
     return () => { if (searchSyncTimer.current) clearTimeout(searchSyncTimer.current) }
   }, [searchInput]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -315,6 +356,8 @@ export function ExplorerPage() {
     refetch,
     loadMore,
     hasMore,
+    loadMoreFailed,
+    retryLoadMore,
   } = useExplorerViews(filters)
   // Health map still drives the per-card health badge, but the
   // needs-attention filter itself runs server-side now, so the Explorer
@@ -324,15 +367,20 @@ export function ExplorerPage() {
 
   // Usage for everything on screen, in ONE request. A card fetching its own
   // would be one request per tile — the exact shape the batched endpoint
-  // exists to avoid — and the cache key is the sorted id list, so scrolling
-  // in another page re-uses nothing it already has rather than refetching.
+  // exists to avoid. The cache key is the sorted id list, so a new page asks
+  // for a new batch; the cards already shown keep their numbers meanwhile.
   const usageIds = useMemo(
     () => Array.from(new Set([...loadedViews, ...popularViews].map(v => v.id))),
     [loadedViews, popularViews],
   )
   const { data: usageMap } = useViewUsage(usageIds)
-  // "Most opened" is finished here rather than on the server — see the hook.
-  const views = useOpensOrdering(loadedViews, usageMap, filters.sort)
+  // Their questions the same way: one request for the page, not one per card.
+  const questionCounts = useSubjectCounts('view', usageIds)
+  // Every sort, "Most opened" included, is the server's order.
+  const views = loadedViews
+  // What a bulk action acts on: the selected views that are on screen — never an
+  // id left over from a list the reader has moved away from.
+  const selectedViews = useMemo(() => views.filter(v => selectedIds.has(v.id)), [views, selectedIds])
   // Resolves the provider (e.g. falkordb/neo4j) behind each view's data source
   // so cards can surface what the view is built from.
   const { resolve: resolveProvider } = useDataSourceProviderMap()
@@ -344,7 +392,7 @@ export function ExplorerPage() {
   // (same cache entry), here for the people's names.
   const { facets: universeFacets } = useViewFacets()
   const people = useMemo(() => peopleFromFacets(universeFacets), [universeFacets])
-  const lookups = useFilterLookups(people, today, currentUser?.id)
+  const lookups = useFilterLookups(people, today, currentUser?.id, universeFacets)
   const listEmpty = !isLoading && !listError && loadedViews.length === 0 && hasActiveFilters
   const relaxations = useRelaxations(filterState, resolveCtx, lookups, { enabled: listEmpty })
 
@@ -366,11 +414,11 @@ export function ExplorerPage() {
 
   // ─── Keyboard navigation ────────────────────────────────────────────
 
-  const [focusedIndex, setFocusedIndex] = useState(-1)
+  // Focus is a view, not a position: favouriting it, a page loading in below or
+  // usage arriving must not move or drop it. It goes only when the view leaves.
+  const [focusedId, setFocusedId] = useState<string | null>(null)
+  const focusedIndex = focusedId ? views.findIndex(v => v.id === focusedId) : -1
   const gridRef = useRef<HTMLDivElement>(null)
-
-  // Reset focus when views change
-  useEffect(() => { setFocusedIndex(-1) }, [views])
 
   // Scroll focused card into view
   useEffect(() => {
@@ -414,7 +462,7 @@ export function ExplorerPage() {
           setSearchInput('')
           searchRef.current?.blur()
         } else {
-          setFocusedIndex(-1)
+          setFocusedId(null)
         }
         return
       }
@@ -430,11 +478,11 @@ export function ExplorerPage() {
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
         e.preventDefault()
         const step = e.key === 'ArrowDown' ? cols : 1
-        setFocusedIndex(prev => Math.min(prev + step, views.length - 1))
+        setFocusedId(views[Math.min(focusedIndex + step, views.length - 1)].id)
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         e.preventDefault()
         const step = e.key === 'ArrowUp' ? cols : 1
-        setFocusedIndex(prev => Math.max(prev - step, 0))
+        setFocusedId(views[Math.max(focusedIndex - step, 0)].id)
       } else if (e.key === 'Enter' && focusedIndex >= 0 && focusedIndex < views.length) {
         e.preventDefault()
         setPreviewView(views[focusedIndex])
@@ -494,15 +542,22 @@ export function ExplorerPage() {
     return useAuthStore.getState().can('workspace:view:delete', view.workspaceId)
   }, [currentUser?.id])
 
+  // Delete forever (and Restore) are the trash's, and the server keeps them for
+  // workspace admins (view_access.can_hard_delete_view) — a creator would get a 403.
+  const canHardDeleteView = useCallback(
+    (view: View): boolean => useAuthStore.getState().can('workspace:admin', view.workspaceId),
+    [],
+  )
+
   const handleDeleteRequest = useCallback((view: View) => {
     if (!canDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount })
   }, [canDeleteView])
 
   const handlePermanentDeleteRequest = useCallback((view: View) => {
-    if (!canDeleteView(view)) return
+    if (!canHardDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount, permanent: true })
-  }, [canDeleteView])
+  }, [canHardDeleteView])
 
   const handleDeleted = useCallback(() => {
     if (!deleteView) return
@@ -524,37 +579,34 @@ export function ExplorerPage() {
     // Notification
     notify('success', `"${deletedName}" has been deleted`)
     invalidateViewAggregates(queryClient)
-  }, [deleteView, removeViewFromList, notify, queryClient])
+  }, [deleteView, removeViewFromList, setSelectedIds, notify, queryClient])
 
   const handleBulkDelete = useCallback(() => {
-    if (selectedIds.size === 0) return
+    if (selectedViews.length === 0) return
     setShowBulkDelete(true)
-  }, [selectedIds])
+  }, [selectedViews])
 
   // Bulk delete is only offered when every selected view passes
   // canDeleteView — otherwise some rows would 403 and the operation
   // would partially succeed.
-  const canBulkDelete = useMemo(() => {
-    if (selectedIds.size === 0) return false
-    for (const v of views) {
-      if (!selectedIds.has(v.id)) continue
-      if (!canDeleteView(v)) return false
-    }
-    return true
-  }, [selectedIds, views, canDeleteView])
+  const canBulkDelete = useMemo(
+    () => selectedViews.length > 0
+      && selectedViews.every(filterState.category === 'deleted' ? canHardDeleteView : canDeleteView),
+    [selectedViews, filterState.category, canDeleteView, canHardDeleteView],
+  )
 
   const handleBulkDeleted = useCallback(() => {
-    const ids = Array.from(selectedIds)
+    const ids = selectedViews.map(v => v.id)
     ids.forEach(id => removeViewFromList(id))
     setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
     setSelectedIds(new Set())
     setShowBulkDelete(false)
     notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     invalidateViewAggregates(queryClient)
-  }, [selectedIds, removeViewFromList, notify, queryClient])
+  }, [selectedViews, removeViewFromList, setSelectedIds, notify, queryClient])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
-    const ids = Array.from(selectedIds)
+    const ids = selectedViews.map(v => v.id)
     if (ids.length === 0) return
     // allSettled: one failed view (say, a publish-permission miss) must
     // not mask how many succeeded, nor swallow the reason.
@@ -583,7 +635,7 @@ export function ExplorerPage() {
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedIds, notify, refetch, queryClient])
+  }, [selectedViews, setSelectedIds, notify, refetch, queryClient])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -661,9 +713,9 @@ export function ExplorerPage() {
         <ExplorerStatsBar
           stats={catalogStats}
           isLoading={statsFetching}
-          onShowAll={() => setParam('category', null)}
-          onShowRecent={() => setParam('category', 'recently-added')}
-          onShowAttention={() => setParam('category', 'needs-attention')}
+          onShowAll={() => setFilterState(prev => ({ ...prev, category: null }))}
+          onShowRecent={() => setFilterState(prev => ({ ...prev, category: 'recently-added' }))}
+          onShowAttention={() => setFilterState(prev => ({ ...prev, category: 'needs-attention' }))}
         />
 
         {/* ── Search bar — words search, and typed tokens (by:ada,
@@ -727,9 +779,11 @@ export function ExplorerPage() {
         </div>
 
         {/* ── Headline Banner for Aggregation ───────────────────── */}
-        {activeWorkspaceId && filterState.dataSourceId && (
-          <AggregationProgressBanner 
-            workspaceId={activeWorkspaceId}
+        {/* The source decides it, not whichever workspace the store last opened —
+            a ?dataSource= link from elsewhere shows it too. */}
+        {filterState.dataSourceId && (
+          <AggregationProgressBanner
+            workspaceId={filterState.workspaceIds[0] ?? activeWorkspaceId ?? ''}
             dataSourceId={filterState.dataSourceId}
             onStatusChange={onAggregationStatus}
           />
@@ -763,10 +817,11 @@ export function ExplorerPage() {
                     editDisabled={false}
                     onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                     onRestore={() => handleRestore(v)}
-                    onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                    onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                     onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
+                    questions={questionCounts[v.id]}
                     density={density}
                     providerInfo={resolveProvider(v.dataSourceId)}
                   />
@@ -919,10 +974,11 @@ export function ExplorerPage() {
                       editDisabled={false}
                       onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                       onRestore={() => handleRestore(v)}
-                      onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                      onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                       onTagClick={handleTagClick}
                       healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
+                    questions={questionCounts[v.id]}
                       isSelected={selectedIds.has(v.id)}
                       density={density}
                       providerInfo={resolveProvider(v.dataSourceId)}
@@ -952,9 +1008,10 @@ export function ExplorerPage() {
                 sort={parsed.sort}
                 onSortChange={v => setParam('sort', v)}
               />
-              {views.map(v => (
+              <div ref={gridRef}>
+              {views.map((v, i) => (
+                <div key={v.id} className={cn(i === focusedIndex && 'ring-2 ring-inset ring-accent-lineage/50')}>
                 <ExplorerListRow
-                  key={v.id}
                   view={v}
                   onToggleFavourite={() => toggleFavourite(v.id)}
                   onShare={() => handleShare(v)}
@@ -964,9 +1021,10 @@ export function ExplorerPage() {
                   editDisabled={false}
                   onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                   onRestore={() => handleRestore(v)}
-                  onPermanentDelete={() => handlePermanentDeleteRequest(v)}
+                  onPermanentDelete={canHardDeleteView(v) ? () => handlePermanentDeleteRequest(v) : undefined}
                   healthStatus={healthMap.get(v.id)?.status}
                     usage={usageMap?.[v.id]}
+                    questions={questionCounts[v.id]}
                   isSelected={selectedIds.has(v.id)}
                   density={density}
                   providerInfo={resolveProvider(v.dataSourceId)}
@@ -979,13 +1037,21 @@ export function ExplorerPage() {
                     return next
                   })}
                 />
+                </div>
               ))}
+              </div>
             </div>
             </motion.div>
           )}
           </AnimatePresence>
 
-          {hasMore && <div ref={sentinelRef} className="h-4" />}
+          {hasMore && !loadMoreFailed && <div ref={sentinelRef} className="h-4" />}
+          {loadMoreFailed && views.length > 0 && (
+            <div role="status" className="mt-4 flex items-center justify-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-ink-secondary">
+              Couldn’t load more views.
+              <Button size="sm" variant="secondary" onClick={retryLoadMore}>Retry</Button>
+            </div>
+          )}
         </section>
       </PageContainer>
 
@@ -1009,13 +1075,11 @@ export function ExplorerPage() {
         onPickPerson={id => { setPreviewView(null); pickPerson(id) }}
       />
       <ExplorerBulkActions
-        selectedCount={selectedIds.size}
+        selectedCount={selectedViews.length}
         onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
         onExport={exportEnabled && filterState.category !== 'deleted'
-          ? () => setExportSelection(Array.from(selectedIds, id => ({
-              id, name: views.find(v => v.id === id)?.name ?? id,
-            })))
+          ? () => setExportSelection(selectedViews.map(v => ({ id: v.id, name: v.name })))
           : undefined}
         onClearSelection={() => setSelectedIds(new Set())}
       />
@@ -1036,7 +1100,7 @@ export function ExplorerPage() {
         <DeleteViewDialog viewId={deleteView.id} viewName={deleteView.name} favouriteCount={deleteView.favouriteCount} isOpen={true} onClose={() => setDeleteView(null)} onDeleted={handleDeleted} permanent={deleteView.permanent} />
       )}
       <BulkDeleteDialog
-        viewIds={Array.from(selectedIds)}
+        viewIds={selectedViews.map(v => v.id)}
         isOpen={showBulkDelete}
         onClose={() => setShowBulkDelete(false)}
         onDeleted={handleBulkDeleted}

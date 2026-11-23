@@ -229,6 +229,15 @@ describe('DataSourceVersioningTab — paused editing', () => {
     expect(freezeMutate).toHaveBeenCalledWith({ graphId: 'g1', frozen: true, expectedRev: 0 })
   })
 
+  it('lets the graph\'s Playground maker pause it without publish: the server says so on main', () => {
+    canPublish = false
+    branches = [{ branchId: 'b_main', kind: 'main', status: 'open', createdAt: '', updatedAt: '',
+      access: { canRead: true, canWrite: false, canManage: false, canPublish: true } }]
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause editing' }))
+    expect(freezeMutate).toHaveBeenCalledWith({ graphId: 'g1', frozen: true, expectedRev: 0 })
+  })
+
   it('shows a manager who cannot publish that editing is paused, with no button', () => {
     canPublish = false
     resolved = { ...resolved, lifecycleState: 'frozen', lifecycleRev: 1 }
@@ -386,6 +395,14 @@ describe('DataSourceVersioningTab — forks', () => {
     renderTab()
     expect(screen.queryByRole('button', { name: 'Update from parent' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Propose to parent' })).toBeInTheDocument()
+  })
+
+  it('offers Update from parent where the server says the reader may advance that fork', () => {
+    canPublish = false                                  // e.g. the fork's Playground maker
+    forks = [fork('f1', { canPublish: true }), fork('f2', { canPublish: false })]
+    renderTab()
+    expect(within(rowOf('Sales · f1')).getByRole('button', { name: 'Update from parent' })).toBeInTheDocument()
+    expect(within(rowOf('Sales · f2')).queryByRole('button', { name: 'Update from parent' })).toBeNull()
   })
 
   it('lets a manager fork the graph, from the section’s header', () => {

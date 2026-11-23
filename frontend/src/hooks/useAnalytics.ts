@@ -14,6 +14,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
     analyticsService,
     rangeKey,
+    type AnalyticsCollaborationDoc,
     type AnalyticsDataDoc,
     type AnalyticsRangeSelection,
     type AnalyticsSummary,
@@ -97,6 +98,25 @@ export function useAnalyticsUsage(range: AnalyticsRangeSelection, enabled = true
     })
     return {
         data: query.data as AnalyticsUsageDoc | undefined,
+        isLoading: query.isLoading,
+        isFetching: query.isFetching,
+        error: query.error as Error | null,
+    }
+}
+
+/** The Collaboration tab's document. `enabled` keeps it off every other tab. */
+export function useAnalyticsCollaboration(range: AnalyticsRangeSelection, enabled = true) {
+    const query = useQuery({
+        queryKey: ['analytics', 'collaboration', rangeKey(range)] as const,
+        queryFn: () => analyticsService.getCollaboration(range),
+        enabled,
+        staleTime: STALE_MS,
+        placeholderData: (prev) => prev,
+        retry: 1,
+        refetchOnWindowFocus: false,
+    })
+    return {
+        data: query.data as AnalyticsCollaborationDoc | undefined,
         isLoading: query.isLoading,
         isFetching: query.isFetching,
         error: query.error as Error | null,

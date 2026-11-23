@@ -250,4 +250,142 @@ export const METRICS: Record<string, MetricDefinition> = {
         how: 'Changes recorded against the workspace in the activity log, edits to its views, and opens of its views, per period.',
         why: 'A total hides a workspace that went quiet halfway through the range. The pulse shows it as a gap in its own row.',
     },
+
+    // ── Collaboration ───────────────────────────────────────────────
+    questionsAsked: {
+        title: 'Questions asked',
+        what: 'Questions people asked about a view or a data source in the range — open and private ones alike.',
+        how: 'Conversations started in the range, against the same length of time before it. Deleted conversations, archived ones, and those about a view or source that has since been deleted are not counted. The total underneath is every question still counted, all time.',
+        why: 'Questions are demand for knowledge the platform does not yet answer by itself. Rising questions about one source usually mean its description is missing or wrong.',
+    },
+    answerRate: {
+        title: 'Answer rate',
+        what: 'The share of the questions asked in the range that now have an accepted answer.',
+        how: 'Questions asked in the range with a reply accepted as the answer, divided by all questions asked in the range. A question closed after its answer was accepted still counts as answered.',
+        why: 'A question with replies but no accepted answer may still be unresolved. A low rate means people are asking and not getting what they came for.',
+        caveat: 'The period before has had longer to collect answers, so it tends to read higher than a period that has only just ended.',
+    },
+    firstResponse: {
+        title: 'Time to first reply',
+        what: 'How long a question waited for its first reply from someone other than the person who asked.',
+        how: 'For questions asked in the range that have had a reply: the first reply by anyone but the asker, minus when the question was asked. The middle value is shown. Questions with no reply yet are not in it — they are counted under Waiting over a week once they are old enough.',
+        why: 'The wait someone feels. A long first reply is the moment people stop asking and start guessing.',
+    },
+    timeToAnswer: {
+        title: 'Time to an accepted answer',
+        what: 'How long a question took to be resolved by an accepted answer.',
+        how: 'For questions asked in the range and answered now: when the answer was accepted, minus when the question was asked. The middle value is shown.',
+        why: 'The gap between a first reply and an accepted answer is how much back-and-forth a question takes. If it grows, the first replies are not landing.',
+        caveat: 'A question closed after its answer was accepted counts as answered but cannot be timed: closing it records the close, not the acceptance.',
+    },
+    waitingOverWeek: {
+        title: 'Waiting over a week',
+        what: 'Questions still open with no accepted answer, asked more than seven days ago.',
+        how: 'As of now, whatever the range: open questions older than seven days. Some may have replies; none has an accepted answer and none was closed.',
+        why: 'Each one is a person still waiting on someone. The longest-waiting list below names which views and sources they are about.',
+    },
+    peopleAsking: {
+        title: 'People asking',
+        what: 'Distinct people who asked at least one question in the range.',
+        how: 'Distinct askers of the questions asked in the range, against the same length of time before it.',
+        why: 'Breadth, not volume: ten questions from one person and one each from ten people are very different signals.',
+    },
+    peopleAnswering: {
+        title: 'People answering',
+        what: 'Distinct people who replied to someone else’s question in the range.',
+        how: 'Distinct authors of replies posted in the range, leaving out replies to their own questions. Deleted replies are not counted.',
+        why: 'How widely knowledge is shared. If a handful of people answer everything, they are a bottleneck — and a single point of failure.',
+    },
+    repliesPosted: {
+        title: 'Replies posted',
+        what: 'Replies posted in the range, on any question still counted.',
+        how: 'Every reply posted in the range, including the asker’s own follow-ups, against the same length of time before it. Deleted replies are not counted.',
+        why: 'The volume of conversation. Read it beside questions asked: many replies per question means questions take a lot of back-and-forth.',
+    },
+    askedPrivately: {
+        title: 'Asked privately',
+        what: 'The share of questions asked in the range that only their participants, the subject’s maintainers and the workspace’s admins can see.',
+        how: 'Private questions asked in the range divided by all questions asked in the range.',
+        why: 'An answer given in private helps one person. A high share means knowledge is being shared in a way the next person cannot find.',
+    },
+    mostDiscussed: {
+        title: 'Most discussed',
+        what: 'The views and data sources people said most about in the range.',
+        how: 'Questions asked in the range plus replies posted in the range, on each view or source. Open is how many of its questions are open now, whatever their age; answered is of the questions asked in the range.',
+        why: 'Where people need help. A view or source near the top is worth a better description, or a named contact who can answer.',
+    },
+    topAnswerers: {
+        title: 'People who answer most',
+        what: 'The people whose answers were accepted most, and who replied most to other people’s questions.',
+        how: 'Accepted answers: questions asked in the range whose accepted answer they wrote. Replies: replies in the range to questions they did not ask.',
+        why: 'The people your platform leans on. Thank them — and make sure what they know is written down where the next person will find it.',
+    },
+    longestWaiting: {
+        title: 'Longest waiting',
+        what: 'The open questions that have waited longest for an accepted answer.',
+        how: 'Open questions, oldest first, as of now — not limited by the range. Age is counted in whole days from when the question was asked.',
+        why: 'The oldest open question is someone who asked and gave up. Ask the people who answer for that view or source to pick it up.',
+    },
+
+    // ── Data: describing sources, and requests ──────────────────────
+    sourcesDescribed: {
+        title: 'Described',
+        what: 'The share of data sources with a description.',
+        how: 'Live sources with a description that is not blank, divided by every live source. Forks are not counted: they read their parent’s graph and are not listed.',
+        why: 'A source with no description is one people have to ask about. This is the first thing a newcomer reads.',
+    },
+    sourcesTagged: {
+        title: 'Tagged',
+        what: 'The share of data sources with at least one tag.',
+        how: 'Live sources with one or more tags, divided by every live source.',
+        why: 'Tags are how people find sources by subject rather than by name. Untagged sources only turn up for people who already know what they are called.',
+    },
+    sourcesWithContacts: {
+        title: 'Named contacts',
+        what: 'The share of data sources that name an Owner or at least one Steward.',
+        how: 'Live sources with an Owner or a Steward saved on their details, divided by every live source. A source that names nobody still routes questions to people worked out from its permissions — that is a default, so it is not counted here.',
+        why: 'Questions about a source go to its named contacts first. Without them, questions land on whoever happens to manage the workspace.',
+    },
+    trustStatus: {
+        title: 'Trust',
+        what: 'How data sources are marked for trust: certified, in review, deprecated, or not marked.',
+        how: 'Every live source by its current trust status.',
+        why: 'A certified source is one people can rely on without asking. A large unmarked share means people cannot tell the trusted sources from the rest.',
+    },
+    classification: {
+        title: 'Classification',
+        what: 'How sensitive the data in each source is marked to be: public, internal, confidential, restricted, or not marked.',
+        how: 'Every live source by its classification. It is a label for people to read; it is not the publish restriction.',
+        why: 'Unclassified sources are the ones nobody has looked at with sensitivity in mind.',
+    },
+    topTags: {
+        title: 'Most used tags',
+        what: 'The tags on the most data sources.',
+        how: 'Each tag counted once per source, ignoring capitals, across every live source. A tag used only in workspaces you cannot see is not listed for you; the counts include every workspace.',
+        why: 'The subjects the catalogue is organised around. Near-duplicates here are a sign the tags need tidying.',
+    },
+    dataRequests: {
+        title: 'Data requests',
+        what: 'Requests to connect data to a workspace.',
+        how: 'Requests made in the range, against the same length of time before it. Connected and declined count the requests answered in the range, whenever they were made. Open is every request pending or in progress now.',
+        why: 'Each open request is a team waiting for data. A backlog here holds up everything they meant to build.',
+    },
+    timeToConnect: {
+        title: 'Time to connect',
+        what: 'How long a data request waited until its data was connected.',
+        how: 'For requests connected in the range: when it was connected, minus when it was asked for. The middle value is shown.',
+        why: 'The wait between asking for data and having it. If it grows, requests are arriving faster than the platform team can connect them.',
+    },
+    workspaceRequests: {
+        title: 'Workspace requests',
+        what: 'Requests for a workspace of one’s own.',
+        how: 'Requests submitted in the range, against the same length of time before it. Approved and declined count the decisions made in the range. Open is every request pending now, including those waiting on the person who asked for changes.',
+        why: 'Each open request is a team that cannot start yet.',
+    },
+    timeToDecision: {
+        title: 'Time to a decision',
+        what: 'How long a workspace request waited for an approval or a decline.',
+        how: 'For requests decided in the range: when it was decided, minus when it was first submitted — so any back-and-forth over requested changes is included. The middle value is shown.',
+        why: 'The wait before a new team can start. A long one usually means nobody is watching the queue.',
+    },
 }

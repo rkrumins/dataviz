@@ -6,7 +6,11 @@
  * account with no workspace bindings and two feature flags set a particular
  * way; the redaction work shipped twice with nobody having looked at it.
  *
- *   node scripts/analytics-shot.mjs [fixture:tab ...]
+ *   node scripts/analytics-shot.mjs [fixture:tab[:mode+mode] ...]
+ *
+ * Modes: `dark`, `admin`, `narrow` (a 390px phone), `tall` (a long page),
+ * `off` (questions switched off). `HARNESS_PORT` and `HARNESS_OUT` move the server and the output, for a
+ * machine where 5199 is taken.
  *
  * `activity:platform` and `activity:workspace` shoot the Activity explorer,
  * which draws with the same charts and palette.
@@ -17,8 +21,8 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 
 const run = promisify(execFile)
-const PORT = 5199
-const OUT = '.harness'
+const PORT = Number(process.env.HARNESS_PORT) || 5199
+const OUT = process.env.HARNESS_OUT || '.harness'
 
 // One shot per posture on the tab where that posture is most visible, plus a
 // dark pass — the chart palette is resolved in JavaScript, so dark is the only
@@ -40,6 +44,12 @@ const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'privileged:overview:dark',
   'strict:overview:dark',
   'privileged:data:dark',
+  'privileged:collaboration',
+  'strict:collaboration',
+  'firstRun:collaboration',
+  'privileged:collaboration:dark',
+  'privileged:collaboration:narrow',
+  'privileged:drilldown',
   'activity:platform',
   'activity:workspace:dark',
 ]
@@ -67,8 +77,11 @@ mkdirSync(OUT, { recursive: true })
 // `--strictPort` so a leftover server FAILS here rather than being silently
 // reused — a reused server serves the module graph it started with, so the
 // shots come back showing code you already changed.
+// Its own process group, so stopping it stops vite and not just the `npx`
+// wrapper — which left vite holding the port and this script waiting on it.
 const vite = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'], {
   stdio: ['ignore', 'pipe', 'pipe'],
+  detached: true,
 })
 const ready = new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('Vite did not start in 60s')), 60_000)
@@ -92,19 +105,23 @@ const ready = new Promise((resolve, reject) => {
 try {
   await ready
   for (const shot of SHOTS) {
-    // `fixture:tab[:dark|:admin]` — the third segment picks the palette or the
-    // permission claims, whichever the posture needs.
-    const [fixture, tab, mode] = shot.split(':')
+    // `fixture:tab[:dark|:admin|:narrow|:off]` — the third segment picks the
+    // palette, the permission claims, the width or the switch, whichever the
+    // posture needs; several join with `+`.
+    const [fixture, tab, mode = ''] = shot.split(':')
+    const modes = new Set(mode.split('+'))
     // `activity:scope[:dark]` names the explorer's scope in place of a tab.
     const activity = fixture === 'activity'
     const query = (activity ? `scope=${tab}` : `fixture=${fixture}&tab=${tab}`)
-      + (mode === 'dark' ? '&theme=dark' : '')
-      + (mode === 'admin' ? '&perms=admin' : '')
-    const out = join(OUT, `${activity ? '' : 'analytics-'}${shot.replace(/:/g, '-')}.png`)
+      + (modes.has('dark') ? '&theme=dark' : '')
+      + (modes.has('admin') ? '&perms=admin' : '')
+      + (modes.has('off') ? '&conversations=off' : '')
+    const out = join(OUT, `${activity ? '' : 'analytics-'}${shot.replace(/[:+]/g, '-')}.png`)
     await run(chromium, [
       '--headless', '--no-sandbox', '--disable-gpu', '--hide-scrollbars',
       '--force-device-scale-factor=2',
-      '--window-size=1600,1400',
+      modes.has('narrow') ? '--window-size=390,6400'
+        : modes.has('tall') ? '--window-size=1600,4400' : '--window-size=1600,1400',
       '--virtual-time-budget=4000',
       `--screenshot=${out}`,
       `http://localhost:${PORT}/${activity ? 'activity' : 'analytics'}-harness.html?${query}`,
@@ -112,5 +129,5 @@ try {
     console.log('  ✓', out)
   }
 } finally {
-  vite.kill('SIGTERM')
+  try { process.kill(-vite.pid, 'SIGTERM') } catch { vite.kill('SIGTERM') }
 }

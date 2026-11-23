@@ -8,6 +8,7 @@ import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 import type { AccessRequestStatus, RequestPolicy, WorkspaceAccessMode } from './accessRequestsService'
 import type { DataSourceTransferResponse } from './dataSourceTransferService'
+import type { Classification, TrustStatus } from './dataSourceMetadataService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -88,8 +89,17 @@ export interface DataSourceResponse {
     /** A fork's data source: the data source and graph it was forked from. Null on every other
      *  data source; lists leave forks out unless asked (`includeForks`). */
     forkOf?: { dataSourceId: string; graphId: string | null } | null
+    /** Who made it — in the Playground, whose experiment it is. */
+    createdBy?: string | null
     createdAt: string
     updatedAt: string
+    /** What it is, in its own words; else the catalog item's (shown "From the catalog"). */
+    description?: string | null
+    catalogDescription?: string | null
+    tags?: string[]
+    /** How sensitive its data is — a label, not the publishing gate `isRestricted`. */
+    classification?: Classification | null
+    trustStatus?: TrustStatus | null
 
     // Aggregation state
     aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped'
@@ -183,6 +193,8 @@ export interface WorkspaceResponse {
     /** Live views built on this workspace that the caller can open — the full
      *  list only; null where it was not counted. */
     viewCount?: number | null
+    /** 'playground' — the shared sandbox anyone may join (see playgroundService). */
+    kind?: 'standard' | 'playground'
     /** Publication gate for this workspace's views. Absent on servers that
      *  predate the setting — treat a missing value as 'request'. */
     publishPolicy?: WorkspacePublishPolicy

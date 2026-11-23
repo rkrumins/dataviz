@@ -78,7 +78,12 @@ export function bestFitId(matching: Pick<OntologyMatchState, 'best'>): string | 
     return (matching.best?.jaccardScore ?? 0) > 0 ? matching.best?.ontologyId ?? null : null
 }
 
-export function useOntologyMatches({ providerId, assetName, stats, enabled, minScore = 0 }: {
+/** Scores the stats against the semantic layers: `/admin/ontologies/suggest` by default. */
+export type SuggestLayers = (stats: Record<string, unknown>, minScore: number) => Promise<OntologySuggestResponse>
+
+const suggestAll: SuggestLayers = (stats, minScore) => ontologyDefinitionService.suggest(stats, undefined, minScore)
+
+export function useOntologyMatches({ providerId, assetName, stats, enabled, minScore = 0, suggest = suggestAll }: {
     providerId?: string
     /** The graph name as the provider knows it (sourceIdentifier), not the label. */
     assetName?: string
@@ -93,6 +98,9 @@ export function useOntologyMatches({ providerId, assetName, stats, enabled, minS
      * the top three — "no score" and "scores badly" are different claims.
      */
     minScore?: number
+    /** Where the scores come from (the Playground scores only the layers it offers). Keep its
+     *  identity stable. */
+    suggest?: SuggestLayers
 }): OntologyMatchState {
     const [phase, setPhase] = useState<OntologyMatchState['phase']>('idle')
     const [matches, setMatches] = useState<OntologyMatchResult[]>([])
@@ -128,7 +136,7 @@ export function useOntologyMatches({ providerId, assetName, stats, enabled, minS
             }
 
             const forSuggest = transformStatsForSuggest(raw)
-            const suggested = await ontologyDefinitionService.suggest(forSuggest, undefined, minScore)
+            const suggested = await suggest(forSuggest, minScore)
 
             // Rank by overlap. Ties keep the server's order, which is stable.
             const ranked = [...suggested.matchingOntologies]
@@ -145,7 +153,7 @@ export function useOntologyMatches({ providerId, assetName, stats, enabled, minS
             setError(err instanceof Error ? err.message : 'Could not analyse the graph.')
             setPhase('error')
         }
-    }, [providerId, assetName, stats, minScore])
+    }, [providerId, assetName, stats, minScore, suggest])
 
     // Analyse once the step is reachable and we know which graph to look at.
     useEffect(() => {

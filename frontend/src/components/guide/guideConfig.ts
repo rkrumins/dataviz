@@ -263,8 +263,40 @@ export const guideEntries: GuideEntry[] = [
     description: 'What an access message means, how to ask for access, and where to see the answer',
     importFn: () => import('@docs/guide/REQUESTING_ACCESS.md?raw'),
   },
+  {
+    slug: 'requesting-a-workspace',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Requesting a Workspace',
+    description: 'Ask the platform team for a workspace of your own, follow the request, and answer one',
+    importFn: () => import('@docs/guide/REQUESTING_A_WORKSPACE.md?raw'),
+  },
+  {
+    slug: 'requesting-data',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Requesting Data',
+    description: 'Ask for data to be connected to a workspace, follow the request, and connect one',
+    importFn: () => import('@docs/guide/REQUESTING_DATA.md?raw'),
+  },
+  {
+    slug: 'asking-questions',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Asking Questions',
+    description: 'Ask the people who look after a view about it, follow the conversation, and answer a question',
+    importFn: () => import('@docs/guide/ASKING_QUESTIONS.md?raw'),
+  },
 
   // For Builders
+  {
+    slug: 'playground',
+    section: 'builder',
+    persona: 'builder',
+    title: 'The Playground',
+    description: 'Your workspace at its first stage: start from a sample, your own data or blank, build, review and publish your own, then move it into a workspace',
+    importFn: () => import('@docs/guide/PLAYGROUND.md?raw'),
+  },
   {
     slug: 'creating-views',
     section: 'builder',
@@ -356,6 +388,14 @@ export const guideEntries: GuideEntry[] = [
     title: 'Workspace Admin',
     description: 'Members, data sources, aggregation, views, profiling, reviews and ontology health',
     importFn: () => import('@docs/guide/WORKSPACE_ADMIN.md?raw'),
+  },
+  {
+    slug: 'describing-data',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Describing and Trusting Data',
+    description: 'Describe a data source, tag it, certify it or mark it deprecated, and label how sensitive it is',
+    importFn: () => import('@docs/guide/DESCRIBING_DATA.md?raw'),
   },
   {
     slug: 'users-access',

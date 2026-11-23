@@ -32,6 +32,8 @@ export interface ResolvedViewFilters {
   updatedBefore: string | null
   category: string | null
   currentUserId: string | null
+  /** The "Recent" category's lower bound, when the surface fixes one (see ResolveContext). */
+  recentSince?: string | null
 }
 
 export interface ResolveContext {
@@ -42,6 +44,9 @@ export interface ResolveContext {
   scopeWorkspaceId?: string | null
   /** The window the `visit` date rule covers (see `useVisitWindow`). */
   visit?: { from: string; to: string } | null
+  /** Where "Recent" starts, fixed for the visit. Without one the cutoff moves every
+   *  five minutes, and each move is a new list query — page one again. */
+  recentSince?: string | null
 }
 
 /** Stands in for a user id when nobody is signed in, so "me" matches nothing
@@ -68,6 +73,7 @@ export function resolveFilters(state: ViewFilterState, ctx: ResolveContext): Res
     updatedBefore: updated?.before ?? null,
     category: state.category,
     currentUserId: ctx.currentUserId,
+    recentSince: ctx.recentSince ?? null,
   }
 }
 
@@ -79,6 +85,7 @@ export function resolveFilters(state: ViewFilterState, ctx: ResolveContext): Res
 export function resolveCategoryParams(
   category: string | null,
   currentUserId: string | null,
+  recentSince?: string | null,
 ): Partial<ViewQueryParams> {
   switch (category) {
     case 'my-views':
@@ -88,6 +95,7 @@ export function resolveCategoryParams(
     case 'my-favourites':
       return { favouritedOnly: true }
     case 'recently-added': {
+      if (recentSince) return { createdAfter: recentSince }
       // IMPORTANT: quantise the cutoff to a 5-minute bucket so the
       // string value is stable across re-renders. Without this, every
       // render produces a fresh ``Date.now()`` → fresh ISO string →
@@ -125,7 +133,7 @@ function laterOf(a: string | null | undefined, b: string | null | undefined): st
 export function toQueryParams(
   r: ResolvedViewFilters & { favouritedOnly?: boolean },
 ): ViewQueryParams {
-  const categoryParams = resolveCategoryParams(r.category, r.currentUserId)
+  const categoryParams = resolveCategoryParams(r.category, r.currentUserId, r.recentSince)
   return {
     search: r.search || undefined,
     visibility: r.visibility || undefined,

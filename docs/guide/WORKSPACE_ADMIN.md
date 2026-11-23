@@ -14,7 +14,7 @@ ontology health.
 >
 > - **Create Workspace** needs the `system:workspaces:create` permission —
 >   the **Org Admin** and **Super Admin** roles carry it.
-> - The **Members** tab appears to the people who let others into that
+> - The **People** tab appears to the people who let others into that
 >   workspace (`workspace:members:add`) — its **Workspace admins** and
 >   **Workspace stewards**, **Org Admins** and **Super Admins**. Removing
 >   people and choosing how people get in stay with admins (`workspace:admin`).
@@ -28,30 +28,62 @@ ontology health.
 
 ## Find your way around a workspace
 
-Open **Workspaces** in the sidebar and select a workspace. Under its header, the
-**Quick Links** row jumps to its **Explorer**, its **Schema Editor**, and
-**Global Jobs** (**Ingestion → Job History**). Below that are the tabs:
+Open **Workspaces** in the sidebar and select a workspace. It opens on its
+**Overview**, which is built for using the workspace rather than configuring it.
+
+The header shows:
+
+- the workspace's name and description;
+- its health as a sentence, such as *"Risk Models" couldn't finish refreshing*,
+  with a link to where it's fixed if you can fix it;
+- how many people use it, and what they open most;
+- your own role in it.
+
+**Explore views** opens everything built here in the Explorer. **New view**
+starts a view in this workspace, if you can create one. Under **⋯** are the data
+model editor and ingestion jobs, for the people who use them.
+
+The **Overview** shows:
+
+- **Needs your attention** — reviews asking for you, people asking to join,
+  sources that need a look, data sources waiting to move and drafts whose owner
+  left. Each row has the one place to go about it, and appears only if it is
+  yours to act on.
+- **Get this workspace ready** — for admins and the people who manage its data,
+  while the workspace is new. It ticks off connecting data, choosing a data
+  model, building its connections, creating the first view and inviting people.
+- **Jump back in** and **Popular here** — the views you opened or favourited
+  here, and what everyone here opens most.
+- **At a glance** and **Recent changes**.
+
+The rest lives on tabs. You see only the tabs you can use:
 
 | Tab | Use it to | Who sees it |
 | --- | --- | --- |
-| **Data Sources** | Attach, edit and move the graphs that feed this workspace | Everyone who can open the workspace |
-| **Profiling** | See how each source's entity and relationship counts are changing | Anyone holding a built-in workspace role, Org Admins and Super Admins |
+| **Overview** | See what needs you, get back to your views, and take in the workspace at a glance | Everyone who can open the workspace |
 | **Views** | Oversee every view: visibility, owners, bulk changes and publication requests | Everyone who can open the workspace |
-| **Aggregation** | Monitor and re-run aggregation for each source | Everyone who can open the workspace (re-running needs data-source permission) |
-| **Ontology** | Follow changes to the semantic layers this workspace's sources use | Everyone who can open the workspace |
+| **Data** | **Sources** — the graphs that feed this workspace. **Data model** — what changed in their ontologies. **Processing** — how fresh each source's connections are, and rebuilding them. **Trends** — how counts are changing | Everyone who can open the workspace. Adding sources and rebuilding need data-source permission; **Trends** needs a built-in workspace role |
 | **Reviews** | Review merge requests across the workspace's versioned sources | Only while **Version control** is on — it is by default |
 | **Versioned graphs** | Set the defaults this workspace's versioned graphs follow, within the platform's limits; see what each graph sets itself; read every change ([Versioned Graph Settings](/guide/versioned-graph-settings)) | Only while **Version control** is on. Everyone who can open the workspace reads them; workspace admins change them and see their history |
-| **Members** | Decide who can get in, with which role, and answer their requests | Workspace admins and stewards, Org Admins and Super Admins |
+| **People** | Decide who can get in, with which role, and answer their requests | Workspace admins and stewards, Org Admins and Super Admins |
 | **Activity** | See who ran, changed or granted what in this workspace — when, and why | Workspace admins, Org Admins, Org Auditors and Super Admins |
+| **Settings** | Set how entities are recognised, and hand on drafts whose owner left (how drafts and reviews work is on **Versioned graphs**) | Workspace admins and anyone who manages its data sources |
+
+> **Business or Technical:** the page follows the **Business / Technical** switch
+> at the top of the app. In **Technical** it also shows identifiers, node and edge
+> counts, database vendors, projection modes and raw error messages.
+
+> **Older links still work:** a link to a former tab, such as `?tab=aggregation`
+> or `?tab=members`, opens the matching place: **Data → Processing**, or **People**.
 
 > **If you don't see Reviews or Versioned graphs:** **Version control** is switched off in
 > **Administration → Features** — see [Feature
-> Switches](/guide/feature-switches). **If you don't see Members:** you aren't
+> Switches](/guide/feature-switches). **If you don't see People:** you aren't
 > an admin or steward of this workspace.
 
 ---
 
-## Giving people access (the Members tab)
+## Giving people access (the People tab)
 
 Most people reach a workspace through a **binding**: a user or a group, given
 one role in this workspace. A group binding covers every member of the group.
@@ -70,7 +102,7 @@ Two kinds of people look after who gets in:
 A steward suits the team lead who knows who should be in, without handing them
 the workspace.
 
-1. Open the workspace and select the **Members** tab. (Or, on **Workspaces**,
+1. Open the workspace and select the **People** tab. (Or, on **Workspaces**,
    hover over the workspace's card and select **Members**.)
 2. Select **Add member**. The **Add member** dialog opens.
 3. Choose **User**, **Group** or **Service account**, search, and pick one; a
@@ -123,10 +155,12 @@ exception**.
 Custom roles your team has created also appear in the list, when they can be
 bound in this workspace and you hold everything they grant.
 
-> **Note:** Binding a group needs the platform's group list
-> (`system:groups:manage`) — Org Admins and Super Admins have it. A workspace
-> admin without it can still add people one by one, or ask an Org Admin to bind
-> the group.
+> **Note:** Binding a group needs only this workspace's admin role, not the
+> platform's group list: **Group** searches every group, and a bound group's
+> row opens to show the people it lets in here. Creating platform-wide groups
+> and changing who is in them stays with `system:groups:manage` — Org Admins
+> and Super Admins have it. The workspace's own groups are its admins' to
+> manage (see [Your workspace's groups](#your-workspaces-groups)).
 
 ### Seeing who can actually get in
 
@@ -169,6 +203,44 @@ through its keys they could still act here. Tick **Remove its role here
 too** to remove that as well, or ask its other managers to remove them as a
 manager.
 
+### Your workspace's groups
+
+A workspace can have groups of its own — the ones an approved [workspace
+request](/guide/requesting-a-workspace) made, and any its admins make. They're
+listed under **Groups** on the People tab. Each card says what the group can do
+here, who is in it, and whether it follows a group in your identity provider.
+
+The workspace's admins manage these groups there, without the platform's group
+list:
+
+1. Click **New group**, or one of the starters (**Editors**, **Viewers**,
+   **Publishers**) when there are none yet.
+2. Give it a name, choose what its people can do here (**Can view**, **Can
+   edit** or **Can publish**), and invite people. Its name always starts with
+   the workspace's — "Lab · Engineers" — because group names are unique across
+   {brand}.
+3. Optionally, name the identity-provider group it should follow.
+
+Click a group's card to rename it, change its role, add or remove people, link
+it to the identity provider, or delete it. Stewards see the groups and who is in
+them; only admins change them.
+
+Groups bound here that the workspace doesn't own are listed too, marked
+**Platform group**, and managed on the platform's Groups page. So is a group of
+yours that has also been given access somewhere you can't grant, or that manages
+a service account: who is in it decides more than this workspace.
+
+A group can be **linked to a group in your identity provider** (an Active
+Directory group, say), so its members follow the directory at each sign-in. As
+you type, the identity-provider groups you yourself had at your last sign-in are
+suggested — nobody sees anyone else's. Linking is a Super Admin's call: when you
+click **Ask to link**, the group's card shows the link waiting, Super Admins
+find it under **Workspaces → Requests** (with how many people have that group,
+and the connection to link it from), and you hear in your Inbox whether it was
+linked or declined. A link still waiting after three days is brought up to the
+Super Admins again, and a last time after a week. People the identity provider
+put in a group are marked **From the directory**; they leave it there, not here.
+
 ### Answering access requests
 
 People who can't open a workspace can ask for access — see [Requesting
@@ -178,7 +250,7 @@ Org Admins.
 
 1. Select **Workspaces** in the sidebar, then the **Requests** tab — every open
    request across the workspaces you answer, with the count on the tab. (The
-   **Members** tab shows its own workspace's requests above the members while
+   **People** tab shows its own workspace's requests above the members while
    any are waiting.)
 2. Read the request: who asked, for which level, and their reason.
 3. Select **Review** and choose your answer — see the table below. Add a note
@@ -217,7 +289,7 @@ The requester follows it on **My access**.
 
 ### How people get in
 
-The **How people get in** card at the foot of the **Members** tab holds four
+The **How people get in** card at the foot of the **People** tab holds four
 settings. Only admins see it.
 
 | Setting | What it does |
@@ -261,7 +333,7 @@ Then:
 
 An **access review** goes through the grants made here — people's and teams' —
 so you can keep or remove each. The **Access reviews** card sits at the foot of
-the **Members** tab; only admins see it.
+the **People** tab; only admins see it.
 
 1. Under **Access reviews**, choose when it's due — **7**, **14** or **30
    days** — and select **Start a review**. It takes a snapshot of the grants as
@@ -304,6 +376,16 @@ straight in.
 
 ---
 
+### Workspaces people ask for
+
+People who can't create workspaces may ask for one (while **Workspace requests** is on
+in [Feature Switches](/guide/feature-switches)). As someone who creates workspaces, you
+answer them on **Workspaces → Requests**, under **Requests for new workspaces**:
+approve one (tidying its name first if you like), send it back with a question, or
+decline it. Approving creates the workspace with the requester as its admin, adds the
+teammates they named and moves the Playground graphs they chose. See
+[Requesting a Workspace](/guide/requesting-a-workspace#for-platform-and-org-admins-answer-requests).
+
 ## Adding a data source
 
 A workspace isn't usable until it has at least one **data source** — a catalog
@@ -320,12 +402,22 @@ workspace). The **Add Data Source** wizard opens at **Source**.
 3. **Review** — confirm and select **Add data source**.
 
 **You should now see** "“*name*” is attached". Nothing is aggregated yet — run
-it from the **Aggregation** tab when you're ready (see below).
+it from **Data → Processing** when you're ready (see below).
 
 > **Note:** Aggregation needs a semantic layer. A source left on **System
 > defaults** isn't aggregated until you assign a layer: select the source on
-> **Data Sources**, select **Edit**, choose a **Semantic layer (ontology)**, then
+> **Data → Sources**, select **Edit**, choose a **Semantic layer (ontology)**, then
 > **Save changes**.
+
+### Describe it, and name who vouches for it
+
+With **Data source details** on, a source's Overview opens with **About this data**:
+anyone who manages its sources can **Edit details** — a description, links and tags.
+Then name its **Owner** and **Stewards** under **Who to ask about this data**: they,
+and the workspace's admins, can **Change status** to certify it (or mark it in review
+or deprecated) and label how sensitive it is. A named Owner or Steward can also mark a
+data request connected to their source. See [Describing and Trusting
+Data](/guide/describing-data).
 
 ---
 
@@ -351,7 +443,7 @@ How you move it depends on what you run:
 
 ### Move it
 
-1. On the **Data Sources** tab, select the source to open it, open its **⋯** menu and
+1. On **Data → Sources**, select the source to open it, open its **⋯** menu and
    choose **Move to another workspace…**.
 2. **Destination** — pick where it goes. Each workspace says what you can do there:
    move it now, or ask its admins. Workspaces it can't go to are folded under ***N*
@@ -394,7 +486,7 @@ group to it, so the provider keeps deciding.
 
 When another workspace asks to move a source into yours, its admins hear about it in
 their Inbox, and the request appears on **Workspaces → Requests** and as a banner on
-the workspace's **Data Sources** tab.
+the workspace's **Data → Sources**.
 
 1. Select **Review**. You see exactly what would move, who would lose access, and
    anything that has changed since they asked.
@@ -424,7 +516,7 @@ lived** on the source's panel lists each move.
 ### Start from the destination
 
 If you administer both workspaces, you can also start from the destination: on its
-**Data Sources** tab, select **Add Source** and pick a source that belongs to another
+**Data → Sources**, select **Add source** and pick a source that belongs to another
 workspace. A source with views is marked **Move with *N* views** and opens the same
 steps, with the destination already chosen.
 
@@ -434,38 +526,41 @@ steps, with the destination already chosen.
 
 ---
 
-## Running and monitoring aggregation (the Aggregation tab)
+## Keeping connections up to date (Data → Processing)
 
-**Aggregation** pre-computes rolled-up lineage so deep lineage queries stay
-fast. The **Aggregation** tab shows every source in the workspace and lets you
-re-run it. Status updates live while a job is running.
+**Aggregation** works out each source's connections — its rolled-up lineage —
+ahead of time, so deep lineage opens fast. Views keep working while it runs.
+**Data → Processing** shows how fresh every source's connections are and lets you
+rebuild them. Status updates live while a job is running.
 
-1. Open the workspace and select **Aggregation**. The **Aggregation Overview**
-   lists each data source with its status: **Ready**, **Running**, **Pending**,
-   **Failed**, **Skipped** or **Not Started**.
-2. To narrow the list, select a status chip such as **2 Failed**; select **All**
-   to clear it.
-3. To re-run one source, select **Re-trigger** on its card. (While a job is
-   running or queued, the button reads **Job Active**.)
-4. To see past runs, select **Job History** on the card.
+1. Open the workspace and select **Data**, then **Processing**. The summary at the
+   top says how many sources are up to date. Each source shows its status:
+   **Up to date**, **Refreshing**, **Queued**, **Didn't finish**, **Skipped** or
+   **Not built yet**.
+2. To narrow the list, select a status chip such as **1 Didn't finish**; select
+   **All** to clear it.
+3. To rebuild one source, select **Rebuild** on its card. (While a job is running
+   or queued, the button reads **Refreshing…**.) **Rebuild** needs data-source
+   permission; everyone else sees the status and history only.
+4. To see past runs, select **History** on the card.
 
-**You should now see** the source move to **Pending**, then **Running**, then
-**Ready**.
+**You should now see** the source move to **Queued**, then **Refreshing**, then
+**Up to date**.
 
 What the warnings on a card mean:
 
 | Warning | What to do |
 | --- | --- |
-| **Drift detected** — source data has changed since the last aggregation | Select **Re-trigger** to bring it up to date. |
-| **Aggregation predates depth stamps** | Re-trigger it — or select **Rebuild all aggregations** at the top, which also shows how many sources **need it**. |
-| **Connections not up to date** | Re-aggregating won't fix this one — as the card says, check the source's version control. **Administration → Infrastructure** lists any **Graphs not publishing**. |
-| A failed job's error message | Fix the cause it names, then **Re-trigger**. |
+| **The data changed since these connections were built** | Select **Rebuild** to bring them up to date. |
+| **Built the old way** — things that contain things of their own kind won't nest fully | Rebuild it — or select **Rebuild all** at the top, which also shows how many sources **need it**. |
+| **Connections not up to date** | Rebuilding won't fix this one — as the card says, check the source's version history. **Administration → Infrastructure** lists any **Graphs not publishing**. |
+| **The last refresh didn't finish** | Open **Technical details** to see the error, fix the cause it names, then **Rebuild**. |
 
-**Purge** (shown on a **Ready** source) removes that source's aggregated edges
-after you confirm **Purge all edges?**. You need it before switching a source to
-a different aggregation strategy — which you do on the source's own
-**Aggregation** tab (select it on **Data Sources**): purge, switch, then
-re-trigger. For platform administrators, the **Workers** panel shows the
+**Clear connections** (in the **Technical** view, on an **Up to date** source)
+removes that source's aggregated edges after you confirm. You need it before
+switching a source to a different aggregation strategy — which you do on the
+source's own **Processing** tab (open it on **Data → Sources**): clear, switch,
+then rebuild. For platform administrators, **Infrastructure — workers and pipeline defaults** opens the **Workers** panel, which shows the
 aggregation workers online and the queue, with **Defaults** for fleet-wide
 tuning.
 
@@ -516,12 +611,12 @@ person when you need to answer "who changed this, and when."
 
 ---
 
-## Watching what changed (the Profiling tab)
+## Watching what changed (Data → Trends)
 
 **Profiling** answers "what moved, and by how much?" across the workspace's
 sources, from counts {brand} collects in the background.
 
-1. Open the workspace and select **Profiling**.
+1. Open the workspace and select **Data**, then **Trends**.
 2. Pick a time window — **24 hours**, **7 days** (the default), **30 days** or
    **90 days** — and what to measure: **Entities**, **Relationships**, or
    **Entities + relationships**.
@@ -603,7 +698,7 @@ with a count of what's drifted or unmapped — before you drill into any detail,
 and it works from data collected periodically, not a live query, so it's fast
 to check. Case drift is usually the easy win: {brand} aligns it to the declared
 spelling for you, so you don't need a manual data fix. The workspace's own
-**Ontology** tab shows a timeline of changes to the layers its sources use.
+**Data → Data model** shows a timeline of changes to the layers its sources use.
 
 ---
 
@@ -613,6 +708,8 @@ spelling for you, so you don't need a manual data fix. The workspace's own
   roles, use groups, or invite people.
 - [Data Freshness & Ingestion](/guide/data-freshness) — when aggregation fails
   or data looks out of date.
+- [Describing and Trusting Data](/guide/describing-data) — when you want each
+  source to say what it is and whether to rely on it.
 - [The Semantic Layer](/guide/semantic-layer) — when you want to understand or
   improve a layer.
 - [The Admin Console](/guide/governance-ops) — when you want to keep the whole

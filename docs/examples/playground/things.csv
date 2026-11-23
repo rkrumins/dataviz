@@ -1,0 +1,9 @@
+key,type,name,description,tags,owner,rows
+pos,System,Point of sale,"The tills in every shop, one record per sale",,Store operations,
+web_shop,System,Web shop,Orders placed on the website,,Digital,
+orders_raw,Table,Raw orders,"Every order as it lands, card numbers included",pii,Data engineering,182000
+customers,Table,Customers,"One row per customer: name, email, loyalty tier",pii,Data engineering,9400
+orders_clean,Table,Clean orders,"Orders without duplicates, card numbers removed",certified,Analytics engineering,179500
+daily_sales,Table,Daily sales,"Sales per shop per day — the ""official"" figures",certified,Analytics engineering,2190
+sales_dashboard,Dashboard,Sales dashboard,What the business reads every morning,,Finance,
+loyalty_report,Report,"Loyalty report, monthly","Who comes back, and how often",pii,Marketing,

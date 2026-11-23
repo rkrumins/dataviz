@@ -25,6 +25,21 @@ function DataSourceHistoryRedirect() {
   return <Navigate to={`/datasources/${catalogId}?tab=profiling`} replace />
 }
 
+// Your conversations live on your profile; /conversations is the short way there, its query kept
+// (?box=&thread=) so an "All conversations" link lands on the same box.
+function ConversationsRedirect() {
+  const [params] = useSearchParams()
+  const next = new URLSearchParams(params)
+  next.set('tab', 'conversations')
+  return <Navigate to={`/me/profile?${next}`} replace />
+}
+
+const PROFILES_OFF = {
+  title: 'Profiles and conversations are turned off',
+  message: 'People’s profiles come with questions and conversations about views and data, which an administrator hasn’t turned on for this deployment.',
+  guideSlug: 'asking-questions',
+}
+
 // A service account's keys page became the account's own page, its managers'
 // and its administrators' alike. Redirect old links, notices included.
 function ServiceAccountKeysRedirect() {
@@ -70,6 +85,8 @@ const WorkspacesPage = lazyWithRetry(() => import('@/pages/WorkspacesPage').then
 const TemplatesPage = lazyWithRetry(() => import('@/pages/TemplatesPage').then(m => ({ default: m.TemplatesPage })))
 const WorkspaceDetailPage = lazyWithRetry(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
+const PlaygroundPage = lazyWithRetry(() => import('@/pages/PlaygroundPage').then(m => ({ default: m.PlaygroundPage })))
+const ReviewCenterPage = lazyWithRetry(() => import('@/pages/ReviewCenterPage').then(m => ({ default: m.ReviewCenterPage })))
 const WorkspaceReviewPage = lazyWithRetry(() => import('@/pages/WorkspaceReviewPage').then(m => ({ default: m.WorkspaceReviewPage })))
 const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
@@ -78,6 +95,7 @@ const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m
 const ServiceAccountPage = lazyWithRetry(() => import('@/pages/ServiceAccountPage').then(m => ({ default: m.ServiceAccountPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
 const PreferencesPage = lazyWithRetry(() => import('@/pages/PreferencesPage').then(m => ({ default: m.PreferencesPage })))
+const PersonProfilePage = lazyWithRetry(() => import('@/pages/PersonProfilePage').then(m => ({ default: m.PersonProfilePage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
 
 // Auth pages (unauthenticated)
@@ -221,6 +239,10 @@ export const router = createBrowserRouter([
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
       // Reviews are a versioning surface — the whole route disappears (redirects
       // to the workspace) when the admin turns version control off.
+      // The way into the Playground: opens it, joining on the way when needed.
+      { path: 'playground', element: <RequireFeature feature="playgroundEnabled" explain title="The Playground is turned off" message="The Playground is a common area where anyone can build graphs and try ideas out, apart from production. An administrator hasn't turned it on for this deployment." guideSlug="playground"><Lazy><PlaygroundPage /></Lazy></RequireFeature> },
+      // The Review Center: every workspace the reader can review in, or one (?workspace=).
+      { path: 'reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><ReviewCenterPage /></Lazy></RequireFeature> },
       { path: 'workspaces/:wsId/reviews', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewsPage /></Lazy></RequireFeature> },
       { path: 'workspaces/:wsId/reviews/:prId', element: <RequireFeature feature="versioningEnabled" explain title="Reviews are turned off" message="Reviews are part of version control, which an administrator hasn't enabled for this deployment. With it on, changes are drafted, reviewed, and merged like a pull request." guideSlug="versioning-change-control"><Lazy><WorkspaceReviewPage /></Lazy></RequireFeature> },
 
@@ -247,6 +269,11 @@ export const router = createBrowserRouter([
       { path: 'me/service-accounts/:accountId', element: <ServiceAccountKeysRedirect /> },
       // How the app works for you — kept in this browser, ungated like its siblings.
       { path: 'me/preferences', element: <Lazy><PreferencesPage /></Lazy> },
+      // Profiles — yours with your conversations and what you watch, and anyone else's: what
+      // they made and look after, as far as you can see it. They come with conversations.
+      { path: 'me/profile', element: <RequireFeature feature="conversationsEnabled" explain {...PROFILES_OFF}><Lazy><PersonProfilePage /></Lazy></RequireFeature> },
+      { path: 'people/:userId', element: <RequireFeature feature="conversationsEnabled" explain {...PROFILES_OFF}><Lazy><PersonProfilePage /></Lazy></RequireFeature> },
+      { path: 'conversations', element: <RequireFeature feature="conversationsEnabled" explain {...PROFILES_OFF}><ConversationsRedirect /></RequireFeature> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context

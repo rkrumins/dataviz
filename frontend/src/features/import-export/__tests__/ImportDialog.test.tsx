@@ -380,6 +380,17 @@ describe('ImportDialog', () => {
     expect(screen.queryByRole('button', { name: /Find them by their urn/ })).not.toBeInTheDocument()
   })
 
+  it('says a file over the row ceiling plainly, with the ceiling', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      errorMessage: 'too_many_rows: This file has more than 200,000 rows, the most one import here may hold.',
+      summary: { failure: { code: 'too_many_rows', action: null, limit: 200000 } } } as unknown as Job)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(await screen.findByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/This file has more rows than an import here may carry \(200,000\)\./)).toBeInTheDocument()
+    expect(screen.queryByText(/^too_many_rows/)).not.toBeInTheDocument()
+  })
+
   it('says a replace whose first rows found almost nothing stopped, and replaces anyway into its draft', async () => {
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
@@ -408,5 +419,70 @@ describe('ImportDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
     expect(await screen.findByText(/The file changed while it was read/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Replace anyway/ })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The simple files, through the same door: a things CSV and a connections CSV together, read
+ * here, what was recognised said before anything is sent — with the types the graph's data model
+ * lacks — and sent as one NDJSON file of the standard's rows, their types the graph's ids.
+ */
+describe('ImportDialog · the simple files', () => {
+  const THINGS = 'key,type,name\norders,table,Orders\ndaily,Table,Daily sales\ndash,Dashboard,Sales dashboard\n'
+  const CONNECTIONS = 'from,type,to\norders,FEEDS,daily\ndaily,FEEDS,dash\n'
+  const TYPES = {
+    entity: [{ id: 'dataset', name: 'Table' }],
+    relationship: [{ id: 'FEEDS', name: 'Feeds' }],
+  }
+
+  function openWithTypes() {
+    const view = render(<ImportDialog wsId="ws1" graphId="g1" branchId="br_draft" types={TYPES} onClose={() => {}} />)
+    unmount = view.unmount
+    return view.container.querySelector('input[type="file"]') as HTMLInputElement
+  }
+  const csv = (name: string, body: string) => new File([body], name, { type: 'text/csv', lastModified: 1234 })
+
+  it('takes two CSV files at once, says what they hold and the types the graph lacks', async () => {
+    await userEvent.upload(openWithTypes(), [csv('things.csv', THINGS), csv('connections.csv', CONNECTIONS)])
+    const note = await screen.findByRole('note', { name: 'What the import reads' })
+    expect(note).toHaveTextContent('Things and connections files: 3 things, 2 connections')
+    expect(note).toHaveTextContent('This graph’s data model has no Dashboard (things) type')
+    expect(note).not.toHaveTextContent('Table (things)')
+    expect(screen.getByRole('button', { name: 'Remove things.csv' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove connections.csv' })).toBeInTheDocument()
+    // Converted here: there is no format to choose.
+    expect(screen.queryByText('File format')).not.toBeInTheDocument()
+  })
+
+  it('sends them as the standard’s rows, their types matched to the graph’s by id, then by name', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_draft', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(openWithTypes(), [csv('things.csv', THINGS), csv('connections.csv', CONNECTIONS)])
+    await screen.findByRole('note', { name: 'What the import reads' })
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    const [, , sent, opts] = vi.mocked(importInParts).mock.calls[0]
+    expect(opts).toMatchObject({ format: 'ndjson', branchId: 'br_draft' })
+    expect(sent.name).toBe('things+connections.ndjson')
+    expect(sent.lastModified).toBe(1234)
+    const rows = (await sent.text()).trim().split('\n').map((l) => JSON.parse(l))
+    expect(rows.map((r) => r.entityType ?? r.edgeType)).toEqual(['dataset', 'dataset', 'Dashboard', 'FEEDS', 'FEEDS'])
+    expect(rows[0]).toMatchObject({ kind: 'node', urn: 'urn:playground:orders', displayName: 'Orders' })
+    expect(rows[3]).toEqual({ kind: 'edge', edgeType: 'FEEDS', sourceUrn: 'urn:playground:orders', targetUrn: 'urn:playground:daily' })
+  })
+
+  it('names rows that may be refused, without holding the import', async () => {
+    await userEvent.upload(openWithTypes(), [csv('things.csv', THINGS), csv('connections.csv', `${CONNECTIONS}dash,FEEDS,elsewhere\n`)])
+    expect(await screen.findByRole('note', { name: 'What the import reads' })).toHaveTextContent(
+      '1 row may be refused:connections.csv, line 4 · to: No thing has the key “elsewhere”')
+    expect(screen.getByRole('button', { name: /^Import$/ })).toBeEnabled()
+  })
+
+  it('offers the simple templates too', async () => {
+    globalThis.URL.createObjectURL = vi.fn(() => 'blob:things')
+    globalThis.URL.revokeObjectURL = vi.fn()
+    openWithTypes()
+    await userEvent.click(screen.getByRole('button', { name: 'things.csv' }))
+    expect(triggerBrowserDownload).toHaveBeenLastCalledWith('blob:things', 'things.csv')
   })
 })

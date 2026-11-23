@@ -426,6 +426,48 @@ def test_a_transfer_reads_from_the_side_it_is_filed_under(event_type, leaving, a
     assert (out["workspace_id"], out["audience"]) == ("ws_b", "workspace")
 
 
+# ── A data source's details and trust ──────────────────────────────────
+
+def _on_ledger(**details) -> dict:
+    return {"actor_id": "usr_ada", "workspace_id": "ws_a", "data_source_id": "ds_1", "target_type": "data_source",
+            "target_id": "ds_1", "target_label": "Ledger", "details": details}
+
+
+@pytest.mark.parametrize("details, says", [
+    ({"fields": ["description", "tags"], "tagsAdded": ["gl"], "tagsRemoved": []},
+     "Changed the description and tags of Ledger"),
+    ({"fields": ["links"]}, "Changed the links of Ledger"),
+    ({"fields": ["description", "links", "tags"]}, "Changed the description, links and tags of Ledger"),
+    ({}, "Changed the details of Ledger"),
+])
+def test_a_change_to_a_sources_details_says_which_never_what(details, says):
+    assert catalogue.summarize("workspace.data_source.metadata_changed", _on_ledger(**details)) == ("info", says)
+
+
+@pytest.mark.parametrize("details, says", [
+    ({"trustStatus": {"from": None, "to": "certified"}}, "Certified Ledger"),
+    ({"trustStatus": {"from": "certified", "to": "in_review"}}, "Marked Ledger in review"),
+    ({"trustStatus": {"from": "certified", "to": "deprecated"},
+      "classification": {"from": None, "to": "confidential"}},
+     "Marked Ledger deprecated and classified it as Confidential"),
+    ({"classification": {"from": "internal", "to": "restricted"}}, "Classified Ledger as Restricted"),
+    ({"trustStatus": {"from": "certified", "to": None}}, "Cleared the status of Ledger"),
+    ({"trustStatus": {"from": None, "to": "certified"}, "classification": {"from": "public", "to": None}},
+     "Certified Ledger and cleared its classification"),
+    ({"noteChanged": True}, "Changed the status note of Ledger"),
+])
+def test_a_change_to_a_sources_trust_reads_as_what_happened(details, says):
+    assert catalogue.summarize("workspace.data_source.trust_changed", _on_ledger(**details)) == ("info", says)
+
+
+@pytest.mark.parametrize("event_type", ["workspace.data_source.metadata_changed",
+                                        "workspace.data_source.trust_changed"])
+def test_a_sources_details_are_its_workspaces_to_read(event_type):
+    out = catalogue.project(event_type=event_type, payload=_on_ledger(fields=["tags"]), event_version=2)
+    assert (out["category"], out["audience"], out["data_source_id"], out["actor_id"]) == (
+        "data", "workspace", "ds_1", "usr_ada")
+
+
 # ── Graph residency: what the capacity loop did, as the system ──────────
 
 _RESIDENCY_EVENTS = (

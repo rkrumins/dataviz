@@ -363,7 +363,7 @@ one they asked for. See [Service Accounts](/guide/service-accounts#for-workspace
 
 - [Key Concepts](/guide/key-concepts#who-can-do-what-roles) — when you want to
   know what each role lets you do.
-- [Workspace Admin](/guide/workspace-admin#giving-people-access-the-members-tab) —
+- [Workspace Admin](/guide/workspace-admin#giving-people-access-the-people-tab) —
   when you let people into a workspace.
 - [Managing & Sharing Views](/guide/managing-views#who-can-see-a-view) — when
   you want the full rules for who can see a view.

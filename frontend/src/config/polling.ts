@@ -71,6 +71,20 @@ export const POLLING_INTERVALS = {
    */
   notifications: 60_000,
   /**
+   * An open conversation (a thread on screen, or the questions drawer): asks
+   * only for what changed `since` the last answer, so a quiet thread costs an
+   * empty page. 30s — a reply is a person typing, and one that waits half a
+   * minute reads as prompt; the focus refetch covers coming back to the tab.
+   */
+  discussions: 30_000,
+  /**
+   * The counts on a view's Questions button and the canvas's question marks,
+   * and the reader's own unread counts: an ETag'd summary (a 304 when nothing
+   * changed), the same fleet-cost class as the bell. Lists are read again
+   * only when its `latest` moves.
+   */
+  discussionSummary: 60_000,
+  /**
    * "Your connections are still catching up" — the canvas asks the projector
    * whether a source really is behind, and it only arms once a read came back
    * SHORT. So this is the one poll guaranteed to be running while the graph

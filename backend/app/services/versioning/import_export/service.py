@@ -36,7 +36,7 @@ from . import keys as matching
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import (BY_URN, IdentifierMatchedNothing, ImportWorker, ReplaceBlocked,
-                            ReplaceRowsRefused, _normalize_page,
+                            ReplaceRowsRefused, TooManyRows, _normalize_page,
                             _label as _row_label, _record_pages, by_urn_cause, lease_job,
                             refused_budget, refused_digest, within_budget)
 from . import property_job
@@ -461,6 +461,11 @@ class ImportExportService:
             # property job that can't go on says so the same way.
             logger.warning("job %s stopped: %s", job_id, exc)
             await lease.fail(str(exc), exc.code, exc.action, phase=getattr(exc, "phase", None))
+        except TooManyRows as exc:
+            # More rows than one import may hold, stopped while its file was read: nothing built,
+            # nothing published. The failure names the ceiling (``summary.failure.limit``).
+            logger.warning("job %s stopped: %s", job_id, exc)
+            await lease.fail(str(exc), exc.code, exc.action, phase="parse", detail={"limit": exc.limit})
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             if is_transient(exc):          # an outage that outlasted the retry budget: resumable

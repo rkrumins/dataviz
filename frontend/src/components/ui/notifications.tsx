@@ -28,13 +28,17 @@ import { cn } from '@/lib/utils'
 
 export type NotificationType = 'success' | 'error' | 'warning' | 'info' | 'loading'
 
+export interface NotificationAction { label: string; onClick: () => void }
+
 export interface AppNotification {
   id: number
   type: NotificationType
   message: string
   /** Stable key for loading notifications — used by hideLoading() to dismiss. */
   key?: string
-  action?: { label: string; onClick: () => void }
+  action?: NotificationAction
+  /** A second way on, beside `action` (a sample just made: its tour, or its example review). */
+  secondaryAction?: NotificationAction
   /** How long this one lives, in ms. Defaults to DURATION. An `action` a reader
    * has to notice, read and reach for needs longer than a remark they only
    * read — an Undo that expires first is worse than no Undo at all. */
@@ -117,13 +121,15 @@ export function useAppNotifications() {
   const remove = useNotificationStore(s => s.remove)
   const removeByKey = useNotificationStore(s => s.removeByKey)
 
+  /** `action` may be two: the second is offered beside the first. */
   const notify = useCallback((
     type: Exclude<NotificationType, 'loading'>,
     message: string,
-    action?: { label: string; onClick: () => void },
+    action?: NotificationAction | readonly NotificationAction[],
     durationMs?: number,
   ) => {
-    return add({ type, message, action, durationMs })
+    const [first, second] = Array.isArray(action) ? action : [action as NotificationAction | undefined]
+    return add({ type, message, action: first, durationMs, ...(second ? { secondaryAction: second } : {}) })
   }, [add])
 
   /** Show a persistent loading notification. Stays until hideLoading(key) is called. */
@@ -326,7 +332,7 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
           isLoading && 'animate-spin',
         )} />
         <span className="flex-1 text-sm text-ink leading-snug">{notification.message}</span>
-        {notification.action && (
+        {notification.action && !notification.secondaryAction && (
           <button
             onClick={() => { notification.action!.onClick(); onDismiss() }}
             className="pointer-events-auto flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
@@ -344,6 +350,22 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
           </button>
         )}
       </div>
+
+      {/* Two ways on don't fit beside the message: they get a row of their own under it. */}
+      {notification.action && notification.secondaryAction && (
+        // Each label lines up with the message above it (the button's own padding sits left of it).
+        <div className="-mt-1.5 flex flex-wrap gap-1 pb-3 pl-[38px] pr-3">
+          {[notification.action, notification.secondaryAction].map(a => (
+            <button
+              key={a.label}
+              onClick={() => { a.onClick(); onDismiss() }}
+              className="pointer-events-auto px-2 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Progress bar — only for auto-dismissing notifications */}
       {!isLoading && (

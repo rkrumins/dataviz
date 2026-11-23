@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 38 switches
+every route with its request and answer, how a change is saved safely, and all 47 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -150,7 +150,7 @@ what `lastChanges` and `/{key}/history` read.
 
 ## Add, change and retire definitions
 
-The 35 built-in switches ship with the code. These routes add switches of your own and adjust
+The 47 built-in switches ship with the code. These routes add switches of your own and adjust
 definitions; they answer the same shape as the read, without `lastChanges`.
 
 **Add** — `POST /api/v1/admin/features/definitions`:
@@ -173,7 +173,7 @@ required. `type` is `boolean` or `string[]`; a `string[]` switch also needs
 > **Warning:** `options`, `helpUrl`, `adminHint`, `impactWhenOff` and `impactWhenOn` are cleared
 > when you leave them out. Send their current values with every change.
 
-> **Note:** For the 38 built-in switches, the API service rewrites `name`, `description`,
+> **Note:** For the 47 built-in switches, the API service rewrites `name`, `description`,
 > `adminHint`, `impactWhenOff`, `impactWhenOn`, `helpUrl`, `category`, `type`, `options` and
 > `sortOrder` from the code every time it starts, so a change to those lasts only until the next
 > restart. Change the text in `backend/app/config/features_seed.py` instead.
@@ -192,7 +192,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 38 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 47 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -233,12 +233,15 @@ feature open to anyone who knows the URL.
 | Accept a fresh sign-in round trip for API keys | `apiKeySsoRoundTripStepUp` | `false` | Off: `POST /me/api-keys` and `/me/api-keys/{id}/rotate` from a portal session are refused `403 step_up_unavailable`. OIDC and SAML sessions need a sign-in the provider dated within 15 minutes (`auth_time_proven`); Enterprise gateway sessions need the gateway's confirmation — asked on the request when this server can reach it (`503 gateway_unreachable` if it does not answer), else a sign-in through it within 15 minutes. On: a portal sign-in within 15 minutes is accepted too | Security: unreadable means off. Password sessions are not affected |
 | Keep a service account's keys working after its last manager goes | `serviceAccountUnmanagedGrace` | `14` | A ladder (`0`, `7`, `14`, `30` days): a service account's key is refused `401 api_key_unmanaged` once the account has had no manager in good standing for longer than this | Security: unreadable means refused. Personal keys are not affected |
 | Find a workspace | `workspaceDirectoryEnabled` | `false` | `GET /workspace-directory` is refused. Access requests still work from a shared link; while it is off, a requester sees a workspace's name in `POST /access-requests` and `GET /me/access-requests` only if they can open it (on: also if it is listed) | Security: unreadable means off |
+| Playground | `playgroundEnabled` | `false` | `POST /playground/join`, `GET /playground/samples`, `POST /playground/samples/{sample_id}`, `POST /playground/graphs`, starting a graph in the Playground (`POST /{ws_id}/versioning/blank-graphs`), and the Playground's semantic layers — `GET /playground/models`, `GET /playground/models/{id}/template`, `POST /playground/models/match`, `POST /playground/layers`, `POST /playground/layers/{id}/share` and `POST /playground/layers/{id}/types` — are refused; a member's own layers are then changed under the org's semantic-layer rules like any other. `GET /playground` answers `enabled: false` and, to anyone not already in it, names nothing; members keep their access, and `PUT /playground` (platform administrators) still works | Security: unreadable means off. Needs `versioningEnabled` and `blankModelsEnabled` (turning it on in Admin → Features turns them on too) |
+| Workspace requests | `workspaceRequestsEnabled` | `false` | `POST /workspace-requests` and `PUT /me/workspace-requests/{id}` (resubmitting) are refused `403 feature_disabled`. Reading and withdrawing requests (`/me/workspace-requests`), and answering them under `/admin/workspace-requests` (`system:workspaces:create`), still work; reminders and escalations of requests left waiting pause. The screens hide existing requests while off | Preview. Unreadable means off |
+| Data requests | `dataRequestsEnabled` | `false` | `POST /admin/workspaces/{ws_id}/data-requests` is refused `403 feature_disabled`. Reading a workspace's requests (`GET` on the same path), your own (`/me/data-requests`) and withdrawing them, and answering under `/admin/data-requests` (`system:workspaces:create`; start and connect also `workspace:admin` in the request's workspace, and connect a named Owner or Steward of the source it names; never the requester — `403 own_request`), still work; reminders and escalations of requests left waiting pause. The screens hide existing requests while off | Preview. Unreadable means off |
 
 ### Lineage
 
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
-| Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/decision`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
+| Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/decision`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; the Playground's samples and new graphs (`GET /playground/samples`, `POST /playground/samples/{sample_id}`, `POST /playground/graphs`); and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
 | Forks | `forksEnabled` | Off | `POST /{ws_id}/versioning/graphs/{graph_id}/forks`; on a fork's graph, every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `DELETE …/graphs/{graph_id}`, `…/projection/rebuild`, `…/projection/reconcile`, `POST …/exports` and `…/lifecycle/freeze`; approving, editing and merging a review from a fork or into one (closing it stays open), and the job a large publish, Update from parent or merge on a fork runs as; `POST /{ws_id}/versioning/resolve` for a fork's data source; `POST /{ws_id}/graph/changes`, `…/nodes/create`, `…/save`, `…/commands/batch`, and `POST`, `PATCH` and `DELETE` on `…/edges`, on a fork; staging a view import or a view package's data in a draft on a fork | Experimental preview; needs Version control. Reads, the trash and restoring a fork stay open. An unreadable value counts as off |
 | Graph residency | `residencyEnabled` | Off | None: it refuses no request. The versioning worker reads it from the feature store at the start of each capacity pass: on, it evicts by class and each master's memory after a 90-second grace; off, it only brings evicted graphs back, through admission. The API reads it for read leases, read notes, a new graph's class and admission on moves and Adopt | Experimental preview; needs Version control. Reads of a graph out of FalkorDB never depend on it. An unreadable value: the pass does nothing, and the API counts it as off |
 | New-version builds | `candidateKeysEnabled` | Off | None: it refuses no request. It turns on building a graph's next version in a second FalkorDB key while the current one keeps serving, then switching readers to it; the settings it uses, with the projector's pacing and the limits on reads from Postgres (which apply whether it is on or off), are under `/admin/versioning/build-policy` | Experimental preview, off; needs Version control. An unreadable value starts no build |
@@ -252,10 +255,11 @@ feature open to anyone who knows the URL.
 | Export graph data | `graphExportEnabled` | On | With version control: `GET …/versioning/graphs/{graph_id}/exports/plan` and `/exports/stream`, `POST …/exports`, `GET …/exports/{job_id}/download`. Without: `GET /{ws_id}/graph/export/plan` and `/stream`. Search: `POST /{ws_id}/graph/search/exports` and its download. View packages: `POST /views/transfer/packages` | Files already downloaded are not recalled |
 | Publishing views to everyone | `enterpriseViewPolicy` | Workspaces decide (`workspaces`) | A ceiling, not a switch. `off` (Not available): `POST /views` as Enterprise, `PUT /views/{view_id}/visibility` to Enterprise and `POST /views/{view_id}/publish-request/approve` refuse. `request` (Always require approval): someone without the publish permission must ask, and a publisher approves | Unpublishing is never blocked. An unreadable value acts as `workspaces` |
 | Native read-only queries | `nativeQueryEnabled` | On | `POST /{ws_id}/graph/search/native` | A security switch: an unreadable value counts as off. Who may run one is decided by `workspace:native-query:read` or a share's `canQuerySource` |
-| Build lineage from scratch | `blankModelsEnabled` | On | `POST /{ws_id}/versioning/blank-graphs` | Needs Version control. Models already built keep working |
+| Build lineage from scratch | `blankModelsEnabled` | On | `POST /{ws_id}/versioning/blank-graphs`; the Playground's samples and new graphs, `GET /playground/samples`, `POST /playground/samples/{sample_id}` and `POST /playground/graphs` | Needs Version control. Models already built keep working |
 | View versions, import and export | `viewPortabilityEnabled` | Off | Every `/views/transfer/*` and `/views/{view_id}/versions/*` route | Experimental preview. Versions keep being recorded while it is off |
 | Export views | `viewExportEnabled` | On | `POST /views/transfer/export`, `/views/transfer/export/preview`, `/views/transfer/packages` | Needs View versions, import and export |
 | Import views | `viewImportEnabled` | On | `POST /views/transfer/inspect`, `/reconcile`, `/import`, `/packages/inspect`, `/packages/{upload_id}/data`, `/packages/uploads` (and its parts, status and `complete`), `GET /packages/{upload_id}`, `/packages/{upload_id}/new-source` | Needs View versions, import and export |
+| Data source details | `dataSourceMetadataEnabled` | Off | `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata` (description, links, tags), `PUT …/metadata/trust` (classification, status, note) and `GET /admin/workspaces/{ws_id}/data-sources/{ds_id}/activity/events` (a source's history). `GET …/metadata` still answers, with `canEdit` and `canEditTrust` false; stored details stay on every data source and view read | Experimental preview. On, it also opens `PUT …/contacts`, as `conversationsEnabled` does. Trust needs `workspace:admin` or being a named Owner or Steward; never in the Playground |
 
 ### Display & UI
 
@@ -267,8 +271,8 @@ feature open to anyone who knows the URL.
 
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
-| Edit semantic layers | `semanticLayerEditMode` | On | `POST /admin/ontologies`, `PUT` and `DELETE /admin/ontologies/{ontology_id}`, `POST …/{ontology_id}/restore`, `…/{ontology_id}/new-version`, `POST /admin/ontologies/import` and `…/{ontology_id}/import` — for everyone, administrators included | Publishing, cloning and exporting keep working |
-| Let non-admins edit layers | `semanticLayerNonAdminEditing` | On | Every semantic-layer write (create, update, delete, restore, new version, publish, clone, import) refuses anyone without `system:admin` or `system:org-admin` | Security: an unreadable value means administrators only. Needs Edit semantic layers |
+| Edit semantic layers | `semanticLayerEditMode` | On | `POST /admin/ontologies`, `PUT` and `DELETE /admin/ontologies/{ontology_id}`, `POST …/{ontology_id}/restore`, `…/{ontology_id}/new-version`, `POST /admin/ontologies/import` and `…/{ontology_id}/import` — for everyone, administrators included, except on a Playground member's own layers | Publishing, cloning and exporting keep working |
+| Let non-admins edit layers | `semanticLayerNonAdminEditing` | On | Every semantic-layer write (create, update, delete, restore, new version, publish, clone, import, approve) refuses anyone without `system:admin` or `system:org-admin`, except a Playground member on their own layers | Security: an unreadable value means administrators only. Needs Edit semantic layers |
 | Import layers | `semanticLayerImportEnabled` | On | `POST /admin/ontologies/import`, `POST /admin/ontologies/{ontology_id}/import` | Needs Edit semantic layers |
 | Export layers | `semanticLayerExportEnabled` | On | `GET /admin/ontologies/{ontology_id}/export` | |
 | Suggest from graph | `semanticLayerAutoSuggest` | On | `POST /admin/ontologies/suggest` | Choosing a layer by hand keeps working |
@@ -279,6 +283,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | Announcements | `announcementsEnabled` | On | Not refused: `GET /announcements` answers an empty list | Announcements are hidden, not deactivated |
+| Questions and conversations | `conversationsEnabled` | `false` | `POST /discussions/subjects/{type}/{id}` (ask), `POST /discussions/{id}/messages` (reply), `PATCH /discussions/{id}/messages/{mid}` (edit), `PUT /discussions/subjects/{type}/{id}/watch`, `PUT /discussions/{id}/me` with `following: true`, and `PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts` (unless `dataSourceMetadataEnabled` is on) are refused `403 feature_disabled`; watcher notices and reminders pause (retention still blanks deleted messages). Reading, `POST /discussions/{id}/read`, muting, unfollowing, unwatching, closing, reopening, accepting answers, deleting, `GET /discussions/summaries` and `GET /people/{id}` still work; the screens hide them while off | Preview. Unreadable means off |
 
 ### Experimental
 
@@ -314,7 +319,7 @@ which keeps it for 30 seconds, and falls back by posture (`fail_safe_default` in
 
 | What | Where | Owned by |
 |---|---|---|
-| Definitions | `feature_definitions` table | The code: the 35 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
+| Definitions | `feature_definitions` table | The code: the 47 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
 | Categories | `feature_categories` table | The code: seeded the same way |
 | Values and version | `feature_flags` table, one row | Administrators: seeded once with the defaults, never reset by a deployment |
 | Change log | `feature_flag_changes` table | Written by every save |

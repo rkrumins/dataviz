@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, Tag, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, FlaskConical, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, Tag, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { SyncStatusChip } from '@/features/sync-status/SyncStatusChip'
 import { cn } from '@/lib/utils'
@@ -92,6 +92,9 @@ import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
+import { QuestionsButton } from '@/features/discussions/QuestionsButton'
+import { WhoToAsk } from '@/features/discussions/WhoToAsk'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
@@ -109,6 +112,8 @@ import {
 import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
+import { useAuthStore } from '@/store/auth'
+import { usePlayground } from '@/hooks/usePlayground'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
@@ -242,6 +247,9 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // plain text instead of a link into a page that would refuse them.
     const myWorkspaces = useWorkspacesStore(s => s.workspaces)
     const navigate = useNavigate()
+    // The Playground's workspace: a view there is an experiment, and its bar says so.
+    const playgroundId = usePlayground().data?.workspaceId
+    const me = useAuthStore(s => s.user?.id)
 
     // The canvas store holds a ViewConfiguration — the canvas's own shape, missing
     // visibility/tags/config that the edit form needs. So take the authoritative
@@ -268,6 +276,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // rendered without one. So an unversioned view lands in the roomier layout
     // by construction rather than by a special case for it.
     const openVersioningPanel = useVersioningPanelStore((st) => st.openPanel)
+    const openQuestions = useDiscussionsDrawer((st) => st.open)
     const { data: prCounts } = useViewPrCounts(view?.workspaceId, view?.id)
     const hasOpenReviews = ((prCounts?.fromView ?? 0) + (prCounts?.onDataSource ?? 0)) > 0
     const actionButtonClass = hasOpenReviews ? ACTION_BUTTON : ACTION_BUTTON_ROOMY
@@ -419,6 +428,19 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             >
                                 {view.name}
                             </h1>
+                        )}
+                        {playgroundId && view.workspaceId === playgroundId && (
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label={`${view.createdBy === me ? 'Your experiment' : 'An experiment'} — nothing here is production data`}
+                                detail="It lives in the Playground, apart from every team’s workspace"
+                            >
+                                {/* A phone keeps the name's room: the flask alone, still read out. */}
+                                <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-gradient-to-r from-violet-500/10 to-fuchsia-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300 shrink-0 sm:px-2">
+                                    <FlaskConical className="w-3 h-3" aria-hidden />
+                                    <span className="sr-only sm:not-sr-only">Playground</span>
+                                </span>
+                            </HoverTip>
                         )}
                         {view.draftBranchId && (
                             /* An import waiting in its draft: not in any list, and private,
@@ -725,6 +747,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         </button>
                     </HoverTip>
 
+                    {/* Asking the people who look after this view — nothing while the switch is off. */}
+                    <QuestionsButton
+                        subject={{ type: 'view', id: view.id, name: view.name }}
+                        className={actionButtonClass}
+                        labelClassName="hidden lg:inline"
+                    />
+
                     {/* The history of the view's DESIGN, which every view has; not the
                         graph's drafts and commits, which Reviews opens. The dot says the
                         design has changed since its latest version. */}
@@ -936,6 +965,13 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                         </div>
                                     )}
                                     <ViewBuiltOn view={view} />
+                                    <WhoToAsk
+                                        subject={{ type: 'view', id: view.id, name: view.name }}
+                                        onAsk={() => {
+                                            closeDetails()
+                                            openQuestions({ subject: { type: 'view', id: view.id, name: view.name }, compose: true })
+                                        }}
+                                    />
                                 </div>
                             ) : (
                                 <EditDetailsPanel

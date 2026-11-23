@@ -30,7 +30,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Bot, ChevronRight, Eye, Layers, GitBranch, GitCompareArrows, UserRound, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useFeature } from '@/store/features'
-import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -38,6 +37,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import * as api from '@/services/versioningApiService'
 import type { CompareRequest } from '@/store/versioningPanelStore'
 import { VERSIONING_KEYS, useHistoryMonths, useHistoryPages, type HistoryScope } from '../hooks/useVersioning'
+import { useMayPublish } from '../hooks/useMayPublish'
 import { useRevisionViewer } from '../hooks/useRevisionViewer'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { actorName } from '../model/branchVocab'
@@ -162,10 +162,10 @@ export function ViewHistoryTimeline({
   const qc = useQueryClient()
 
   // Rollback affordances: published (main) rows only — draft checkpoints aren't
-  // main commits. Manager + admin-flag gated, and both write main, so they need publish too;
-  // dialogs own the confirm/impact UX.
+  // main commits. Manager + admin-flag gated, and both write main, so they need publish too (or,
+  // in the Playground, to have made the graph); dialogs own the confirm/impact UX.
   const versioningEnabled = useFeature('versioningEnabled')
-  const canPublish = usePermission('workspace:datasource:publish', wsId)
+  const canPublish = useMayPublish(wsId, graphId)
   const canRollback = canManage && canPublish && versioningEnabled
   const [revertTarget, setRevertTarget] = useState<Record<string, unknown> | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<Record<string, unknown> | null>(null)

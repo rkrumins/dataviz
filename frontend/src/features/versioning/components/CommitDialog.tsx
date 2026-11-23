@@ -23,6 +23,9 @@ export interface CommitDialogProps {
   onPublished?: () => void
   /** False for an editor of a shared draft: only its owner or a maintainer publishes it directly. */
   canPublishDraft?: boolean
+  /** The server's word on publishing it straight away (`BranchAccess.canPublish`); absent, the
+   *  publish permission decides. */
+  canPublish?: boolean
   /** The draft's data source: its policy may have drafts published only through a review. */
   dataSourceId?: string | null
 }

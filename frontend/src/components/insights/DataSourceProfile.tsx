@@ -35,6 +35,7 @@ import { isIdentityOverridden, normalizeIdentity, isNameOverridden, normalizeNam
 import { PhysicalAlignmentSection } from './PhysicalAlignmentSection'
 import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
+import { useFeature } from '@/store/features'
 
 export interface DataSourceProfileContext {
     wsId: string
@@ -300,6 +301,10 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
     // the capacity figures it sits beside — the same question the guard on
     // the Ingestion page asks.
     const canReadIngestion = useNavPermission(useSidebarSpec('ingestion'))
+    // In the workspace drawer with data source details on, the About card above says
+    // what the source is, so this card keeps to the catalog item's own facts.
+    const detailsOn = useFeature('dataSourceMetadataEnabled')
+    const aboutAbove = !!embedded && detailsOn
 
     const health = useProviderHealth(item?.providerId)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
@@ -548,14 +553,18 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
                     <DetailRow label="Status" value={item?.status ?? '—'} />
                     <DetailRow label="Provider" value={provider?.name ?? '—'} />
                     <DetailRow label="Source identifier" mono value={item?.sourceIdentifier ?? '—'} />
-                    <DetailRow label="Registered" value={item ? timeAgo(item.createdAt) : '—'} />
+                    {aboutAbove ? (
+                        <DetailRow label="In the catalog since" value={item ? new Date(item.createdAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—'} />
+                    ) : (
+                        <DetailRow label="Registered" value={item ? timeAgo(item.createdAt) : '—'} />
+                    )}
                     {isIdentityOverridden(context?.identityProperty) && (
                         <DetailRow label="Node identity" mono value={normalizeIdentity(context?.identityProperty)} />
                     )}
                     {isNameOverridden(context?.nameProperty) && (
                         <DetailRow label="Display name" mono value={normalizeName(context?.nameProperty)} />
                     )}
-                    {item?.description && <DetailRow label="Description" value={item.description} />}
+                    {item?.description && !aboutAbove && <DetailRow label="Description" value={item.description} />}
                 </dl>
             </Card>
         </div>

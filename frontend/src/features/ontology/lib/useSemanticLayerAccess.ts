@@ -23,11 +23,17 @@
  *   _GATE_EXPORT   (…ExportEnabled)         → canExport
  *   _GATE_SUGGEST  (…AutoSuggest)           → canSuggest
  *   _GATE_HISTORY  (…VersionHistory)        → canSeeHistory
+ *
+ * Given a layer, the server's own answer for it (`ontology.access`) wins for what may be done to
+ * that layer: an org layer by the rules above, a Playground maker's own layer by being its maker,
+ * whatever the switches say. Export, history and suggest stay with the switches, except that an
+ * owned layer can always be exported and its history read.
  */
 import { useFeature } from '@/store/features'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
+import type { LayerAccess, OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
-export interface SemanticLayerAccess {
+export interface SemanticLayerAccess extends LayerAccess {
     /** Create, rename, restructure, delete, new-version. The lever behind every write control. */
     canEdit: boolean
     /** Import is editing that arrives as a file — so it needs BOTH flags, exactly like the server. */
@@ -43,7 +49,9 @@ export interface SemanticLayerAccess {
     editingBlockedBy: 'permission' | 'feature-off' | 'admins-only' | null
 }
 
-export function useSemanticLayerAccess(): SemanticLayerAccess {
+export function useSemanticLayerAccess(
+    ontology?: Pick<OntologyDefinitionResponse, 'access'> | null,
+): SemanticLayerAccess {
     // Rules of Hooks: call every probe unconditionally, then combine the booleans.
     const isPlatformAdmin = usePermission('system:admin')
     const hasOntologyManage = useAnyWorkspacePermission('workspace:ontology:manage')
@@ -70,7 +78,7 @@ export function useSemanticLayerAccess(): SemanticLayerAccess {
                 ? 'feature-off'
                 : 'admins-only'
 
-    return {
+    const byOrgRules: SemanticLayerAccess = {
         canEdit,
         canImport: canEdit && importOn,
         canExport: exportOn,
@@ -79,6 +87,24 @@ export function useSemanticLayerAccess(): SemanticLayerAccess {
         canSuggest: canManage && suggestOn,
         canSeeHistory: historyOn,
         canPublish: canManage && allowedToWrite,
+        canDelete: canEdit,
+        canClone: canManage && allowedToWrite,  // clone answers to the same gates as publish
+        canShare: false,
+        canAssign: canManage,
+        isOwn: false,
         editingBlockedBy,
+    }
+
+    const layer = ontology?.access
+    if (!layer) return byOrgRules
+    return {
+        ...byOrgRules,
+        ...layer,
+        // Importing into a layer is editing it; an org layer's import still needs its switch.
+        canImport: layer.canEdit && (layer.isOwn || importOn),
+        canExport: layer.isOwn || exportOn,
+        canSeeHistory: layer.isOwn || historyOn,
+        // The org switches never block a maker's own layer.
+        editingBlockedBy: layer.canEdit ? null : (!layer.isOwn && byOrgRules.editingBlockedBy) || 'permission',
     }
 }

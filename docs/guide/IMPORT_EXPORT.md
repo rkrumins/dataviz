@@ -102,6 +102,28 @@ editing dozens of nodes on the canvas.
 **Import another** brings in a second file; each import adds to the same draft.
 If an import fails, **Try again** takes you back to choose the file.
 
+### The simple files
+
+Besides the standard import file, **Import** takes the simpler files the
+Playground starts from — handy when your data is a plain list of things and how
+they connect:
+
+* **things.csv** — `key`, `type`, `name`, and optionally `description` and `tags`
+  (separated by `;`); any other column is a property;
+* **connections.csv** — `from` and `to` (keys of things) and `type`;
+* or one JSON file with `things` and `connections`.
+
+Drop both CSV files at once, or the JSON file. Before anything is sent, the dialog
+says what it found — how many things and connections — and names any type the
+data source's semantic layer doesn't have; those rows would be refused. Types are
+matched by the semantic layer's type names or ids, whatever their case. Each
+thing's `key` becomes its URN (`urn:playground:<key>`, unless the key is already a
+URN), so the next file with the same keys updates the same things.
+
+Both kinds of file become the same rows on the server and are checked the same
+way: one standard, two ways in. **Add more data** in the Playground opens this
+dialog on a graph's Context View, in a draft.
+
 New top-level entities that an import creates are placed in the View's layers,
 so you see them on the canvas straight away. A View that lists its own entities
 draws the first 200 of them; the draft bar's **+N new** chip says how many more
@@ -395,6 +417,7 @@ not be in it.
 | --- | --- |
 | **Excel**: 1,048,575 rows per sheet (Nodes and Edges) | Excel's own limit. A larger export offers CSV instead, before anything downloads. |
 | **Import**: 10 GB per CSV, TSV or NDJSON file; 100 MB per JSON or Excel file | A JSON or Excel file is read whole. A larger file can be split and imported in parts, each adding to the same draft. |
+| **Rows per import**: none by default; 200,000 in the Playground unless its administrator chose otherwise | The Playground is shared by everyone. A file with more rows stops before anything is published, and the dialog says the limit. |
 | **Export**: 50 GB per file | Preparing one that size takes hours. |
 | **Several exports at once** | Exports take turns on the server. One being prepared waits in the queue, and the dialog shows how many are ahead of it. A data source without version control runs two exports at a time on each server: another waits for up to 15 minutes, then fails; try again later. |
 

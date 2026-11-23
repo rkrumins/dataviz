@@ -4,16 +4,20 @@ Ontologies are standalone, versioned, reusable semantic configurations.
 Published ontologies are immutable; updates create new versions.
 System ontologies (is_system=True) cannot be deleted.
 """
-from typing import List, Optional
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
+from typing import Callable, Iterable, List, Optional, Tuple
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.v1.feature_gate import require_admin_unless, require_feature
-from backend.app.auth.dependencies import requires, get_permission_claims
+from backend.app.api.v1.feature_gate import _ADMIN_CLAIMS, require_admin_unless, require_feature
+from backend.app.auth.dependencies import get_current_user, requires, get_permission_claims
+from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.db.engine import get_db_session
+from backend.app.db.models import OntologyORM
 from backend.app.db.repositories import ontology_definition_repo
 from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services import playground_layers
+from backend.app.services.feature_flags import feature_flags
+from backend.app.services.permission_service import PermissionClaims, has_permission_any_workspace
 from backend.app.services.workspace_visibility import (
     compute_visible_ontology_ids,
     ensure_ontology_visible,
@@ -41,7 +45,9 @@ from backend.common.models.management import (
     OntologyAuditEntry,
     OntologyImportRequest,
     OntologyImportResponse,
+    LayerAccess,
 )
+from backend.auth_service.interface import User
 from backend.common.models.graph import GraphSchemaStats
 from backend.app.ontology import gate as ontology_gate
 
@@ -89,6 +95,124 @@ _EDIT_GATES = [Depends(_GATE_EDIT), Depends(_GATE_WRITER)]
 #: already exists. They still answer to `_GATE_WRITER`: they are writes, so "who may write?"
 #: applies.
 _LIFECYCLE_GATES = [Depends(_GATE_WRITER)]
+
+
+# ── A Playground maker's own layers ───────────────────────────────────────────
+#
+# A layer the Playground owns is its maker's (``playground_layers.owns_layer``): they edit,
+# publish, delete, import into, export and read the history of it whatever the switches above
+# say, and nobody else in the Playground changes it. Every other layer keeps the gates above.
+# The same shape as ``versioning.require_publish_or_maker`` for a graph's maker.
+
+async def _path_layer(
+    request: Request,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> Tuple[Optional[OntologyORM], bool]:
+    """The path's layer, and whether the caller owns it. Read once per request."""
+    row = await ontology_definition_repo.get_ontology_orm(session, request.path_params["ontology_id"])
+    return row, await playground_layers.owns_layer(session, claims, user.id, row)
+
+
+async def ontology_manage_or_owner(
+    request: Request,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    layer: Tuple[Optional[OntologyORM], bool] = Depends(_path_layer),
+):
+    """``workspace:ontology:manage`` — or the path's layer is the caller's own in the Playground.
+    Nobody else changes a Playground member's layer: 403 ``layer_not_yours`` (404 when they can't
+    see it), short of a platform admin, who is held to the org's rules."""
+    row, owned = layer
+    if owned:
+        return user
+    if not any(c in claims.global_perms for c in _ADMIN_CLAIMS) \
+            and await playground_layers.held_by_playground(session, row):
+        await ensure_ontology_visible(session, claims, row.id, user_id=user.id)
+        raise HTTPException(status_code=403, detail={
+            "type": "layer_not_yours",
+            "message": "In the Playground you can change only the semantic layers you made."})
+    return await _REQUIRES_ONTOLOGY_MANAGE(request, user, claims, session)
+
+
+ontology_manage_or_owner.gate_label = "workspace:ontology:manage (any ws); in the Playground, the layer's maker"
+
+
+def _unless_owner(*gates: Callable, writer: bool, label: str) -> Callable:
+    """The feature ``gates`` (and ``_GATE_WRITER`` when ``writer``), passed by the owner of the
+    path's layer."""
+    async def _dep(layer: Tuple[Optional[OntologyORM], bool] = Depends(_path_layer),
+                   claims: PermissionClaims = Depends(get_permission_claims)) -> None:
+        if layer[1]:
+            return
+        for gate in gates:
+            await gate()
+        if writer:
+            await _GATE_WRITER(claims)
+    _dep.gate_label = label
+    return _dep
+
+
+_OWNER_EXEMPT = " (not on a Playground maker's own layer)"
+#: Content writes on one layer (update, delete, restore, new-version): ``_EDIT_GATES``.
+edit_gates_unless_owner = _unless_owner(
+    _GATE_EDIT, writer=True,
+    label="switches semanticLayerEditMode and semanticLayerNonAdminEditing" + _OWNER_EXEMPT)
+#: Publish: ``_LIFECYCLE_GATES``.
+_LIFECYCLE_UNLESS_OWNER = _unless_owner(writer=True, label="switch semanticLayerNonAdminEditing" + _OWNER_EXEMPT)
+_IMPORT_UNLESS_OWNER = _unless_owner(
+    _GATE_IMPORT, _GATE_EDIT, writer=True,
+    label="switches semanticLayerImportEnabled and semanticLayerEditMode and semanticLayerNonAdminEditing"
+          + _OWNER_EXEMPT)
+_EXPORT_UNLESS_OWNER = _unless_owner(_GATE_EXPORT, writer=False,
+                                     label="switch semanticLayerExportEnabled" + _OWNER_EXEMPT)
+_HISTORY_UNLESS_OWNER = _unless_owner(_GATE_HISTORY, writer=False,
+                                      label="switch semanticLayerVersionHistory" + _OWNER_EXEMPT)
+
+
+async def with_access(session: AsyncSession, claims: PermissionClaims, user_id: Optional[str],
+                      layers: Iterable[OntologyDefinitionResponse]) -> None:
+    """Fill ``access`` on each layer: what the caller may do with it. An org layer (and one a
+    workspace owns) by today's rules — the manage permission and the semantic-layer switches; a
+    layer the Playground owns by the owner rule (``playground_layers.owns_layer``): its maker does
+    everything, deleting only while no graph is built on it; another member only copies it. An
+    API key changes no layer."""
+    layers = list(layers)
+    if not layers:
+        return
+    from sqlalchemy import select
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services.playground_policy import get_playground
+    used = set((await session.execute(
+        select(WorkspaceDataSourceORM.ontology_id).where(
+            WorkspaceDataSourceORM.ontology_id.in_([o.id for o in layers]),
+            WorkspaceDataSourceORM.deleted_at.is_(None)).distinct()
+    )).scalars())
+    person = claims.key_scope is None
+    manage = person and has_permission_any_workspace(claims, "workspace:ontology:manage")
+    admin = any(c in claims.global_perms for c in _ADMIN_CLAIMS)
+    flags = {key: await feature_flags.is_enabled_self_session(key, default=fail_safe_default(key))
+             for key in ("semanticLayerEditMode", "semanticLayerNonAdminEditing")}
+    writes = manage and (admin or flags["semanticLayerNonAdminEditing"])
+    playground = await get_playground(session)
+    builds = (person and playground is not None and playground_layers.is_member(claims, playground)
+              and await playground_layers.playground_on(session))
+    for layer in layers:
+        unused = layer.id not in used
+        if playground is not None and layer.owner_workspace_id == playground.id:
+            if await playground_layers.owns_layer(session, claims, user_id, layer, playground=playground):
+                layer.access = LayerAccess(canEdit=True, canPublish=True, canDelete=unused, canClone=True,
+                                           canShare=True, canAssign=True,
+                                           isOwn=bool(user_id) and layer.created_by == user_id)
+                continue
+            if not admin:                          # a platform admin is held to the org's rules
+                layer.access = LayerAccess(canClone=builds)
+                continue
+        edit = writes and flags["semanticLayerEditMode"]
+        layer.access = LayerAccess(canEdit=edit, canPublish=writes, canDelete=edit and unused and not layer.is_system,
+                                   canClone=writes, canShare=False, canAssign=manage, isOwn=False)
 
 
 async def _invalidate_ontology_caches(
@@ -329,8 +453,9 @@ async def list_ontologies(
         items = await ontology_definition_repo.list_ontologies(session, include_deleted=include_deleted)
     else:
         items = await ontology_definition_repo.list_latest_ontologies(session, include_deleted=include_deleted)
-    visible_ids = await compute_visible_ontology_ids(session, claims)
+    visible_ids = await compute_visible_ontology_ids(session, claims, user_id=_auth.id)
     if visible_ids is None:
+        await with_access(session, claims, _auth.id, items)
         return items
     # ``visible_ids`` is keyed on the latest-version id stored on
     # workspace_data_sources. For ``all_versions=True`` we also surface
@@ -339,8 +464,11 @@ async def list_ontologies(
     if all_versions:
         latest = [it for it in items if it.id in visible_ids]
         schema_ids = {getattr(it, "schema_id", None) or it.id for it in latest}
-        return [it for it in items if (getattr(it, "schema_id", None) or it.id) in schema_ids]
-    return [it for it in items if it.id in visible_ids]
+        items = [it for it in items if (getattr(it, "schema_id", None) or it.id) in schema_ids]
+    else:
+        items = [it for it in items if it.id in visible_ids]
+    await with_access(session, claims, _auth.id, items)
+    return items
 
 
 @router.post("", response_model=OntologyDefinitionResponse, status_code=201,
@@ -349,6 +477,7 @@ async def create_ontology(
     background: BackgroundTasks,
     req: OntologyCreateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
@@ -356,13 +485,14 @@ async def create_ontology(
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
-    result = await ontology_definition_repo.create_ontology(session, req)
+    result = await ontology_definition_repo.create_ontology(session, req, actor=_auth.id)
     await _invalidate_ontology_caches(session, getattr(result, "id", None), background)
+    await with_access(session, claims, _auth.id, [result])
     return result
 
 
 @router.get("/{ontology_id}/versions", response_model=List[OntologyDefinitionResponse],
-            dependencies=[Depends(_GATE_HISTORY)])
+            dependencies=[Depends(_HISTORY_UNLESS_OWNER)])
 async def list_ontology_versions(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -373,9 +503,11 @@ async def list_ontology_versions(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     schema_id = getattr(orm, 'schema_id', None) or orm.id
-    return await ontology_definition_repo.list_versions_by_schema(session, schema_id)
+    versions = await ontology_definition_repo.list_versions_by_schema(session, schema_id)
+    await with_access(session, claims, _auth.id, versions)
+    return versions
 
 
 @router.get("/{ontology_id}", response_model=OntologyDefinitionResponse)
@@ -389,11 +521,12 @@ async def get_ontology(
     ontology = await ontology_definition_repo.get_ontology(session, ontology_id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
+    await with_access(session, claims, _auth.id, [ontology])
     return ontology
 
 
-@router.get("/{ontology_id}/export", dependencies=[Depends(_GATE_EXPORT)])
+@router.get("/{ontology_id}/export", dependencies=[Depends(_EXPORT_UNLESS_OWNER)])
 async def export_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
@@ -411,7 +544,7 @@ async def export_ontology(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     export_data = {
         "id": orm.id,
@@ -442,14 +575,14 @@ async def export_ontology(
 
 
 @router.put("/{ontology_id}", response_model=OntologyDefinitionResponse,
-            dependencies=_EDIT_GATES)
+            dependencies=[Depends(edit_gates_unless_owner)])
 async def update_ontology(
     background: BackgroundTasks,
     ontology_id: str = Path(...),
     req: OntologyUpdateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
-    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+    _auth=Depends(ontology_manage_or_owner),
 ):
     """
     Update an ontology. If published, creates a new version instead.
@@ -459,8 +592,8 @@ async def update_ontology(
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
-    await ensure_ontology_visible(session, claims, ontology_id)
-    ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
+    ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req, actor=_auth.id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
     # Invalidate idempotency replays pinned to either the source ID
@@ -470,22 +603,23 @@ async def update_ontology(
     new_id = getattr(ontology, "id", None)
     if new_id and new_id != ontology_id:
         await _invalidate_ontology_caches(session, new_id, background)
+    await with_access(session, claims, _auth.id, [ontology])
     return ontology
 
 
-@router.delete("/{ontology_id}", status_code=204, dependencies=_EDIT_GATES)
+@router.delete("/{ontology_id}", status_code=204, dependencies=[Depends(edit_gates_unless_owner)])
 async def delete_ontology(
     background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
-    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+    _auth=Depends(ontology_manage_or_owner),
 ):
     """Delete an ontology. Rejects if data sources still reference it or if it's a system ontology."""
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     if orm.is_system:
         raise HTTPException(
             status_code=409,
@@ -496,35 +630,39 @@ async def delete_ontology(
             status_code=409,
             detail="Cannot delete ontology: one or more data sources still reference it.",
         )
-    await ontology_definition_repo.delete_ontology(session, ontology_id)
+    await ontology_definition_repo.delete_ontology(session, ontology_id, actor=_auth.id)
     await _invalidate_ontology_caches(session, ontology_id, background)
 
 
 @router.post("/{ontology_id}/restore", response_model=OntologyDefinitionResponse,
-             dependencies=_EDIT_GATES)
+             dependencies=[Depends(edit_gates_unless_owner)])
 async def restore_ontology(
     background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
-    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(ontology_manage_or_owner),
 ):
-    """Restore a soft-deleted ontology."""
-    restored = await ontology_definition_repo.restore_ontology(session, ontology_id)
+    """Restore a soft-deleted ontology — one the caller can see, as every other write asks."""
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id,
+                                  not_found_detail=f"No deleted ontology '{ontology_id}' found to restore")
+    restored = await ontology_definition_repo.restore_ontology(session, ontology_id, actor=_auth.id)
     if not restored:
         raise HTTPException(status_code=404, detail=f"No deleted ontology '{ontology_id}' found to restore")
     await _invalidate_ontology_caches(session, ontology_id, background)
+    await with_access(session, claims, _auth.id, [restored])
     return restored
 
 
 @router.post("/{ontology_id}/publish", response_model=OntologyDefinitionResponse,
-             dependencies=_LIFECYCLE_GATES)
+             dependencies=[Depends(_LIFECYCLE_UNLESS_OWNER)])
 async def publish_ontology(
     background: BackgroundTasks,
     ontology_id: str = Path(...),
     force: bool = Query(False, description="Bypass evolution_policy check (admin only)."),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
-    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+    _auth=Depends(ontology_manage_or_owner),
 ):
     """
     Mark an ontology as published (immutable after this).
@@ -533,19 +671,21 @@ async def publish_ontology(
     publish would remove existing types, the request is blocked with HTTP 409.
     Pass ?force=true to skip this guard (use with caution).
     """
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     if not force:
-        impact = await get_ontology_impact(ontology_id, session, claims=claims)
+        # Visible to the caller, as just checked: the impact needs no second look.
+        impact = await get_ontology_impact(ontology_id, session, claims=None)
         if not impact["allowed"]:
             raise HTTPException(
                 status_code=409,
                 detail=impact["reason"],
             )
 
-    ontology = await ontology_definition_repo.publish_ontology(session, ontology_id)
+    ontology = await ontology_definition_repo.publish_ontology(session, ontology_id, actor=_auth.id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
     await _invalidate_ontology_caches(session, ontology_id, background)
+    await with_access(session, claims, _auth.id, [ontology])
     return ontology
 
 
@@ -565,7 +705,7 @@ async def clone_ontology(
     source = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not source:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     import json
     req = OntologyCreateRequest(
@@ -580,19 +720,20 @@ async def clone_ontology(
         entityTypeDefinitions=json.loads(source.entity_type_definitions or "{}"),
         relationshipTypeDefinitions=json.loads(source.relationship_type_definitions or "{}"),
     )
-    result = await ontology_definition_repo.create_ontology(session, req)
+    result = await ontology_definition_repo.create_ontology(session, req, actor=_auth.id)
     await _invalidate_ontology_caches(session, getattr(result, "id", None), background)
+    await with_access(session, claims, _auth.id, [result])
     return result
 
 
 @router.post("/{ontology_id}/new-version", response_model=OntologyDefinitionResponse,
-             status_code=201, dependencies=_EDIT_GATES)
+             status_code=201, dependencies=[Depends(edit_gates_unless_owner)])
 async def create_new_version(
     background: BackgroundTasks,
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
-    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+    _auth=Depends(ontology_manage_or_owner),
 ):
     """
     Create a new draft version of an existing ontology within the same schema lineage.
@@ -604,7 +745,7 @@ async def create_new_version(
     source = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not source:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     if not source.is_published and not source.is_system:
         raise HTTPException(
             status_code=409,
@@ -617,9 +758,39 @@ async def create_new_version(
             status_code=409,
             detail=f"A draft version (v{existing_draft.version}) already exists for this schema. Edit it instead.",
         )
-    result = await ontology_definition_repo.create_new_version_from_source(session, source)
+    result = await ontology_definition_repo.create_new_version_from_source(session, source, actor=_auth.id)
     await _invalidate_ontology_caches(session, getattr(result, "id", None), background)
+    await with_access(session, claims, _auth.id, [result])
     return result
+
+
+@router.post("/{ontology_id}/approve", response_model=OntologyDefinitionResponse,
+             dependencies=_EDIT_GATES)
+async def approve_ontology(
+    background: BackgroundTasks,
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+):
+    """Approve a workspace's layer for everyone: a published layer a workspace owns (one that moved
+    in with a graph from the Playground, say) becomes an org layer — ``scope="universal"``, its
+    owner cleared, every version of it — so every Playground member may build on it. For the org's
+    editors: 409 ``not_owned`` for an org layer, ``not_published`` for a draft."""
+    row = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not row or row.deleted_at:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
+    if not row.owner_workspace_id:
+        raise HTTPException(status_code=409, detail={
+            "type": "not_owned", "message": "This layer is the org's already: there is nothing to approve."})
+    if not row.is_published:
+        raise HTTPException(status_code=409, detail={
+            "type": "not_published", "message": "Publish the layer before approving it for everyone."})
+    approved = await ontology_definition_repo.approve_ontology(session, row, actor=_auth.id)
+    await _invalidate_ontology_caches(session, ontology_id, background)
+    await with_access(session, claims, _auth.id, [approved])
+    return approved
 
 
 @router.post("/{ontology_id}/validate", response_model=OntologyValidationResponse)
@@ -637,7 +808,7 @@ async def validate_ontology_endpoint(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     import json
     entity_defs = parse_entity_definitions(json.loads(orm.entity_type_definitions or "{}"))
@@ -668,7 +839,7 @@ async def get_ontology_coverage(
     The caller provides GraphSchemaStats (from the /schema/stats endpoint).
     Returns which entity and relationship types are covered vs. uncovered.
     """
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     repo = SQLAlchemyOntologyRepository(session)
     svc = LocalOntologyService(repo)
     report = await svc.check_coverage(ontology_id, stats)
@@ -720,7 +891,7 @@ async def get_ontology_adoption(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     entity_ids = set(with_system_entity_types(_json.loads(orm.entity_type_definitions or "{}")).keys())
     edge_ids = set(with_system_edge_types(_json.loads(orm.relationship_type_definitions or "{}")).keys())
@@ -874,7 +1045,7 @@ async def get_ontology_coverage_ranking(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     entity_defs = parse_entity_definitions(
         with_system_entity_types(_json.loads(orm.entity_type_definitions or "{}")))
@@ -985,7 +1156,7 @@ async def check_ontology_resolution(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     introspected_entity_ids = [s.id for s in stats.entity_type_stats if getattr(s, "id", None)]
     introspected_edge_ids = [s.id for s in stats.edge_type_stats if getattr(s, "id", None)]
@@ -1064,7 +1235,7 @@ async def get_ontology_impact(
     # which authorised the caller already). When it's populated (the HTTP
     # path), enforce visibility too.
     if claims is not None:
-        await ensure_ontology_visible(session, claims, ontology_id)
+        await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     if draft_row.is_published:
         raise HTTPException(status_code=409, detail="Ontology is already published.")
 
@@ -1157,7 +1328,7 @@ async def get_ontology_source_mappings(
     row = await ontology_definition_repo.get_ontology(session, ontology_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
 
     from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
 
@@ -1255,12 +1426,12 @@ async def get_ontology_assignments(
     row = await ontology_definition_repo.get_ontology(session, ontology_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     return await ontology_definition_repo.get_assignments(session, ontology_id)
 
 
 @router.get("/{ontology_id}/audit", response_model=List[OntologyAuditEntry],
-            dependencies=[Depends(_GATE_HISTORY)])
+            dependencies=[Depends(_HISTORY_UNLESS_OWNER)])
 async def get_ontology_audit_log(
     ontology_id: str = Path(...),
     action: Optional[str] = Query(None, description="Filter by action type (created, updated, published, deleted, restored, cloned)"),
@@ -1278,7 +1449,7 @@ async def get_ontology_audit_log(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     schema_id = getattr(orm, "schema_id", None) or orm.id
     return await ontology_definition_repo.get_audit_log(
         session, schema_id, action=action, limit=limit, offset=offset,
@@ -1291,6 +1462,7 @@ async def import_ontology_new(
     background: BackgroundTasks,
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
@@ -1302,22 +1474,33 @@ async def import_ontology_new(
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     try:
-        result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
+        result = await ontology_definition_repo.import_ontology(session, req, target_id=None, actor=_auth.id)
         await _invalidate_ontology_caches(session, getattr(result, "ontology_id", None), background)
+        await with_access(session, claims, _auth.id, [result.ontology])
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
 
+def normalise_layer_body(req) -> None:
+    """The checks every layer body takes on its way in (create, update, import), in place: the
+    platform's own types dropped, case-variant type ids refused (422), containment and lineage
+    references in the declared casing, a relationship's ends limited to the layer's types."""
+    _strip_system_types(req)
+    _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
+    _reconcile_relationship_endpoints(req)
+
+
 @router.post("/{ontology_id}/import", response_model=OntologyImportResponse, status_code=200,
-             dependencies=[Depends(_GATE_IMPORT), *_EDIT_GATES])
+             dependencies=[Depends(_IMPORT_UNLESS_OWNER)])
 async def import_ontology_into(
     background: BackgroundTasks,
     ontology_id: str = Path(...),
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
-    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
+    _auth=Depends(ontology_manage_or_owner),
 ):
     """
     Import a semantic layer from exported JSON into an existing ontology.
@@ -1338,13 +1521,15 @@ async def import_ontology_into(
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
-    await ensure_ontology_visible(session, claims, ontology_id)
+    await ensure_ontology_visible(session, claims, ontology_id, user_id=_auth.id)
     try:
-        result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
+        result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id,
+                                                                actor=_auth.id)
         await _invalidate_ontology_caches(session, ontology_id, background)
         target_after = getattr(result, "ontology_id", None)
         if target_after and target_after != ontology_id:
             await _invalidate_ontology_caches(session, target_after, background)
+        await with_access(session, claims, _auth.id, [result.ontology])
         return result
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -1386,6 +1571,22 @@ async def suggest_ontology(
         base_ontology_id=base_ontology_id,
     )
 
+    matches = score_ontologies(stats, await ontology_definition_repo.list_latest_ontologies(session),
+                               min_score)
+
+    return OntologySuggestResponse(
+        suggested=suggestion,
+        matchingOntologies=matches[:5],
+        mergedVariants=merged_variants_of(stats),
+    )
+
+
+def score_ontologies(stats: GraphSchemaStats, ontologies: Iterable[OntologyDefinitionResponse],
+                     min_score: float) -> List[OntologyMatchResult]:
+    """How well each of ``ontologies`` fits a graph's types (``stats``), best first: the
+    Jaccard overlap of their type ids, and which types each covers, leaves out, leaves
+    unclassified or spells in another case. Those scoring under ``min_score`` are left out.
+    The suggest route scores every layer with it; the Playground's, those on offer."""
     # Find matching existing ontologies
     graph_entity_ids = {s.id for s in stats.entity_type_stats}
     graph_rel_ids = {s.id.upper() for s in stats.edge_type_stats}
@@ -1396,8 +1597,7 @@ async def suggest_ontology(
 
     matches = []
     if graph_types:
-        all_ontologies = await ontology_definition_repo.list_latest_ontologies(session)
-        for ont in all_ontologies:
+        for ont in ontologies:
             # Include the platform's built-in types so :AGGREGATED (present in every graph
             # that's been aggregated) never reads as a "missing" type against any ontology.
             ont_entity_ids = set(with_system_entity_types(ont.entity_type_definitions or {}).keys())
@@ -1458,7 +1658,11 @@ async def suggest_ontology(
                 ))
 
         matches.sort(key=lambda m: m.jaccard_score, reverse=True)
+    return matches
 
+
+def merged_variants_of(stats: GraphSchemaStats) -> dict:
+    """The type ids a graph spells more than one way, each with the spellings merged into it."""
     # Surface the suggester's case-variant merges structurally (Task E §1c) so the review
     # UI can show "this graph spells HAS 3 ways — merged into one" with a split affordance.
     from backend.app.ontology.defaults import SYSTEM_ENTITY_TYPES, SYSTEM_RELATIONSHIP_TYPES
@@ -1466,9 +1670,4 @@ async def suggest_ontology(
     merged_variants: dict = {}
     merged_variants.update(collect_merged_variants(stats.entity_type_stats, SYSTEM_ENTITY_TYPES))
     merged_variants.update(collect_merged_variants(stats.edge_type_stats, SYSTEM_RELATIONSHIP_TYPES))
-
-    return OntologySuggestResponse(
-        suggested=suggestion,
-        matchingOntologies=matches[:5],
-        mergedVariants=merged_variants,
-    )
+    return merged_variants

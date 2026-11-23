@@ -20,6 +20,10 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewUsageDetails } from './ViewUsage'
 import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
+import { WhoToAsk } from '@/features/discussions/WhoToAsk'
+import { QuestionsButton } from '@/features/discussions/QuestionsButton'
+import { useFeature } from '@/store/features'
+import { useDiscussionsDrawer } from '@/features/discussions/drawerStore'
 import { useViewUsage } from '@/hooks/useContentInsights'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
@@ -338,6 +342,8 @@ export function ExplorerPreviewDrawer({
 }: ExplorerPreviewDrawerProps) {
   const [activityOpen, setActivityOpen] = useState(false)
   const [editMode, setEditMode] = useState(!!initialEditMode)
+  const conversations = useFeature('conversationsEnabled')
+  const openQuestions = useDiscussionsDrawer((s) => s.open)
   // Reset edit mode when the drawer opens for a (possibly different) view or the
   // caller's intent changes — pencil opens in edit mode, a click opens in view mode.
   useEffect(() => {
@@ -600,6 +606,9 @@ export function ExplorerPreviewDrawer({
                       displayName={view.createdByName ?? null}
                       email={view.createdByEmail ?? null}
                       avatarId={view.createdByAvatarId}
+                      onAsk={conversations && view.createdBy ? () => openQuestions({
+                        subject: { type: 'view', id: view.id, name: view.name }, compose: true, recipients: [view.createdBy!],
+                      }) : undefined}
                     >
                       <div
                         tabIndex={0}
@@ -635,6 +644,10 @@ export function ExplorerPreviewDrawer({
                       </div>
                     </PersonHoverCard>
                   )}
+
+                  {/* Who to ask about it — its owners and the people behind its data. Nothing
+                      while conversations are off. */}
+                  {conversations && <WhoToAsk subject={{ type: 'view', id: view.id, name: view.name }} variant="strip" />}
 
                   {/* Everyone else who shaped it — last editor, last data
                       publisher — at a glance, without opening the dates. Only
@@ -832,6 +845,12 @@ export function ExplorerPreviewDrawer({
                 >
                   <History className="h-4 w-4" /> Activity
                 </button>
+                {conversations && (
+                  <QuestionsButton
+                    subject={{ type: 'view', id: view.id, name: view.name }}
+                    className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 border border-glass-border text-sm font-medium text-ink-muted hover:text-ink hover:border-indigo-500/30 transition-colors"
+                  />
+                )}
               </div>
               {/* Secondary actions row */}
               <div className="flex items-center gap-2">

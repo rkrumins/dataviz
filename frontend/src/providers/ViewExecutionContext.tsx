@@ -62,6 +62,8 @@ export interface ViewExecutionContextValue {
   /** The past revision of Published this view reads the graph as it was at (read-only, the
    *  versioning bar stays as the way back), or null for the graph as it is now. */
   asOfSeq: number | null
+  /** The saved view on the canvas — what "Ask about this" asks about. Absent in previews. */
+  viewId?: string | null
 }
 
 const ViewExecCtx = createContext<ViewExecutionContextValue | null>(null)
@@ -304,6 +306,7 @@ export function ViewExecutionProvider({
             access={access}
             readOnly={readOnly}
             asOfSeq={asOfSeq}
+            viewId={viewId ?? null}
           >
             {children}
           </ViewExecValue>
@@ -336,11 +339,12 @@ function ViewExecValue({
   access,
   readOnly,
   asOfSeq,
+  viewId,
   children,
 }: ViewExecutionContextValue & { children: ReactNode }) {
   const value = useMemo<ViewExecutionContextValue>(
-    () => ({ schema, workspaceId, dataSourceId, access, readOnly, asOfSeq }),
-    [schema, workspaceId, dataSourceId, access, readOnly, asOfSeq],
+    () => ({ schema, workspaceId, dataSourceId, access, readOnly, asOfSeq, viewId }),
+    [schema, workspaceId, dataSourceId, access, readOnly, asOfSeq, viewId],
   )
   return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
 }

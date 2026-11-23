@@ -19,6 +19,7 @@ import { useSearchHighlight } from '../search/useSearchHighlight'
 import { useEntityDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { QuestionRowMark } from '@/features/discussions/QuestionRowMark'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 
@@ -542,6 +543,8 @@ export const GenericNode = memo(function GenericNode({
         {visual.size !== 'xs' && (
           <DisplayRuleTagChips urn={searchUrn} size="sm" className="mt-2" />
         )}
+        {/* Questions asked about this entity (nothing otherwise). */}
+        <QuestionRowMark urn={searchUrn} label={primaryLabel} className="mt-2 w-fit" />
 
         {/* Child Count for collapsed nodes */}
         {!!entityData.childCount && !entityData.isExpanded && (

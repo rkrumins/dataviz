@@ -16,10 +16,14 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATEGORY_ORDER, type GlobalSearchResult } from '@/hooks/useGlobalSearch'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { useAuthStore } from '@/store/auth'
+import { useRequestWorkspaceWizard } from '@/hooks/useWorkspaceRequests'
+import { ViewEditorContext, type ViewEditorContextType } from '../viewEditorContext'
 
-const { globalSearch, recentViews } = vi.hoisted(() => ({
+const { globalSearch, recentViews, playground } = vi.hoisted(() => ({
   globalSearch: vi.fn(),
   recentViews: vi.fn(),
+  playground: vi.fn(),
 }))
 
 vi.mock('@/hooks/useGlobalSearch', async () => {
@@ -29,6 +33,10 @@ vi.mock('@/hooks/useGlobalSearch', async () => {
   return { ...actual, useGlobalSearch: globalSearch }
 })
 vi.mock('@/hooks/useRecentViews', () => ({ useRecentViews: recentViews }))
+vi.mock('@/hooks/usePlayground', async () => ({
+  ...await vi.importActual<typeof import('@/hooks/usePlayground')>('@/hooks/usePlayground'),
+  usePlayground: playground,
+}))
 
 import { CommandPalette } from '../CommandPalette'
 
@@ -97,20 +105,26 @@ function LocationProbe() {
   return <div data-testid="location">{`${pathname}${search}${hash}`}</div>
 }
 
-function renderPalette(open: boolean, route = '/dashboard') {
+function renderPalette(open: boolean, route = '/dashboard', viewEditor: ViewEditorContextType | null = null) {
   const onOpenChange = vi.fn()
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <LocationProbe />
-        <input aria-label="page field" />
-        <CommandPalette open={open} onOpenChange={onOpenChange} />
-      </MemoryRouter>
+      <ViewEditorContext.Provider value={viewEditor}>
+        <MemoryRouter initialEntries={[route]}>
+          <LocationProbe />
+          <input aria-label="page field" />
+          <CommandPalette open={open} onOpenChange={onOpenChange} />
+        </MemoryRouter>
+      </ViewEditorContext.Provider>
     </QueryClientProvider>,
   )
   return { onOpenChange }
 }
+
+const rowTexts = () => Array.from(document.querySelectorAll('[cmdk-item]')).map(r => r.textContent ?? '')
+const signIn = (global: string[], ws: Record<string, string[]> = {}) =>
+  useAuthStore.setState({ permissions: { sid: 't', global, ws } } as never)
 
 /** Type a query so the palette leaves its zero-search state. */
 function type(query = QUERY) {
@@ -135,6 +149,10 @@ beforeEach(() => {
   window.localStorage.clear()
   globalSearch.mockReturnValue(fixture({ catalogItemId: 'cat-9' }))
   recentViews.mockReturnValue({ recent: [], recordVisit: vi.fn() })
+  playground.mockReturnValue({ data: undefined })
+  signIn([])
+  useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } })
+  useRequestWorkspaceWizard.setState({ open: false })
 })
 
 describe('CommandPalette — closed', () => {
@@ -288,5 +306,74 @@ describe('CommandPalette — recent searches', () => {
     clickRow('Data lineage explorer')
     expect(window.localStorage.getItem(PALETTE_KEY)).toContain(QUERY)
     expect(window.localStorage.getItem(EXPLORER_KEY)).toBeNull()
+  })
+})
+
+describe('CommandPalette — actions', () => {
+  it('asks for a workspace, for someone who can\'t create one, by opening the wizard', () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, workspaceRequestsEnabled: true } })
+    renderPalette(true)
+    clickRow('Request a workspace')
+    expect(useRequestWorkspaceWizard.getState().open).toBe(true)
+  })
+
+  it('offers no request while workspace requests are off', () => {
+    renderPalette(true)
+    expect(rowTexts().some(r => r.includes('Request a workspace'))).toBe(false)
+  })
+
+  it('offers no request to someone who may create workspaces themselves', () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, workspaceRequestsEnabled: true } })
+    signIn(['system:workspaces:create'])
+    renderPalette(true)
+    expect(rowTexts().some(r => r.includes('Request a workspace'))).toBe(false)
+  })
+
+  it('opens the Playground once there is one', () => {
+    playground.mockReturnValue({ data: { enabled: true, exists: true, joined: true } })
+    renderPalette(true)
+    clickRow('Open the Playground')
+    expect(locationNow()).toBe('/playground')
+  })
+
+  it('offers no Playground before one is set up', () => {
+    playground.mockReturnValue({ data: { enabled: true, exists: false, joined: false } })
+    renderPalette(true)
+    expect(rowTexts().some(r => r.includes('Open the Playground'))).toBe(false)
+  })
+
+  it('invites people to the workspace on screen, for someone who may add them', () => {
+    signIn([], { ws_fin: ['workspace:members:add'] })
+    renderPalette(true, '/workspaces/ws_fin')
+    clickRow('Invite people to this workspace')
+    expect(locationNow()).toBe('/workspaces/ws_fin?tab=members')
+  })
+
+  it('offers no invite off a workspace page, or without the permission', () => {
+    signIn([], { ws_fin: ['workspace:view:read'] })
+    renderPalette(true, '/workspaces/ws_fin')
+    expect(rowTexts().some(r => r.includes('Invite people'))).toBe(false)
+  })
+
+  it('creates a view in the workspace on screen', () => {
+    const openViewEditor = vi.fn()
+    signIn([], { ws_fin: ['workspace:view:create'] })
+    renderPalette(true, '/workspaces/ws_fin', { openViewEditor, closeViewEditor: vi.fn() })
+    clickRow('Create a view')
+    expect(openViewEditor).toHaveBeenCalledWith(undefined, { workspaceId: 'ws_fin' })
+  })
+
+  it('creates a view from anywhere for someone who may create one somewhere', () => {
+    const openViewEditor = vi.fn()
+    signIn([], { ws_fin: ['workspace:view:create'] })
+    renderPalette(true, '/dashboard', { openViewEditor, closeViewEditor: vi.fn() })
+    clickRow('Create a view')
+    expect(openViewEditor).toHaveBeenCalledWith(undefined, undefined)
+  })
+
+  it('offers no Create a view to a reader who can\'t create one', () => {
+    signIn([], { ws_fin: ['workspace:view:read'] })
+    renderPalette(true, '/dashboard', { openViewEditor: vi.fn(), closeViewEditor: vi.fn() })
+    expect(rowTexts().some(r => r.includes('Create a view'))).toBe(false)
   })
 })

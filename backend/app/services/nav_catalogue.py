@@ -52,6 +52,9 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     "dashboard":  ("Dashboard",     NavSpecAlways()),
     "explore":    ("Explore",       NavSpecAlways()),
     "workspaces": ("Workspaces",    NavSpecAlways()),
+    # The Playground: a common area anyone may open. The sidebar also wants the Playground
+    # switched on and set up, since a flag is not a permission.
+    "playground": ("Playground",    NavSpecAlways()),
     # The open workspace's review inbox: whoever may read a workspace's data
     # sources may read its reviews (the `/review-inbox` gate). The sidebar also
     # wants the `versioningEnabled` flag on and a workspace open, since a flag is

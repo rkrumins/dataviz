@@ -33,6 +33,8 @@ interface Props {
     rows: LeaderboardRow[]
     /** Names the number, e.g. "events". */
     unit: string
+    /** The same for exactly one, where the plural reads wrong ("1 messages"). */
+    unitOne?: string
     /** Categorical slot for the bar. One slot for the whole list. */
     slot?: number
     emptyLabel?: string
@@ -41,7 +43,7 @@ interface Props {
 }
 
 export function Leaderboard({
-    rows, unit, slot = 0, emptyLabel, onRowClick, className,
+    rows, unit, unitOne, slot = 0, emptyLabel, onRowClick, className,
 }: Props) {
     const theme = useChartTheme()
     const max = Math.max(1, ...rows.map((r) => r.value))
@@ -96,7 +98,7 @@ export function Leaderboard({
                                     <span className="block text-xs font-bold text-ink tabular-nums">
                                         {exact(row.value)}
                                         <span className="ml-1 text-[10px] font-medium text-ink-muted">
-                                            {unit}
+                                            {row.value === 1 && unitOne ? unitOne : unit}
                                         </span>
                                     </span>
                                     {row.detail && (

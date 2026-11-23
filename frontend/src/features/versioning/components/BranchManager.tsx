@@ -324,6 +324,7 @@ export function BranchManager({
           wsId={wsId} graphId={graphId} branchId={publishBranch.branchId} dataSourceId={dataSourceId}
           onClose={() => setPublishBranch(null)}
           canPublishDraft={canManageDraft(publishBranch, me)}
+          canPublish={publishBranch.access?.canPublish}
         />
       )}
       {archiveBranch && (

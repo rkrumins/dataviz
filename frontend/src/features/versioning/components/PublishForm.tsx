@@ -70,6 +70,9 @@ export interface PublishFlowOptions {
   onPublished?: () => void
   /** False for an editor of a shared draft: only its owner or a maintainer publishes it directly. */
   canPublishDraft?: boolean
+  /** The server's word on publishing straight to the live version (`BranchAccess.canPublish`): the
+   *  publish permission, or the Playground graph's maker. Absent, the publish permission decides. */
+  canPublish?: boolean
   /** The draft's data source: its policy may have drafts published only through a review. */
   dataSourceId?: string | null
   /** The title to start with (what was just saved). */
@@ -80,7 +83,7 @@ export interface PublishFlowOptions {
 
 export function usePublishFlow({
   workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished, canPublishDraft = true, dataSourceId,
-  initialTitle = '', changesLoading = false,
+  initialTitle = '', changesLoading = false, canPublish: serverSays,
 }: PublishFlowOptions) {
   // Seeded once: a title the person has started editing is theirs.
   const [message, setMessage] = useState(initialTitle)
@@ -102,8 +105,10 @@ export function usePublishFlow({
   const { notify } = useAppNotifications()
   const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
-  // Publishing straight to the live version needs publish; without it, a draft goes through review.
-  const canPublish = usePermission('workspace:datasource:publish', workspaceId)
+  // Publishing straight to the live version needs publish — or, in the Playground, the graph's
+  // maker (the server says which); without it, a draft goes through review.
+  const holdsPublish = usePermission('workspace:datasource:publish', workspaceId)
+  const canPublish = serverSays ?? holdsPublish
   // Where nobody merges their own changes, a draft is published only through a review someone
   // else merges: a direct publish would be its publisher's own merge.
   const reviewOnly = useDataSourceDraftsPolicy(workspaceId, dataSourceId).data?.effective.selfMerge === false

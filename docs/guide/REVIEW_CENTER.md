@@ -8,8 +8,9 @@ to find the reviews waiting on you, work through one, give your verdict, and
 merge it — or send it back.
 
 > **Before you start:**
-> - **Version control** must be on for your deployment. If it's off, the
->   workspace has no **Reviews** tab and the page says *Reviews are turned off*.
+> - **Version control** must be on for your deployment. If it's off, there is
+>   no **Reviews** in the sidebar or in a workspace, and the page says *Reviews
+>   are turned off*.
 > - To approve, merge, dismiss or change who reviews, you need permission to
 >   manage the workspace's data sources — the **Workspace member**, **Data
 >   engineer** and **Workspace admin** roles have it. Without it, you see the
@@ -51,10 +52,16 @@ stateDiagram-v2
 
 ## Open the Review Center
 
-- **Reviews** in the sidebar opens the reviews of the workspace you're in. Its
-  badge counts what waits on you: reviews you're asked to review, and yours
-  sent back to you.
-- In a workspace, the **Reviews** tab opens the same page.
+- **Reviews** in the sidebar opens the Review Center across **all your
+  workspaces** — every review you can see, wherever it lives. Its badge counts
+  what waits on you anywhere: reviews you're asked to review, and yours sent
+  back to you.
+- At the top, choose where to look: **All workspaces**, or one workspace. Each
+  choice shows how many reviews wait on you there. Across workspaces, each review
+  names its workspace and opens there. Your choice is kept in the page's address,
+  so you can share it, and remembered for next time.
+- In a workspace, the **Reviews** tab shows that workspace's reviews. An older
+  link to a workspace's reviews opens the Review Center on that workspace.
 - Every notice about a review in your **Inbox** opens that review — on the
   thread, for a comment.
 - **From a View or a data source**, a review opens as a quick peek: its

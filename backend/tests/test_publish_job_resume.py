@@ -122,9 +122,13 @@ def set_off(monkeypatch):
         return drafts_policy.resolve()
     monkeypatch.setattr(ep, "_drafts_policy_of", builtin_policy)
 
+    class _NoRows:                        # the workspace a job's publish is in: none (not the Playground)
+        async def get(self, _orm, _key):
+            return None
+
     @contextlib.asynccontextmanager
     async def management_session():
-        yield None
+        yield _NoRows()
     monkeypatch.setattr("backend.app.db.engine.get_async_session", management_session)
 
     row = SimpleNamespace(field_scope={"actor": "usr_1", "message": "ship it"}, graph_id="g1",

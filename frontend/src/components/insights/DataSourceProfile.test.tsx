@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('@/hooks/useDataSourceProfile', () => ({
   useDataSourceProfile: () => ({
-    item: { id: 'cat-1', providerId: 'p-1', sourceIdentifier: 'orders', name: 'Orders Graph', status: 'active', createdAt: new Date().toISOString(), updatedAt: '' },
+    item: { id: 'cat-1', providerId: 'p-1', sourceIdentifier: 'orders', name: 'Orders Graph', status: 'active', createdAt: new Date().toISOString(), updatedAt: '', description: 'Orders, as the shop keeps them.' },
     provider: { id: 'p-1', name: 'Falkor Docker', providerType: 'falkordb' },
     stats: { nodeCount: 67870, edgeCount: 568001, entityTypeCounts: { Party: 4000 }, edgeTypeCounts: { HOLDS: 5000 } },
     meta: { status: 'fresh', updated_at: new Date().toISOString(), refreshing: false, provider_health: 'ok' },
@@ -25,6 +25,7 @@ vi.mock('@/components/admin/workspace/VocabAlignmentWarning', () => ({ VocabAlig
 
 import { aggregationService } from '@/services/aggregationService'
 import { DataSourceProfile } from './DataSourceProfile'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
 function wrapper({ children }: { children: React.ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -65,6 +66,17 @@ describe('DataSourceProfile', () => {
     expect(screen.queryByText('Semantic layer')).not.toBeInTheDocument()
     expect(screen.queryByTestId('vocab')).not.toBeInTheDocument()
     expect(screen.getByText('68k')).toBeInTheDocument()   // insight content still renders
+    expect(screen.getByText('Orders, as the shop keeps them.')).toBeInTheDocument()
+  })
+
+  it('leaves the description to the About card above it while data source details are on', () => {
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, dataSourceMetadataEnabled: true } })
+    const ctx = { wsId: 'w', dataSourceId: 'ds-1' }
+    render(<MemoryRouter><DataSourceProfile catalogId="cat-1" context={ctx} embedded /></MemoryRouter>, { wrapper })
+    expect(screen.queryByText('Orders, as the shop keeps them.')).not.toBeInTheDocument()
+    expect(screen.getByText('In the catalog since')).toBeInTheDocument()
+    expect(screen.queryByText('Registered')).not.toBeInTheDocument()
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } })
   })
 })
 

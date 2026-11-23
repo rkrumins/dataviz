@@ -318,6 +318,20 @@ def test_the_surface_is_the_reviewed_one():
     )
 
 
+def test_a_data_sources_details_and_history_are_a_persons_not_a_keys():
+    """Describing a source, saying whether to trust it and reading its history are a person's
+    to do: the routes are mounted, and none of them is on the surface."""
+    mine = {f"{method} {path}" for method, path, _r, _d in _routes()
+            if "/data-sources/{ds_id}/metadata" in path or "/data-sources/{ds_id}/activity" in path}
+    assert mine == {
+        "GET /api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata",
+        "PUT /api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata",
+        "PUT /api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata/trust",
+        "GET /api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/activity/events",
+    }
+    assert not {f"{method} {path}" for method, path, *_ in _eligible()} & mine
+
+
 # ── What the API documents ──────────────────────────────────────────
 
 

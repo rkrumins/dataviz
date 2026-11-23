@@ -226,6 +226,18 @@ class ReplaceRowsRefused(Exception):
         self.phase = phase
 
 
+class TooManyRows(Exception):
+    """A file with more rows than one import may hold (its job's ``maxRows``: the Playground's
+    ``maxImportRows`` there, else ``IMPORT_MAX_ROWS``), stopped while it is read, before any window:
+    nothing is built, nothing published. ``limit``: that ceiling."""
+    code, action = "too_many_rows", None
+
+    def __init__(self, limit: int):
+        super().__init__(f"too_many_rows: This file has more than {limit:,} rows, the most one import "
+                         "here may hold. Split it into smaller files and import each one.")
+        self.limit = limit
+
+
 #: The refused rows an import's report names one by one — the first it met — beside its counts.
 REFUSED_EXAMPLES = 20
 #: A refused row's reason, as the report quotes it.
@@ -610,6 +622,9 @@ class ImportWorker:
         self._allow_mass_delete = False
         # How many of the file's rows may be refused before the import holds (refused_budget).
         self._refused_budget = refused_budget(None)
+        # The most rows its file may hold (the job's ``maxRows``, else ``IMPORT_MAX_ROWS``; 0: no
+        # limit): past it, the file's read stops (TooManyRows).
+        self._max_rows = config.IMPORT_MAX_ROWS
         # What a replace may delete: "all" in its scope the file leaves out, or "keyed" — by a
         # property, only the nodes that hold it, and the edges between two of them.
         self._replace_scope = "all"
@@ -655,6 +670,7 @@ class ImportWorker:
         self._limits = (job.get("import_settings") or {}).get("replaceLimits") or platform_limits()
         self._refused_budget = refused_budget((job.get("import_settings") or {}).get("maxRefusedRows"))
         self._replace_scope = (job.get("import_settings") or {}).get("replaceScope") or "all"
+        self._max_rows = (job.get("import_settings") or {}).get("maxRows", config.IMPORT_MAX_ROWS)
         self._guard = (job.get("import_settings") or {}).get("replaceGuard")
         self._max_properties = (job.get("import_settings") or {}).get("maxMatchingProperties")
         actor = await self._branch_owner(graph_id, branch_id)
@@ -811,12 +827,19 @@ class ImportWorker:
                     if idx >= self._skip:              # below it: staged by an earlier run of the job
                         batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
                     idx += 1
+                self._within_ceiling(idx)
                 if len(batch) >= _PARSE_BATCH:
                     await self._flush(batch)
                     batch = []
         if batch:
             await self._flush(batch)
         return idx, skipped
+
+    def _within_ceiling(self, rows: int) -> None:
+        """Stop the file's read once it is past the most rows one import may hold
+        (:class:`TooManyRows`): it is read before any window, so nothing is built."""
+        if self._max_rows and rows > self._max_rows:
+            raise TooManyRows(self._max_rows)
 
     async def _in_memory_wanted(self, graph_id: str, branch_id: str) -> bool:
         """Whether a new job reconciles in memory: the switch is on, its types match imports by no
@@ -877,6 +900,7 @@ class ImportWorker:
                         summary, processed = await self._flush_decided(
                             job_id, snap, kind, pending, summary, processed, f"{prefix}:{idx}")
                         pending = []
+                self._within_ceiling(idx)
         end: Dict[str, Any] = {"current_phase": f"{kind}s"}
         if kind == "node":
             end["total"] = idx

@@ -1,0 +1,787 @@
+"""Workspace requests: asking for a workspace of your own, and answering.
+
+Anyone signed in may ask for a workspace — a name, what it is for, the teammates to
+add and the graphs they made in the Playground to bring along. The people who create
+workspaces (``system:workspaces:create``: Org and Super Admins) answer:
+
+* **approve** — optionally with another name or description. The workspace is
+  created; the requester becomes its Workspace Admin and the teammates its Members;
+  the groups asked for are made (``"<workspace> · <name>"``), bound to it with their
+  roles and filled with the people named for them; they are the workspace's own,
+  its admins manage them (``workspace_groups``). Each group that names an
+  identity-provider group is linked to it when the approver is a platform
+  administrator (the SSO rules' own bar); otherwise a link request asks one
+  (``idp_links``), and the link waits in ``outcome`` until it is answered — or
+  confirmed here (``link_idp_group``). Then each chosen Playground graph moves
+  into it with its views (``data_source_transfer.move``). A graph that can't move is
+  recorded in the request's ``outcome`` and the rest go on: the workspace is never
+  lost to one.
+* **send back** — with a question; the requester edits and resubmits.
+* **decline** — with an optional reason.
+
+The requester may withdraw an open request. One open request per person.
+
+Every transition writes a ``workspace.request.*`` outbox event; the approvers hear of
+new and resubmitted requests, and the requester of every answer, through the Inbox.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Optional
+
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db.models import (
+    GroupORM, IdpProviderORM, ProviderORM, ViewORM, WorkspaceDataSourceORM, WorkspaceORM, WorkspaceRequestORM,
+    view_is_live,
+)
+from backend.app.db.repositories import (
+    group_repo,
+    idp_link_request_repo,
+    notification_repo,
+    outbox_event_repo,
+    user_repo,
+    workspace_repo,
+    workspace_request_repo as repo,
+)
+from backend.app.services import data_requests, data_source_transfer, idp_links, workspace_access
+from backend.app.services.feature_flags import feature_flags
+from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.app.services.playground_policy import get_playground, graphs_made_by
+from backend.app.services.revocation_service import revoke_subject_sessions
+from backend.auth_service.interface import User
+from backend.common.models.management import DataSourceMoveRequest, WorkspaceCreateRequest
+from backend.common.models.rbac import (
+    ProposedGroup,
+    ProposedGroupResponse,
+    WorkspaceRequestCreate,
+    WorkspaceRequestDetail,
+    WorkspaceRequestPerson,
+    WorkspaceRequestPlaygroundActivity,
+    WorkspaceRequestResponse,
+    WorkspaceRequestSource,
+)
+from backend.common.service_accounts import is_service_account
+
+logger = logging.getLogger(__name__)
+
+PURPOSES = ("team", "project", "poc", "reporting", "other")
+NAME_MAX = 120
+APPROVER_PERMISSION = "system:workspaces:create"
+#: Data needs become a tracked data request while this is on.
+DATA_REQUESTS_FLAG = "dataRequestsEnabled"
+#: Linking a group to the identity provider: the SSO rules' own bar.
+IDP_LINK_PERMISSION = idp_links.LINK_PERMISSION
+GROUP_NAME_MAX = 200
+_ADMIN_ROLE = "workspace_admin"
+_MEMBER_ROLE = "workspace_member"
+_APPROVERS_LINK = "/workspaces?tab=requests"
+_REQUESTER_LINK = "/my/access?tab=workspaces"
+_STATUS_WORDS = {
+    "pending": "waiting for an answer",
+    "changes_requested": "sent back for changes",
+    "approved": "already approved",
+    "declined": "already declined",
+    "withdrawn": "already withdrawn",
+}
+
+
+# ── small helpers ────────────────────────────────────────────────────
+
+
+def _refuse(code: int, kind: str, message: str, **extra) -> HTTPException:
+    return HTTPException(status_code=code, detail={"type": kind, "message": message, **extra})
+
+
+def _clean(text: Optional[str]) -> Optional[str]:
+    return (text.strip() if text else None) or None
+
+
+def _reason(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        return str(detail.get("message") or detail.get("error") or detail)
+    return str(detail)
+
+
+async def _name_of(session: AsyncSession, user_id: str) -> str:
+    ident = (await user_repo.get_identities_by_ids(session, [user_id])).get(user_id)
+    return (ident["name"] or ident["email"]) if ident else "Someone"
+
+
+async def _emit(session: AsyncSession, event_type: str, row: WorkspaceRequestORM, actor_id: str,
+                **extra) -> None:
+    await outbox_event_repo.emit(
+        session, event_type=event_type, aggregate_id=row.id, aggregate_type="workspace_request",
+        payload={"request_id": row.id, "requester_id": row.requester_id, "name": row.name,
+                 "actor_id": actor_id, **extra},
+    )
+
+
+async def _move(session: AsyncSession, row: WorkspaceRequestORM, new_status: str, verb: str, *,
+                actor_id: str, **fields) -> None:
+    """The transition, or a 409 saying why it can't happen from where the request is."""
+    try:
+        await repo.transition(session, row, new_status, actor_id=actor_id, **fields)
+    except ValueError:
+        raise _refuse(status.HTTP_409_CONFLICT, "wrong_status",
+                      f"This request is {_STATUS_WORDS[row.status]}, so it can't be {verb}.")
+
+
+# ── what may be asked for ────────────────────────────────────────────
+
+
+async def _check_name(session: AsyncSession, raw: Optional[str]) -> str:
+    """The trimmed name, free among the live workspaces — or 422 / 409 ``name_taken``
+    with the first free ``"<name> 2"``, ``"<name> 3"``…"""
+    name = (raw or "").strip()
+    if not 1 <= len(name) <= NAME_MAX:
+        raise HTTPException(status_code=422, detail=f"A workspace name is 1 to {NAME_MAX} characters.")
+    taken = {
+        (n or "").strip().lower() for n in (await session.execute(
+            select(WorkspaceORM.name).where(WorkspaceORM.deleted_at.is_(None))
+        )).scalars().all()
+    }
+    if name.lower() in taken:
+        n = 2
+        while f"{name} {n}".lower() in taken:
+            n += 1
+        raise _refuse(status.HTTP_409_CONFLICT, "name_taken",
+                      f"There is already a workspace called {name}.", suggestion=f"{name} {n}")
+    return name
+
+
+async def _check_sources(session: AsyncSession, requester_id: str, ids: list[str]) -> list[str]:
+    """Only live graphs the requester made in the Playground may come along."""
+    ids = list(dict.fromkeys(i for i in ids if i))
+    if not ids:
+        return []
+    playground = await get_playground(session)
+    found = set() if playground is None else set((await session.execute(
+        select(WorkspaceDataSourceORM.id).where(
+            WorkspaceDataSourceORM.id.in_(ids),
+            WorkspaceDataSourceORM.workspace_id == playground.id,
+            WorkspaceDataSourceORM.created_by == requester_id,
+            WorkspaceDataSourceORM.deleted_at.is_(None),
+        )
+    )).scalars().all())
+    missing = [i for i in ids if i not in found]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only graphs you made in the Playground can come along. Not one of yours: "
+                   f"{', '.join(missing)}.",
+        )
+    return ids
+
+
+async def _active_people(session: AsyncSession, ids: list[str]) -> set[str]:
+    identities = await user_repo.get_identities_by_ids(session, ids)
+    return {
+        uid for uid, ident in identities.items()
+        if ident["status"] == "active" and not ident["deleted"] and not is_service_account(uid)
+    }
+
+
+async def _check_teammates(session: AsyncSession, requester_id: str, ids: list[str]) -> list[str]:
+    """Active people only; the requester is the workspace's admin, not a teammate."""
+    ids = list(dict.fromkeys(i for i in ids if i and i != requester_id))
+    if not ids:
+        return []
+    active = await _active_people(session, ids)
+    missing = [i for i in ids if i not in active]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Teammates must be people with an active account. Not found or not active: "
+                   f"{', '.join(missing)}.",
+        )
+    return ids
+
+
+def groups_of(raw: Optional[str]) -> list[dict]:
+    """A stored JSON list of proposed groups; empty for anything unreadable."""
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [g for g in value if isinstance(g, dict)] if isinstance(value, list) else []
+
+
+def group_full_name(workspace_name: str, short: str) -> str:
+    """The name a proposed group is made with: group names are platform-wide, so it
+    carries its workspace's."""
+    return f"{workspace_name.strip()} · {short.strip()}"
+
+
+async def _check_groups(session: AsyncSession, requester_id: str, groups: list[ProposedGroup]) -> list[dict]:
+    """Each group named, no two alike; its people active accounts."""
+    out: list[dict] = []
+    keys: set[str] = set()
+    names: set[str] = set()
+    for g in groups:
+        name = (g.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Every group needs a name.")
+        if g.key in keys or name.lower() in names:
+            raise HTTPException(status_code=422, detail=f"Two groups can't share a name: {name}.")
+        keys.add(g.key)
+        names.add(name.lower())
+        out.append({
+            "key": g.key, "name": name, "description": _clean(g.description), "role": g.role,
+            "memberIds": await _check_teammates(session, requester_id, g.member_ids),
+            "idpGroup": _clean(g.idp_group),
+        })
+    return out
+
+
+async def _validated(session: AsyncSession, requester_id: str, body: WorkspaceRequestCreate) -> dict:
+    if body.purpose not in PURPOSES:
+        raise HTTPException(status_code=422, detail=f"Purpose must be one of: {', '.join(PURPOSES)}.")
+    return {
+        "name": await _check_name(session, body.name),
+        "description": _clean(body.description),
+        "purpose": body.purpose,
+        "team_name": _clean(body.team_name),
+        "teammate_ids": await _check_teammates(session, requester_id, body.teammate_ids),
+        "playground_source_ids": await _check_sources(session, requester_id, body.playground_source_ids),
+        "proposed_groups": await _check_groups(session, requester_id, body.groups),
+        "data_needs": _clean(body.data_needs),
+        "note": _clean(body.note),
+    }
+
+
+async def _tell_approvers(session: AsyncSession, row: WorkspaceRequestORM, kind: str, title: str) -> None:
+    await notification_repo.notify(
+        session,
+        user_ids=await notification_repo.users_with_global_permission(session, APPROVER_PERMISSION),
+        kind=kind, title=title, body=row.note or row.description, link=_APPROVERS_LINK,
+        actor_id=row.requester_id, resource_type="workspace_request", resource_id=row.id,
+    )
+
+
+# ── the requester ────────────────────────────────────────────────────
+
+
+async def submit(session: AsyncSession, user: User, body: WorkspaceRequestCreate) -> WorkspaceRequestORM:
+    """Ask for a workspace. 409 ``request_open`` when the person already has one open."""
+    def _open(existing: WorkspaceRequestORM) -> HTTPException:
+        return _refuse(status.HTTP_409_CONFLICT, "request_open",
+                       "You already have a workspace request open. Change or withdraw it first.",
+                       requestId=existing.id)
+
+    existing = await repo.find_open_for(session, user.id)
+    if existing is not None:
+        raise _open(existing)
+    fields = await _validated(session, user.id, body)
+    row, created = await repo.create(session, requester_id=user.id, **fields)
+    if not created:
+        raise _open(row)
+    await _emit(session, "workspace.request.submitted", row, user.id)
+    await _tell_approvers(session, row, "workspace_request.submitted",
+                          f"{await _name_of(session, user.id)} asked for a workspace: {row.name}")
+    return row
+
+
+async def own(session: AsyncSession, user: User, request_id: str, *,
+              for_update: bool = False) -> WorkspaceRequestORM:
+    """The caller's own request, or 404 — someone else's is not theirs to know of."""
+    row = await repo.get(session, request_id, for_update=for_update)
+    if row is None or row.requester_id != user.id:
+        raise HTTPException(status_code=404, detail="Workspace request not found")
+    return row
+
+
+async def resubmit(session: AsyncSession, user: User, request_id: str,
+                   body: WorkspaceRequestCreate) -> WorkspaceRequestORM:
+    """Answer an approver's question: edit the request and send it again."""
+    row = await own(session, user, request_id, for_update=True)
+    if row.status != "changes_requested":
+        raise _refuse(status.HTTP_409_CONFLICT, "wrong_status",
+                      f"This request is {_STATUS_WORDS[row.status]}, so it can't be resubmitted.")
+    fields = await _validated(session, user.id, body)
+    for column in ("name", "description", "purpose", "team_name", "data_needs", "note"):
+        setattr(row, column, fields[column])
+    row.teammate_ids = json.dumps(fields["teammate_ids"])
+    row.playground_source_ids = json.dumps(fields["playground_source_ids"])
+    row.proposed_groups = json.dumps(fields["proposed_groups"])
+    # Waiting starts afresh: the reminders count from now.
+    row.reminded_at = row.escalated_at = None
+    await _move(session, row, "pending", "resubmitted", actor_id=user.id)
+    await _emit(session, "workspace.request.resubmitted", row, user.id)
+    await _tell_approvers(session, row, "workspace_request.resubmitted",
+                          f"{await _name_of(session, user.id)} updated their workspace request: {row.name}")
+    return row
+
+
+async def withdraw(session: AsyncSession, user: User, request_id: str) -> WorkspaceRequestORM:
+    row = await own(session, user, request_id, for_update=True)
+    await _move(session, row, "withdrawn", "withdrawn", actor_id=user.id)
+    await _emit(session, "workspace.request.withdrawn", row, user.id)
+    return row
+
+
+# ── the approvers ────────────────────────────────────────────────────
+
+
+async def _to_answer(session: AsyncSession, request_id: str, approver: User) -> WorkspaceRequestORM:
+    """Lock the request, so two answers decide one after the other. Nobody answers
+    their own."""
+    row = await repo.get(session, request_id, for_update=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Workspace request not found")
+    if row.requester_id == approver.id:
+        raise _refuse(status.HTTP_403_FORBIDDEN, "own_request", "You can't answer your own request.")
+    return row
+
+
+async def send_back(session: AsyncSession, approver: User, request_id: str,
+                    question: str) -> WorkspaceRequestORM:
+    row = await _to_answer(session, request_id, approver)
+    question = (question or "").strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="Ask the question the requester should answer.")
+    await _move(session, row, "changes_requested", "sent back", actor_id=approver.id, question=question)
+    await _emit(session, "workspace.request.sent_back", row, approver.id, question=question)
+    await notification_repo.notify(
+        session, user_ids=[row.requester_id], kind="workspace_request.sent_back",
+        title=f"A question about your workspace request: {row.name}", body=question,
+        link=_REQUESTER_LINK, actor_id=approver.id, resource_type="workspace_request",
+        resource_id=row.id,
+    )
+    return row
+
+
+async def decline(session: AsyncSession, approver: User, request_id: str,
+                  reason: Optional[str]) -> WorkspaceRequestORM:
+    row = await _to_answer(session, request_id, approver)
+    reason = _clean(reason)
+    await _move(session, row, "declined", "declined", actor_id=approver.id, note=reason)
+    await _emit(session, "workspace.request.declined", row, approver.id, reason=reason)
+    await notification_repo.notify(
+        session, user_ids=[row.requester_id], kind="workspace_request.declined",
+        title=f"Your workspace request was declined: {row.name}",
+        body=reason or "No reason was given.", link=_REQUESTER_LINK, actor_id=approver.id,
+        resource_type="workspace_request", resource_id=row.id,
+    )
+    return row
+
+
+async def _bind(session: AsyncSession, ws_id: str, user_id: str, role: str, actor_id: str) -> None:
+    """Grant ``role`` in the new workspace, end the person's sessions so their next
+    request reads it, and record it as the members page does."""
+    binding, outcome = await workspace_access.grant_role(
+        session, subject_type="user", subject_id=user_id, role=role, ws_id=ws_id, granted_by=actor_id,
+    )
+    revoked = await revoke_subject_sessions("user", user_id, session=session, reason="workspace_binding_added")
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.member_bound",
+        payload={
+            "workspace_id": ws_id, "binding_id": binding.id, "subject_type": "user",
+            "subject_id": user_id, "role": role, "actor_id": actor_id, "expires_at": None,
+            "sessions_revoked": revoked, "idp_exception": False,
+            "reactivated": outcome == "reactivated",
+        },
+    )
+
+
+async def _move_source(session: AsyncSession, ds_id: str, playground_id: Optional[str], ws_id: str,
+                       claims: PermissionClaims, actor_id: str) -> Optional[str]:
+    """Move one Playground graph, with its views, into the new workspace. None when it
+    moved; otherwise why not. The move commits (or rolls back) by itself."""
+    if playground_id is None:
+        return "There is no Playground to move it from."
+    try:
+        ds = await data_source_transfer.source_in(session, ds_id, playground_id)
+    except HTTPException:
+        return "It is no longer in the Playground."
+    try:
+        pre = await data_source_transfer.preflight(session, ds=ds, to_ws_id=ws_id, claims=claims,
+                                                   purpose="move")
+        await data_source_transfer.move(
+            session, ds_id=ds_id, from_ws_id=playground_id, claims=claims, user_id=actor_id,
+            req=DataSourceMoveRequest(targetWorkspaceId=ws_id, previewToken=pre.token),
+        )
+        return None
+    except HTTPException as exc:
+        await session.rollback()
+        return _reason(exc)
+    except Exception:  # noqa: BLE001 — the workspace is made; one graph must not undo the answer
+        logger.exception("could not move data source %s into workspace %s", ds_id, ws_id)
+        await session.rollback()
+        return "It couldn't be moved. Try moving it from the Playground."
+
+
+async def _group_names(session: AsyncSession, proposals: list[dict], ws_name: str,
+                       renamed: Optional[dict[str, str]]) -> dict[str, str]:
+    """The full name each proposed group is made with, by key — the approver's where they
+    changed one — all free: 409 ``group_name_taken`` with a free one otherwise. Checked
+    before anything is made, so a clash never leaves half a workspace."""
+    names: dict[str, str] = {}
+    for g in proposals:
+        full = ((renamed or {}).get(g["key"]) or group_full_name(ws_name, g["name"])).strip()
+        if not 1 <= len(full) <= GROUP_NAME_MAX:
+            raise HTTPException(status_code=422, detail=f"A group name is 1 to {GROUP_NAME_MAX} characters.")
+        names[g["key"]] = full
+    if len({n.lower() for n in names.values()}) < len(names):
+        raise HTTPException(status_code=422, detail="Two of the groups would have the same name.")
+    if not names:
+        return names
+    # Every group ever named holds its name, deleted ones too (``uq_groups_name``).
+    taken = set((await session.execute(select(GroupORM.name))).scalars().all())
+    for key, full in names.items():
+        if full in taken:
+            n = 2
+            while f"{full} {n}" in taken:
+                n += 1
+            raise _refuse(status.HTTP_409_CONFLICT, "group_name_taken",
+                          f"There is already a group called {full}.", groupKey=key, suggestion=f"{full} {n}")
+    return names
+
+
+async def _make_groups(session: AsyncSession, row: WorkspaceRequestORM, proposals: list[dict],
+                       names: dict[str, str], ws_id: str, ws_name: str, approver: User,
+                       claims: PermissionClaims, provider_id: Optional[str]) -> dict:
+    """Make the proposed groups, the workspace's own: bound to it with their roles, the
+    people named for them in them, and linked to their identity-provider groups when the
+    approver may link them — else a link request (the requester's) asks a platform
+    administrator."""
+    made: list[dict] = []
+    linked: list[dict] = []
+    waiting: list[dict] = []
+    can_link = has_permission(claims, IDP_LINK_PERMISSION)
+    people = sorted({uid for g in proposals for uid in g.get("memberIds", [])})
+    active = await _active_people(session, people) if people else set()
+    for g in proposals:
+        group = await group_repo.create_group(session, name=names[g["key"]], description=g.get("description"),
+                                              workspace_id=ws_id, created_by=approver.id)
+        await user_repo.create_outbox_event(
+            session, event_type="rbac.group.created",
+            payload={"group_id": group.id, "name": group.name, "actor_id": approver.id, "request_id": row.id},
+        )
+        binding, outcome = await workspace_access.grant_role(
+            session, subject_type="group", subject_id=group.id, role=g["role"], ws_id=ws_id,
+            granted_by=approver.id,
+        )
+        await user_repo.create_outbox_event(
+            session, event_type="rbac.workspace.member_bound",
+            payload={
+                "workspace_id": ws_id, "binding_id": binding.id, "subject_type": "group",
+                "subject_id": group.id, "role": g["role"], "actor_id": approver.id, "expires_at": None,
+                "sessions_revoked": 0, "idp_exception": False, "reactivated": outcome == "reactivated",
+            },
+        )
+        members = [uid for uid in g.get("memberIds", []) if uid in active]
+        for uid in members:
+            await group_repo.add_member(session, group.id, uid, added_by=approver.id)
+            revoked = await revoke_subject_sessions("user", uid, session=session, reason="group_membership_added")
+            await user_repo.create_outbox_event(
+                session, event_type="rbac.group.member_added",
+                payload={"group_id": group.id, "user_id": uid, "actor_id": approver.id,
+                         "sessions_revoked": revoked, "via": "workspace_request"},
+            )
+        if members:
+            await notification_repo.notify(
+                session, user_ids=members, kind="workspace.member_added",
+                title=f"You were added to {group.name}",
+                body=f"A group in {ws_name}, with {workspace_access.role_label(g['role'])} access.",
+                link=f"/workspaces/{ws_id}", actor_id=approver.id, resource_type="workspace", resource_id=ws_id,
+            )
+        made.append({"key": g["key"], "groupId": group.id, "name": group.name})
+        idp_group = g.get("idpGroup")
+        if not idp_group:
+            continue
+        if can_link:
+            try:
+                await idp_links.link_group(session, group_id=group.id, idp_group=idp_group,
+                                           provider_id=provider_id, actor_id=approver.id)
+                linked.append({"groupId": group.id, "idpGroup": idp_group})
+                continue
+            except HTTPException:
+                pass   # nothing was written: a platform administrator looks at it
+        waiting.append({"groupId": group.id, "groupName": group.name, "idpGroup": idp_group})
+        await idp_links.request_link(
+            session, group=group, ws_id=ws_id, idp_group=idp_group, provider_id=provider_id,
+            requested_by=row.requester_id, source="workspace_request", source_id=row.id, actor_id=approver.id,
+        )
+    return {"groupsCreated": made, "idpLinksCreated": linked, "idpLinksPending": waiting}
+
+
+async def _ask_for_data(session: AsyncSession, row: WorkspaceRequestORM, ws_id: str, ws_name: str) -> dict:
+    """The data the request said it needs, asked for in the new workspace — one data
+    request, the requester's, tracked until it is connected — while data requests are on.
+    Nothing (and the workspace stands) when they're off or it can't be asked."""
+    needs = (row.data_needs or "").strip()
+    if not needs or not await feature_flags.is_enabled(DATA_REQUESTS_FLAG, session, default=False):
+        return {}
+    try:
+        async with session.begin_nested():
+            made = await data_requests.create_for_workspace(
+                session, workspace_id=ws_id, requested_by=row.requester_id,
+                items=[{"title": f"Data for {ws_name}"[:120], "system": "other", "details": needs[:2000],
+                        "purpose": (row.description or "")[:2000] or None}],
+            )
+    except HTTPException as exc:
+        logger.warning("workspace request %s: data needs not asked for: %s", row.id, exc.detail)
+        return {}
+    return {"dataRequestIds": [r.id for r in made]}
+
+
+async def _sandbox_provider(session: AsyncSession) -> Optional[ProviderORM]:
+    """The Playground's sandbox connection, if there is one."""
+    playground = await get_playground(session)
+    if playground is None:
+        return None
+    provider_id = json.loads(playground.playground_settings or "{}").get("sandboxProviderId")
+    return await session.get(ProviderORM, provider_id) if provider_id else None
+
+
+def _permitted(provider: ProviderORM) -> list[str]:
+    """A connection's allowed workspaces; none listed means every one."""
+    try:
+        value = json.loads(provider.permitted_workspaces) if provider.permitted_workspaces else ["*"]
+    except (TypeError, ValueError):
+        value = ["*"]
+    return [str(v) for v in value] if isinstance(value, list) and value else ["*"]
+
+
+async def _sandbox_admits_new(session: AsyncSession, row: WorkspaceRequestORM) -> Optional[bool]:
+    """Whether graphs coming along can move into a workspace made now: the sandbox
+    connection lets in every workspace, or names them. None when none come along."""
+    if not repo.ids_of(row.playground_source_ids):
+        return None
+    provider = await _sandbox_provider(session)
+    return provider is None or "*" in _permitted(provider)
+
+
+async def approve(session: AsyncSession, approver: User, claims: PermissionClaims, request_id: str, *,
+                  name: Optional[str] = None, description: Optional[str] = None,
+                  group_names: Optional[dict[str, str]] = None,
+                  idp_provider_id: Optional[str] = None,
+                  admit_to_sandbox: bool = False) -> WorkspaceRequestORM:
+    """Create the workspace, bind its people and bring the Playground graphs along.
+
+    The workspace, its bindings and the approval are committed first; each graph's
+    move then commits on its own (it must, to put the version store right on a
+    failure), so a graph that can't move is recorded and never takes the workspace
+    with it."""
+    row = await _to_answer(session, request_id, approver)
+    if not repo.can_move(row.status, "approved"):
+        raise _refuse(status.HTTP_409_CONFLICT, "wrong_status",
+                      f"This request is {_STATUS_WORDS[row.status]}, so it can't be approved.")
+    ws_name = await _check_name(session, row.name if name is None else name)
+    ws_description = row.description if description is None else _clean(description)
+    proposals = groups_of(row.proposed_groups)
+    names = await _group_names(session, proposals, ws_name, group_names)
+    if idp_provider_id and await session.get(IdpProviderORM, idp_provider_id) is None:
+        raise HTTPException(status_code=422, detail="That identity-provider connection doesn't exist.")
+    if admit_to_sandbox and not has_permission(claims, "system:admin"):
+        raise _refuse(status.HTTP_403_FORBIDDEN, "cannot_admit",
+                      "Only a platform administrator can allow a workspace on the sandbox connection.")
+
+    created = await workspace_repo.create_workspace(
+        session, WorkspaceCreateRequest(name=ws_name, description=ws_description, dataSources=[]),
+    )
+    ws = await session.get(WorkspaceORM, created.id)
+    ws.created_by = row.requester_id
+    ws_id = ws.id
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.created",
+        payload={"workspace_id": ws_id, "name": ws_name, "actor_id": approver.id,
+                 "data_source_count": 0, "request_id": row.id},
+    )
+    await _bind(session, ws_id, row.requester_id, _ADMIN_ROLE, approver.id)
+    teammates = repo.ids_of(row.teammate_ids)
+    still_active = await _active_people(session, teammates) if teammates else set()
+    added = [uid for uid in teammates if uid in still_active]
+    for uid in added:
+        await _bind(session, ws_id, uid, _MEMBER_ROLE, approver.id)
+    if added:
+        requester_name = await _name_of(session, row.requester_id)
+        await notification_repo.notify(
+            session, user_ids=added, kind="workspace.member_added",
+            title=f"You were added to {ws_name}",
+            body=f"As {workspace_access.role_label(_MEMBER_ROLE)}. {requester_name} asked for this "
+                 "workspace and named you as a teammate.",
+            link=f"/workspaces/{ws_id}", actor_id=approver.id, resource_type="workspace",
+            resource_id=ws_id,
+        )
+
+    made = await _make_groups(session, row, proposals, names, ws_id, ws_name, approver, claims,
+                              idp_provider_id or None) if proposals else {}
+    if admit_to_sandbox and repo.ids_of(row.playground_source_ids):
+        sandbox = await _sandbox_provider(session)
+        if sandbox is not None and "*" not in (allowed := _permitted(sandbox)) and ws_id not in allowed:
+            sandbox.permitted_workspaces = json.dumps([*allowed, ws_id])
+            await user_repo.create_outbox_event(
+                session, event_type="provider.connection.workspace_admitted",
+                payload={"provider_id": sandbox.id, "workspace_id": ws_id, "actor_id": approver.id,
+                         "request_id": row.id},
+            )
+
+    asked = await _ask_for_data(session, row, ws_id, ws_name)
+    source_ids = repo.ids_of(row.playground_source_ids)
+    outcome: dict = {"movedSources": [], "failedSources": [], "membersAdded": added, "workspaceId": ws_id, **made,
+                     **asked}
+    row.outcome = json.dumps(outcome)
+    await _move(session, row, "approved", "approved", actor_id=approver.id, workspace_id=ws_id)
+    await _emit(session, "workspace.request.approved", row, approver.id, workspace_id=ws_id)
+    requester_id = row.requester_id
+    await session.commit()
+
+    if source_ids:
+        playground = await get_playground(session)
+        playground_id = playground.id if playground is not None else None
+        for ds_id in source_ids:
+            why = await _move_source(session, ds_id, playground_id, ws_id, claims, approver.id)
+            if why is None:
+                outcome["movedSources"].append(ds_id)
+            else:
+                outcome["failedSources"].append({"id": ds_id, "reason": why})
+        await session.refresh(row)   # a failed move's rollback expired it
+        row.outcome = json.dumps(outcome)
+
+    moved, failed = len(outcome["movedSources"]), len(outcome["failedSources"])
+    graphs = ""
+    if moved:
+        graphs += f" {moved} of your Playground graphs moved in with their views."
+    if failed:
+        graphs += f" {failed} couldn't move and stay in the Playground."
+    await notification_repo.notify(
+        session, user_ids=[requester_id], kind="workspace_request.approved",
+        title=f"Your workspace {ws_name} is ready",
+        body=f"You're its {workspace_access.role_label(_ADMIN_ROLE)}.{graphs}",
+        link=f"/workspaces/{ws_id}?welcome=1", actor_id=approver.id,
+        resource_type="workspace_request", resource_id=request_id,
+    )
+    await session.flush()
+    return row
+
+
+async def link_idp_group(session: AsyncSession, admin: User, request_id: str, group_id: str,
+                         provider_id: Optional[str]) -> WorkspaceRequestORM:
+    """A platform administrator links a group an approved request made to the
+    identity-provider group it named — the link an Org Admin's approval left waiting,
+    answering its link request."""
+    row = await repo.get(session, request_id, for_update=True)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Workspace request not found")
+    outcome = json.loads(row.outcome) if row.outcome else {}
+    waiting = outcome.get("idpLinksPending") or []
+    link = next((w for w in waiting if w.get("groupId") == group_id), None)
+    if link is None:
+        raise _refuse(status.HTTP_409_CONFLICT, "no_pending_link",
+                      "That group has no identity-provider link waiting.")
+    if provider_id and await session.get(IdpProviderORM, provider_id) is None:
+        raise HTTPException(status_code=422, detail="That identity-provider connection doesn't exist.")
+    asked = (await idp_link_request_repo.pending_for_groups(session, [group_id])).get(group_id)
+    if asked is not None and asked.source_id == row.id:
+        # The link request the approval made: answering it puts ``outcome`` right.
+        await idp_links.link_request(session, admin, asked.id, provider_id or None)
+    else:
+        # Approved before link requests were recorded.
+        await idp_links.link_group(session, group_id=group_id, idp_group=link["idpGroup"],
+                                   provider_id=provider_id or None, actor_id=admin.id)
+        outcome["idpLinksPending"] = [w for w in waiting if w is not link]
+        outcome["idpLinksCreated"] = [*(outcome.get("idpLinksCreated") or []),
+                                      {"groupId": group_id, "idpGroup": link["idpGroup"]}]
+        row.outcome = json.dumps(outcome)
+    await session.flush()
+    return row
+
+
+# ── reads ────────────────────────────────────────────────────────────
+
+
+async def _view_counts(session: AsyncSession, ds_ids: list[str]) -> dict[str, int]:
+    if not ds_ids:
+        return {}
+    return dict((await session.execute(
+        select(ViewORM.data_source_id, func.count(ViewORM.id))
+        .where(ViewORM.data_source_id.in_(ds_ids), view_is_live())
+        .group_by(ViewORM.data_source_id)
+    )).all())
+
+
+async def to_responses(session: AsyncSession, rows: list[WorkspaceRequestORM]) -> list[WorkspaceRequestResponse]:
+    """Requests as the API returns them: names, graph labels and view counts in a
+    handful of id-correlated queries however many there are."""
+    if not rows:
+        return []
+    teammates = {r.id: repo.ids_of(r.teammate_ids) for r in rows}
+    sources = {r.id: repo.ids_of(r.playground_source_ids) for r in rows}
+    groups = {r.id: groups_of(r.proposed_groups) for r in rows}
+    invited = {u for gs in groups.values() for g in gs for u in g.get("memberIds", [])}
+    people = await user_repo.get_identities_by_ids(
+        session,
+        sorted({r.requester_id for r in rows} | {u for ids in teammates.values() for u in ids} | invited),
+    )
+    ds_ids = sorted({d for ids in sources.values() for d in ids})
+    labels = dict((await session.execute(
+        select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+        .where(WorkspaceDataSourceORM.id.in_(ds_ids))
+    )).all()) if ds_ids else {}
+    views = await _view_counts(session, ds_ids)
+
+    def _name(uid: str) -> Optional[str]:
+        ident = people.get(uid)
+        return (ident["name"] or ident["email"]) if ident else None
+
+    return [
+        WorkspaceRequestResponse(
+            id=r.id, requester_id=r.requester_id, requester_name=_name(r.requester_id), name=r.name,
+            description=r.description, purpose=r.purpose, team_name=r.team_name,
+            teammate_ids=teammates[r.id],
+            teammates=[WorkspaceRequestPerson(id=u, display_name=_name(u)) for u in teammates[r.id]],
+            playground_source_ids=sources[r.id],
+            playground_sources=[
+                WorkspaceRequestSource(id=d, label=labels.get(d), view_count=views.get(d, 0))
+                for d in sources[r.id]
+            ],
+            groups=[
+                ProposedGroupResponse(
+                    key=g.get("key", ""), name=g.get("name", ""), description=g.get("description"),
+                    role=g.get("role", "workspace_member"), member_ids=g.get("memberIds", []),
+                    idp_group=g.get("idpGroup"),
+                    members=[WorkspaceRequestPerson(id=u, display_name=_name(u)) for u in g.get("memberIds", [])],
+                )
+                for g in groups[r.id]
+            ],
+            data_needs=r.data_needs, note=r.note, status=r.status, question=r.question,
+            created_at=r.created_at, updated_at=r.updated_at, resolved_at=r.resolved_at,
+            resolved_by=r.resolved_by, resolution_note=r.resolution_note, workspace_id=r.workspace_id,
+            outcome=json.loads(r.outcome) if r.outcome else None,
+        )
+        for r in rows
+    ]
+
+
+async def detail(session: AsyncSession, row: WorkspaceRequestORM) -> WorkspaceRequestDetail:
+    """A request as an approver reads it: the requester's email, and what they have
+    built in the Playground — their live graphs there and the live views on them."""
+    base = (await to_responses(session, [row]))[0]
+    ident = (await user_repo.get_identities_by_ids(session, [row.requester_id])).get(row.requester_id)
+    activity = WorkspaceRequestPlaygroundActivity()
+    playground = await get_playground(session)
+    if playground is not None:
+        graphs = await graphs_made_by(session, playground.id, row.requester_id)
+        if graphs:
+            mine = list((await session.execute(
+                select(WorkspaceDataSourceORM.id).where(
+                    WorkspaceDataSourceORM.workspace_id == playground.id,
+                    WorkspaceDataSourceORM.created_by == row.requester_id,
+                    WorkspaceDataSourceORM.deleted_at.is_(None),
+                )
+            )).scalars().all())
+            activity = WorkspaceRequestPlaygroundActivity(
+                graphs=graphs, views=sum((await _view_counts(session, mine)).values()),
+            )
+    return WorkspaceRequestDetail(
+        **base.model_dump(), requester_email=ident["email"] if ident else None,
+        playground_activity=activity, sandbox_admits_new=await _sandbox_admits_new(session, row),
+    )

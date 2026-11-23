@@ -51,7 +51,7 @@ export function BookmarksPopover() {
   }
 
   const handleViewAll = () => {
-    navigate('/explorer?favourites=true')
+    navigate('/explorer?category=my-favourites')
     setIsOpen(false)
     setSearch('')
   }

@@ -14,6 +14,8 @@ import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import { workspaceService } from '@/services/workspaceService'
+import { playgroundService } from '@/services/playgroundService'
+import { queryClient } from '@/lib/queryClient'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { fetchSchemaStats, fetchSchemaStatsWithMeta, generateSuggestedName, triggerIntrospectionRefresh } from '@/features/ontology/lib/ontology-utils'
 import { cn } from '@/lib/utils'
@@ -141,7 +143,9 @@ export function OntologySchemaPage() {
   // permission half. The other half is Admin → Features, whose six semantic-layer switches were
   // enforced nowhere: an admin could turn Import off and watch people go on importing. The server
   // refuses those calls now, and this hook keeps the UI from offering a button that will 403.
-  const access = useSemanticLayerAccess()
+  // Creating a layer answers to these org rules; what may be done to the open layer is that
+  // layer's own answer (`access`, below, once it is read).
+  const canCreate = useSemanticLayerAccess().canEdit
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -226,6 +230,7 @@ export function OntologySchemaPage() {
   // ── React Query data ───────────────────────────────────────────────
   const { data: ontologies = [], isLoading: isLoadingOntologies } = useOntologies()
   const { data: selectedOntology } = useOntology(ontologyId)
+  const access = useSemanticLayerAccess(selectedOntology)
   useDocumentTitle(selectedOntology?.name ? `${selectedOntology.name} · Schema` : 'Schema')
   const mutations = useOntologyMutations()
   // Invalidate the cached graph schema whenever a data-source-to-ontology
@@ -1165,7 +1170,14 @@ export function OntologySchemaPage() {
   async function handleClone() {
     if (!selectedOntology) return
     try {
-      const cloned = await mutations.clone.mutateAsync(selectedOntology.id)
+      // A maker's own layer is copied as another of their own; the org clone is for org editors.
+      const cloned = access.isOwn
+        ? await playgroundService.createLayer({ name: `${selectedOntology.name} (copy)`, from: { cloneOf: selectedOntology.id } })
+        : await mutations.clone.mutateAsync(selectedOntology.id)
+      if (access.isOwn) {
+        mutations.invalidateAll()
+        void queryClient.invalidateQueries({ queryKey: ['playground'] })
+      }
       navigate(schemaUrl(cloned.id))
       notify('success', 'Cloned — now editing an independent copy')
     } catch (err: unknown) {
@@ -1306,6 +1318,13 @@ export function OntologySchemaPage() {
     }
     reader.onerror = () => notify('error', 'Failed to read file')
     reader.readAsText(file)
+  }
+
+  /** On a maker's own layer, "import as new" makes another layer of their own; the org import is for org editors. */
+  async function importAsOwnLayer(data: Record<string, unknown>): Promise<OntologyImportResponse> {
+    const ontology = await playgroundService.createLayer({ name: String(data.name), from: { layer: data } })
+    void queryClient.invalidateQueries({ queryKey: ['playground'] })
+    return { ontology, status: 'created', summary: `Imported as "${ontology.name}"`, changes: null }
   }
 
   function handleImportSuccess(result: OntologyImportResponse) {
@@ -1541,7 +1560,7 @@ export function OntologySchemaPage() {
             workspaces={workspaces}
             isLoading={isLoadingOntologies}
             isSuggesting={isSuggesting}
-            canManage={access.canEdit}
+            canManage={canCreate}
             onCreateDraft={() => setShowCreateDialog(true)}
             onSuggest={handleSuggestOntology}
             dashboardMode={dashboardMode}
@@ -2060,7 +2079,7 @@ export function OntologySchemaPage() {
           importData={importData}
           currentOntology={selectedOntology ?? null}
           onClose={() => setImportData(null)}
-          onImportNew={ontologyDefinitionService.importNew}
+          onImportNew={access.isOwn ? importAsOwnLayer : ontologyDefinitionService.importNew}
           onImportInto={ontologyDefinitionService.importInto}
           onSuccess={handleImportSuccess}
         />

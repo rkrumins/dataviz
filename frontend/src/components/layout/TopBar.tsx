@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal, UserRound, MessagesSquare } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { PersonaIntroTip } from '@/components/persona/PersonaIntroTip'
@@ -25,6 +25,8 @@ import {
 import { useHelpPanelStore } from '@/store/helpPanel'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
+import { useFeature } from '@/store/features'
+import { useMySummary } from '@/features/discussions/useDiscussions'
 
 interface TopBarProps {
   onOpenCommandPalette: () => void
@@ -54,6 +56,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const canInvite = useAnyWorkspacePermission('workspace:admin')
   const location = useLocation()
   const navigate = useNavigate()
+  const conversations = useFeature('conversationsEnabled')
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
   // The persona toggle — where the Business view's first-run tip points.
   const [personaEl, setPersonaEl] = useState<HTMLSpanElement | null>(null)
@@ -311,7 +314,11 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                   </div>
                 </div>
 
-                {/* Account settings — first, because it edits the name and
+                {/* Your profile and conversations — what others see of you, and the
+                    questions asked of you. They come with the conversations switch. */}
+                {conversations && <ProfileMenuItems onGo={navigate} />}
+
+                {/* Account settings — first of the settings, because it edits the name and
                     email printed directly above it. UserCog rather than
                     Settings: Settings is already the admin cog in this bar. */}
                 <DropdownMenu.Item
@@ -432,5 +439,30 @@ function ThemeSwitcher({ theme, onChange }: ThemeSwitcherProps) {
     >
       <Icon className="w-5 h-5 text-ink-secondary group-hover:text-ink transition-colors" />
     </button>
+  )
+}
+
+const MENU_ITEM = 'flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors'
+
+/** Your profile, and your conversations with how many are unread — only while conversations are on. */
+function ProfileMenuItems({ onGo }: { onGo: (to: string) => void }) {
+  const unread = useMySummary().data?.totalUnread ?? 0
+  return (
+    <>
+      <DropdownMenu.Item className={MENU_ITEM} onSelect={() => onGo('/me/profile')}>
+        <UserRound className="w-4 h-4" />
+        <span>Your profile</span>
+      </DropdownMenu.Item>
+      <DropdownMenu.Item className={MENU_ITEM} onSelect={() => onGo('/me/profile?tab=conversations')}>
+        <MessagesSquare className="w-4 h-4" />
+        <span className="flex-1">Conversations</span>
+        {unread > 0 && (
+          <span className="rounded-full bg-accent-lineage px-1.5 py-px text-[10px] font-bold text-white tabular-nums" aria-label={`${unread} unread`}>
+            {unread > 99 ? '99+' : unread}
+          </span>
+        )}
+      </DropdownMenu.Item>
+      <DropdownMenu.Separator className="my-1 h-px bg-glass-border" />
+    </>
   )
 }

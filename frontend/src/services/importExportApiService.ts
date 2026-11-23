@@ -34,9 +34,10 @@ export interface ImportSummary {
   auto_fixed?: number
   /** A replace: the replace guard's verdict — what it would delete and made, and the limits. */
   replaceGuard?: ReplaceGuardVerdict | null
-  /** A failed job: why (`code`), what to do about it (`action`), and the step it stopped in
-   *  (`phase`: `nodes`, `edges`, `replace`, …). */
-  failure?: { code: string; action?: string | null; reason?: string; phase?: string | null } | null
+  /** A failed job: why (`code`), what to do about it (`action`), the step it stopped in
+   *  (`phase`: `nodes`, `edges`, `replace`, …) and, for `too_many_rows`, the most rows one import
+   *  may carry (`limit`). */
+  failure?: { code: string; action?: string | null; reason?: string; phase?: string | null; limit?: number } | null
   /** The rows the import refused: how many for each reason, and the first ones, with why. */
   refused?: RefusedRows | null
   /** A replace: the edges its node deletes took with them (an edge never outlives its ends). */
@@ -269,6 +270,9 @@ export interface CreateImportOptions {
   /** A replace by a property: `keyed` deletes only the items that hold it (and edges between two
    *  of them) the file leaves out; `all`, the default, anything it leaves out. */
   replaceScope?: 'all' | 'keyed'
+  /** Publish the draft the import opens once it has finished (not with `branchId`): it needs
+   *  publish, or the Playground graph's maker. */
+  autoPublish?: boolean
 }
 
 /** The statuses a job ends in. */
@@ -530,6 +534,7 @@ export async function importInParts(
   if (opts.allowMassDelete) params.set('allowMassDelete', 'true')
   if (opts.maxRefusedRows) params.set('maxRefusedRows', opts.maxRefusedRows)
   if (opts.replaceScope === 'keyed') params.set('replaceScope', 'keyed')
+  if (opts.autoPublish) params.set('autoPublish', 'true')
   const created = await authFetch<CreateImportResult>(
     `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
   remember(key, null)

@@ -9,7 +9,7 @@ import logging
 import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import and_, case, false, literal_column, select, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
@@ -106,17 +106,23 @@ async def _get_context_model_name(
     return result.scalar_one_or_none()
 
 
-async def _get_data_source_name(
+_NO_SOURCE = (None, None, None)
+
+
+async def _get_data_source_facts(
     session: AsyncSession, data_source_id: Optional[str]
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """A live source's ``(label, classification, trust_status)``; Nones when there is none."""
     if not data_source_id:
-        return None
+        return _NO_SOURCE
     result = await session.execute(
-        select(WorkspaceDataSourceORM.label)
+        select(WorkspaceDataSourceORM.label, WorkspaceDataSourceORM.classification,
+               WorkspaceDataSourceORM.trust_status)
         .where(WorkspaceDataSourceORM.id == data_source_id)
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
-    return result.scalar_one_or_none()
+    row = result.one_or_none()
+    return tuple(row) if row else _NO_SOURCE
 
 
 async def _get_favourite_count(
@@ -290,6 +296,8 @@ def _to_response(
     *,
     workspace_name: Optional[str] = None,
     data_source_name: Optional[str] = None,
+    data_source_classification: Optional[str] = None,
+    data_source_trust_status: Optional[str] = None,
     context_model_name: Optional[str] = None,
     created_by_name: Optional[str] = None,
     created_by_email: Optional[str] = None,
@@ -341,6 +349,8 @@ def _to_response(
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
         dataSourceName=data_source_name,
+        dataSourceClassification=data_source_classification,
+        dataSourceTrustStatus=data_source_trust_status,
         viewType=label.get("viewType") or row.view_type or "graph",
         layoutType=layout_type,
         config=config_dict,
@@ -390,7 +400,7 @@ async def _to_enriched_response(
     reads the row's stored config unchanged.
     """
     ws_name = await _get_workspace_name(session, row.workspace_id)
-    ds_name = await _get_data_source_name(session, row.data_source_id)
+    ds_name, ds_class, ds_trust = await _get_data_source_facts(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
     # Resolve creator, modifier AND data-publisher in one batched lookup
     # (dedupes when they're the same principal) — avatars included.
@@ -417,6 +427,8 @@ async def _to_enriched_response(
             getattr(row, 'publish_requested_by', None) or "", (None, None, None))[0],
         workspace_name=ws_name,
         data_source_name=ds_name,
+        data_source_classification=ds_class,
+        data_source_trust_status=ds_trust,
         context_model_name=cm_name,
         created_by_name=creator_name,
         created_by_email=creator_email,
@@ -506,14 +518,16 @@ async def _batch_enrich_rows(
         )
         ws_map = {wid: name for wid, name in res.all()}
 
-    ds_map: Dict[str, str] = {}
+    # id → (label, classification, trust status), for live sources only.
+    ds_map: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {}
     if ds_ids:
         res = await session.execute(
-            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
+                   WorkspaceDataSourceORM.classification, WorkspaceDataSourceORM.trust_status)
             .where(WorkspaceDataSourceORM.id.in_(ds_ids))
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )
-        ds_map = {did: label for did, label in res.all()}
+        ds_map = {did: (label, cls, trust) for did, label, cls, trust in res.all()}
 
     cm_map: Dict[str, str] = {}
     if cm_ids:
@@ -560,11 +574,14 @@ async def _batch_enrich_rows(
         creator = user_map.get(row.created_by or "", (None, None, None))
         modifier = user_map.get(row.updated_by or "", (None, None, None))
         publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None, None))
+        ds_name, ds_class, ds_trust = ds_map.get(row.data_source_id, _NO_SOURCE) if row.data_source_id else _NO_SOURCE
         responses.append(_to_response(
             row,
             config_override=followed.get(row.id),
             workspace_name=ws_map.get(row.workspace_id) if row.workspace_id else None,
-            data_source_name=ds_map.get(row.data_source_id) if row.data_source_id else None,
+            data_source_name=ds_name,
+            data_source_classification=ds_class,
+            data_source_trust_status=ds_trust,
             context_model_name=cm_map.get(row.context_model_id) if row.context_model_id else None,
             created_by_name=creator[0],
             created_by_email=creator[1],
@@ -1620,6 +1637,12 @@ async def permanently_delete_view(
 # Filtered listing & discovery                                         #
 # ------------------------------------------------------------------ #
 
+def _contains(text: str) -> str:
+    """A LIKE pattern matching ``text`` anywhere, with its own ``%``, ``_`` and ``\\``
+    escaped (pair it with ``escape="\\"``) so they match literally."""
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def _last_change_expr():
     """When the view last changed: the later of its last settings/layout edit
     and its last data publish.
@@ -1808,7 +1831,7 @@ def _apply_view_filters(
     # should be normalised upstream.
     if tags:
         query = query.where(
-            or_(*[ViewORM.tags.ilike(f'%"{t}"%') for t in tags])
+            or_(*[ViewORM.tags.ilike(_contains(f'"{t}"'), escape="\\") for t in tags])
         )
 
     # Search / attention both need workspace + data source joins; do them once.
@@ -1827,14 +1850,15 @@ def _apply_view_filters(
     if search:
         terms = search.split()
         if terms:
+            # A term is text: its % and _ match themselves, not "anything".
             query = query.where(and_(*[
                 (
-                    ViewORM.name.ilike(f"%{term}%")
-                    | ViewORM.description.ilike(f"%{term}%")
-                    | WorkspaceORM.name.ilike(f"%{term}%")
-                    | WorkspaceDataSourceORM.label.ilike(f"%{term}%")
-                    | ViewORM.created_by.ilike(f"%{term}%")
-                    | ViewORM.tags.ilike(f"%{term}%")
+                    ViewORM.name.ilike(_contains(term), escape="\\")
+                    | ViewORM.description.ilike(_contains(term), escape="\\")
+                    | WorkspaceORM.name.ilike(_contains(term), escape="\\")
+                    | WorkspaceDataSourceORM.label.ilike(_contains(term), escape="\\")
+                    | ViewORM.created_by.ilike(_contains(term), escape="\\")
+                    | ViewORM.tags.ilike(_contains(term), escape="\\")
                 )
                 for term in terms
             ]))
@@ -1975,12 +1999,66 @@ async def list_recent_views(
     return out
 
 
-def _view_order_by(sort: Optional[str]):
-    """Map a Explorer sort key to an ORDER BY clause list. Time-based sorts run
-    server-side (so they order across the WHOLE result, not just the loaded
-    page); name/popularity sorts fall through to the default and are refined
-    client-side. ``data_updated_at`` is TEXT ISO timestamps, so NULLs (views
-    whose data was never published) are pushed last via a coalesce sentinel."""
+#: The Type column's labels (frontend ``lib/domainLabels.ts`` VIEW_TYPE_LABELS), so a
+#: Type sort orders by what the reader sees — ``reference`` reads "Context View".
+_VIEW_TYPE_SORT_LABELS = {
+    "graph": "Graph", "hierarchy": "Hierarchy", "reference": "Context View",
+    "layered-lineage": "Layered Lineage", "tree": "Tree", "list": "List", "grid": "Grid",
+    "timeline": "Timeline",
+}
+
+#: "Most opened" counts opens over the same trailing window the cards' usage shows.
+_OPENS_WINDOW_DAYS = 30
+
+
+#: "Most opened" ranks this many of the most-opened views; the rest tie behind them
+#: and fall back to the last change, so the ORDER BY stays a bounded CASE.
+_OPENS_RANK_CAP = 1000
+
+
+def _view_order_by(sort: Optional[str], rank: Optional[Dict[str, int]] = None):
+    """Map an Explorer sort key to an ORDER BY clause list. Every sort runs here,
+    so it orders the WHOLE result, not just the loaded page, and every one ends on
+    the id: offset paging over tied keys (one publish stamps the same time on every
+    view of a source; names repeat) would otherwise skip or repeat rows.
+    ``data_updated_at`` is TEXT ISO timestamps, so NULLs (views whose data was
+    never published) are pushed last via a coalesce sentinel.
+
+    ``rank`` carries what another domain knows (a creator's display name, a view's
+    opens) as plain ids → positions, read beforehand by :func:`_sort_rank` — never
+    JOINed (``backend/app/db/DOMAIN_OWNERSHIP.md``)."""
+    return [*_view_order_keys(sort, rank or {}), ViewORM.id.asc()]
+
+
+async def _sort_rank(session: AsyncSession, sort: Optional[str], filter_kwargs: dict) -> Dict[str, int]:
+    """The positions an owner or most-opened sort orders by, read from the owning
+    domain by id: creators' names through :func:`resolve_user_ids` (identity), opens
+    through the analytics event log. Only the creators of THIS result are named."""
+    if sort in ("owner-az", "owner-za"):
+        creators = (await session.execute(
+            _apply_view_filters(select(ViewORM.created_by).distinct(), **filter_kwargs)
+        )).scalars().all()
+        names = await resolve_user_ids(session, set(creators))
+        named = sorted(names, key=lambda uid: ((names[uid][0] or "").lower(), uid),
+                       reverse=sort == "owner-za")
+        return {uid: i for i, uid in enumerate(named)}
+    if sort == "most-opened":
+        from backend.app.db.repositories.analytics_repo import view_open_counts
+        since = (datetime.now(timezone.utc) - timedelta(days=_OPENS_WINDOW_DAYS)).isoformat()
+        return await view_open_counts(session, since=since, limit=_OPENS_RANK_CAP)
+    return {}
+
+
+def _favourite_count():
+    # Correlated so popularity sorts across the whole result without reshaping the joins.
+    return (
+        select(func.count(ViewFavouriteORM.id))
+        .where(ViewFavouriteORM.view_id == ViewORM.id)
+        .scalar_subquery()
+    )
+
+
+def _view_order_keys(sort: Optional[str], rank: Dict[str, int]):
     if sort == "newest":
         return [ViewORM.created_at.desc()]
     if sort == "oldest":
@@ -1996,23 +2074,32 @@ def _view_order_by(sort: Optional[str]):
         # Oldest changed data first; never-published (NULL) → "9999" sorts last.
         return [func.coalesce(ViewORM.data_updated_at, "9999").asc(), ViewORM.updated_at.asc()]
     if sort == "recently-modified":
-        # Freshest of data-publish OR settings-edit — the intuitive default.
-        return [func.coalesce(ViewORM.data_updated_at, ViewORM.updated_at).desc()]
+        # The later of data-publish and settings-edit — the intuitive default.
+        return [_last_change_expr().desc()]
+    if sort == "modified-asc":
+        # The same "last changed" the list's Updated column shows, oldest first.
+        return [_last_change_expr().asc()]
     if sort == "az":
         return [ViewORM.name.asc()]
     if sort == "za":
         return [ViewORM.name.desc()]
     if sort == "popular":
-        # Correlated favourite-count subquery so popularity sorts across the
-        # whole result set (not the loaded page) without reshaping the joins.
-        fav_count = (
-            select(func.count(ViewFavouriteORM.id))
-            .where(ViewFavouriteORM.view_id == ViewORM.id)
-            .scalar_subquery()
-        )
-        return [fav_count.desc(), ViewORM.updated_at.desc()]
-    # Default (also covers the list-header column sorts refined client-side):
-    # settings-updated desc.
+        return [_favourite_count().desc(), ViewORM.updated_at.desc()]
+    if sort == "likes-asc":
+        return [_favourite_count().asc(), ViewORM.updated_at.desc()]
+    if sort in ("type-az", "type-za"):
+        label = case(_VIEW_TYPE_SORT_LABELS, value=ViewORM.view_type, else_=ViewORM.view_type)
+        return [label.asc() if sort == "type-az" else label.desc(), ViewORM.name.asc()]
+    if sort in ("owner-az", "owner-za"):
+        # Positions in name order (reversed for Z→A); a creator with no account sorts last.
+        if not rank:
+            return [ViewORM.name.asc()]
+        return [case(rank, value=ViewORM.created_by, else_=len(rank)).asc(), ViewORM.name.asc()]
+    if sort == "most-opened":
+        if not rank:
+            return [_last_change_expr().desc()]
+        return [case(rank, value=ViewORM.id, else_=0).desc(), _last_change_expr().desc()]
+    # Default (no sort, or one this list doesn't know): settings-updated desc.
     return [ViewORM.updated_at.desc()]
 
 
@@ -2139,7 +2226,7 @@ async def list_views_filtered(
     select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)
     select_query = (
         select_query
-        .order_by(*_view_order_by(sort))
+        .order_by(*_view_order_by(sort, await _sort_rank(session, sort, filter_kwargs)))
         .limit(limit)
         .offset(offset)
     )
@@ -2276,8 +2363,14 @@ async def get_view_facets(
     response = ViewFacetsResponse(tags=[], view_types=[], creators=[])
 
     if "tags" in fields:
-        # Parsed in Python since the column is a JSON string.
-        tag_counts: Counter = Counter({t: 0 for t in filters.get("tags") or ()})
+        # Parsed in Python since the column is a JSON string. Counted case-blind,
+        # as the tag filter matches (``PII`` finds ``pii``), once per view, under the
+        # first spelling met (a chosen tag keeps the reader's own).
+        tag_counts: Counter = Counter()
+        label: Dict[str, str] = {}
+        for t in filters.get("tags") or ():
+            label.setdefault(t.lower(), t)
+            tag_counts[t.lower()] += 0
         tag_rows = await session.execute(counted(
             select(ViewORM.tags).where(ViewORM.tags.isnot(None)), "tags",
         ))
@@ -2288,13 +2381,15 @@ async def get_view_facets(
                 continue
             if not isinstance(parsed, list):
                 continue
+            for key in {t.lower() for t in parsed if isinstance(t, str) and t}:
+                tag_counts[key] += 1
             for t in parsed:
                 if isinstance(t, str) and t:
-                    tag_counts[t] += 1
-        selected_tags = set(filters.get("tags") or ())
+                    label.setdefault(t.lower(), t)
+        selected_tags = {t.lower() for t in filters.get("tags") or ()}
         response.tags = [
-            ViewFacetValue(value=v, count=c)
-            for v, c in _capped(
+            ViewFacetValue(value=label[k], count=c)
+            for k, c in _capped(
                 list(tag_counts.items()), lambda x: (-x[1], x[0]),
                 lambda x: x[0] in selected_tags,
             )
@@ -2545,9 +2640,10 @@ async def get_view_stats(
     attention_result = await session.execute(attention_query)
     needs_attention = attention_result.scalar_one() or 0
 
-    # Last activity — MAX(updated_at) across the same filtered set.
+    # Last activity across the same filtered set: the later of a settings edit and
+    # a data publish, which is what the cards show.
     last_activity_query = _apply_view_filters(
-        select(func.max(ViewORM.updated_at)),
+        select(func.max(_last_change_expr())),
         **filter_kwargs,
     )
     last_activity_result = await session.execute(last_activity_query)
@@ -2707,7 +2803,7 @@ async def list_popular_views(
         row = row_tuple[0]
         fav_count = row_tuple[1] or 0
         ws_name = await _get_workspace_name(session, row.workspace_id)
-        ds_name = await _get_data_source_name(session, row.data_source_id)
+        ds_name, ds_class, ds_trust = await _get_data_source_facts(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id, user_id)
         # The data publisher too, in the same lookup: without it this path showed
         # every trail without its last publisher, unlike the batched one.
@@ -2727,6 +2823,8 @@ async def list_popular_views(
             config_override=followed.get(row.id),
             workspace_name=ws_name,
             data_source_name=ds_name,
+            data_source_classification=ds_class,
+            data_source_trust_status=ds_trust,
             context_model_name=cm_name,
             created_by_name=creator_name,
             created_by_email=creator_email,

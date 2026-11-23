@@ -41,6 +41,7 @@ import {
   useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
   useBranchViewChanges, useChangeIndex, useChangeSummary,
 } from '../hooks/useVersioning'
+import { useMayPublish } from '../hooks/useMayPublish'
 import { DiffTooLargeError } from '@/services/versioningApiService'
 import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
@@ -143,7 +144,8 @@ export function CanvasVersioningBar({
   const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin)
   const highlightCountsQ = useChangeSummary(workspaceId, graphId,
     highlightOrigin && highlightIndexQ.data?.truncated ? highlightOrigin : null)
-  const canPublish = usePermission('workspace:datasource:publish', workspaceId)
+  // Restore and revert write main: publish, or in the Playground having made the graph.
+  const canPublish = useMayPublish(workspaceId, graphId)
   const versioningEnabled = useFeature('versioningEnabled')
   const openCompare = useCallback((fromSeq: number, toSeq: number | null) => {
     setCompare({ fromSeq, toSeq })
@@ -613,6 +615,7 @@ export function CanvasVersioningBar({
           changeSet={changeSet}
           onClose={() => setShowPublish(false)}
           canPublishDraft={manageable}
+          canPublish={draftAccess.canPublish}
           dataSourceId={dataSourceId}
         />
       )}

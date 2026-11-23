@@ -248,6 +248,9 @@ async def lifespan(app: FastAPI):
     from backend.app.services.access_housekeeping import (
         run_sweeper as run_access_housekeeping,
     )
+    from backend.app.services.discussions.housekeeping import (
+        run_sweeper as run_discussions_housekeeping,
+    )
     housekeeping_shutdown = asyncio.Event()
     housekeeping_tasks = [
         asyncio.create_task(
@@ -278,6 +281,11 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             run_access_housekeeping(get_jobs_session, housekeeping_shutdown),
             name="access-housekeeping",
+        ),
+        # Conversations: watcher notices, reminders, retention, archiving.
+        asyncio.create_task(
+            run_discussions_housekeeping(get_jobs_session, housekeeping_shutdown),
+            name="discussions-housekeeping",
         ),
         # The evidence the automatic SSO-outage password fallback acts on.
         asyncio.create_task(

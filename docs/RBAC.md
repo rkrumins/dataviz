@@ -44,6 +44,7 @@ security picture, see the [Security Overview](/docs/security-overview).
 | Member | `workspace_member` | A workspace | Standard contributor: edits views, and changes data sources through drafts. **Can't publish** a versioned data source: that needs Publisher or Data Engineer. |
 | Publisher | `workspace_publisher` | A workspace | A member who can also advance a versioned data source's Published version: publish a draft, merge a review, revert, restore or sync. |
 | Steward | `workspace_steward` | A workspace | A member who also answers requests to join and adds people as viewers or members — for the person who knows a team, without administering the workspace. |
+| Playground member | `workspace_playground_member` | The Playground | Given on joining the [Playground](/guide/playground): builds graphs and views of their own, and changes only what they made. No people to manage, nothing published to everyone, no catalog or production data. |
 | Viewer | `workspace_viewer` | A workspace | Read-only, for someone who shouldn't be able to edit. |
 
 **User** (`user`) is not a stored role. It's the default tier of any account without a
@@ -102,6 +103,7 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 | `workspace_member` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_publisher` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_steward` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_playground_member` | 9 | `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_viewer` | 6 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
 
 What a role can actually do differs from its stored grants in four places, all covered in
@@ -140,19 +142,19 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `workspace:admin` | workspace | Manage workspace settings, members, and deletion. | `super_admin`, `org_admin`, `workspace_admin` |
 | `workspace:catalog:manage` | workspace | Promote / edit / delete catalog items the workspace owns. | `super_admin`, `org_admin`, `workspace_data_engineer` |
 | `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
-| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
+| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward` |
 | `workspace:datasource:publish` | workspace | Advance a versioned data source's Published version: publish a draft, merge a review, revert, restore and sync. Checked on top of `workspace:datasource:manage`. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_publisher` |
-| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:members:add` | workspace | Answer access requests and add people to a workspace. | `super_admin`, `org_admin`, `workspace_steward` |
-| `workspace:native-query:read` | workspace | Run your own read-only queries on a workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:native-query:read` | workspace | Run your own read-only queries on a workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
-| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
-| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
-| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
-| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
-| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward` |
+| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward` |
+| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward` |
+| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward` |
 | `workspace:view:publish` | workspace | Publish views to everyone in the organization (enterprise visibility). | `super_admin`, `org_admin` |
-| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
+| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_playground_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 
 Three of these are deliberately separate from `system:admin`'s everyday reach:
 `system:analytics:read` (business metrics are not the audit log),
@@ -1126,6 +1128,153 @@ group's members aren't told), `access.expiring` before it ends and
 `access.exception_retired` when the identity provider takes an exception
 over; admins get `access_review.overdue`.
 
+**Workspace requests** (kind; `/workspace-requests`, answered by holders of
+`system:workspaces:create`):
+
+* approvers get `workspace_request.submitted` and
+  `workspace_request.resubmitted`, linking to `/workspaces?tab=requests`, and
+  `workspace_request.reminder` when one has waited three days; platform
+  administrators get `workspace_request.escalated` after a week;
+* the requester gets `workspace_request.approved` (linking to
+  `/workspaces/{id}?welcome=1`), and `workspace_request.sent_back` and
+  `workspace_request.declined` (linking to `/my/access?tab=workspaces`);
+* teammates the approval adds, and the people it puts in the groups the request
+  asked for, get `workspace.member_added`, linking to `/workspaces/{id}`;
+* when an Org Admin's approval made groups that name identity-provider groups, each
+  link becomes an [identity-provider link request](#identity-provider-link-requests)
+  (`source: "workspace_request"`), and platform administrators get
+  `idp_link.requested`: linking a group to the identity provider is theirs, as every
+  SSO rule is. `POST /admin/workspace-requests/{id}/idp-links` still confirms one,
+  and answers its link request. The request's `outcome` keeps `idpLinksPending`,
+  `idpLinksCreated` and `idpLinksDeclined` in step.
+
+**Workspace groups** (`/admin/workspaces/{ws}/groups`). A group with
+`groups.workspace_id` set is the workspace's own: its admins (`workspace:admin`
+there — Org and Super Admins hold it everywhere) manage it from the workspace,
+without `system:groups:manage`. Its name is always `"<workspace> · <name>"`
+(`shortName` drops the prefix); groups an approved workspace request makes are the
+workspace's.
+
+| Route | Gate | Does |
+| --- | --- | --- |
+| `GET ""` | `workspace:members:add` | Every group bound here, owned or not: role, members preview, `idpLinks`, `pendingIdpLink` |
+| `POST ""` | `workspace:admin` | Make an owned group (`name`, `description`, `role`: Viewer, Member or Publisher, `memberIds`, `idpGroup`), bound here |
+| `PATCH /{id}` | `workspace:admin` | Rename (the prefix stays), describe, change its role (the old binding goes; members' sessions end) |
+| `DELETE /{id}` | `workspace:admin` | As the Groups page's delete, plus its identity-provider links; a waiting link request is `cancelled` |
+| `GET /{id}/members` | `workspace:members:add` | Who is in it, with `source` `local` or `sso` |
+| `POST /{id}/members`, `DELETE /{id}/members/{user}` | `workspace:admin` | Add an active person; remove one the app added |
+| `POST /{id}/idp-link` | `workspace:admin` | `system:admin` links at once; anyone else makes a link request |
+| `DELETE /{id}/idp-links/{mapping}` | `system:admin` | Remove a link, sweeping the memberships it made |
+
+Everything but the two reads and unlinking is for owned groups only (403
+`not_owned`). Changing who is in a group grants or takes away everything it
+carries, so membership changes and deletion are refused while the group carries a
+binding the caller couldn't grant (403 `reaches_beyond_workspace` — bound in
+another workspace, say) or manages a service account (409
+`manages_service_accounts`); people the identity provider put in a group leave it
+there (409 `managed_by_idp`). A taken name — a deleted group's too — is 409
+`group_name_taken` with a free short name as `suggestion`. Writes record
+`rbac.group.*` with `via: "workspace"` and `rbac.workspace.member_bound` /
+`member_revoked`; people put in a group get `workspace.member_added`.
+
+### Identity-provider link requests
+
+`idp_link_requests`: someone without `system:admin` asking for a group to be linked
+to an identity-provider group (`pending` → `linked` | `declined` | `cancelled`;
+one pending per group, 409 `link_pending`). Answered under
+`/admin/idp-link-requests` (`system:admin`): `GET ?status=pending|all` (each with
+`seenCount`), `POST /{id}/link` (`providerId`; makes the `group_membership`
+mapping) and `POST /{id}/decline` (`reason`). A mapping made on the SSO mappings
+page for a group waiting on the same identity-provider group answers its request
+too. Notifications: platform administrators get `idp_link.requested`, linking to
+`/workspaces?tab=requests`, then `idp_link.reminder` when one has waited three days
+and `idp_link.escalated`, the last reminder, after a week (`reminded_at`,
+`escalated_at`; never the requester); the requester gets `idp_link.linked` or
+`idp_link.declined`, linking to `/workspaces/{ws}?tab=members`. Events:
+`rbac.idp_link_request.created`, `.linked`, `.declined`, `.cancelled`.
+
+There is no directory of the identity provider's groups: what is known is what each
+person's sign-in asserted, recorded at every SSO sign-in (`users.metadata.idp_groups`,
+`user_identities.metadata.groups`). `GET /idp-groups/suggestions?q=&limit=` (anyone
+signed in) offers only the caller's own sign-ins' groups — group names say a lot
+about an organization — and, to `system:admin`, everyone's with `seenCount`.
+`GET /admin/idp-groups/preview?idpGroup=` (`system:admin`) names up to ten people
+whose last sign-in had it.
+
+## Conversations
+
+Questions and conversations are about a view or a data source (the *subject*),
+under `/discussions` (`conversationsEnabled`, a preview that ships off). No new
+permission: what you may do follows from what you can already open.
+
+**Reading a subject** is the view's own read rule (`can_read_view`: its tier, its
+grants, its creator, the workspace's admins) or, for a data source,
+`workspace:datasource:read` in its workspace. A subject you can't open answers 404
+`not_found`, so its conversations stay as private as it is.
+
+**Seeing a thread.** An open thread is seen by everyone who can open the subject. A
+private one is seen by the people in it (who asked, the people asked, anyone
+mentioned, anyone who replied or followed), the subject's *maintainers* — a view's
+creator and editor grantees; a source's data contacts — and its workspace's admins
+(`workspace:admin`, so Org and Super Admins too); every one of them must still be able
+to open the subject. Lists, counts, badges and summaries apply the same rule.
+Losing access to the subject hides its threads; getting it back returns them.
+
+| Action | Who |
+|---|---|
+| Ask | Anyone who can open the subject, if a person (a service account: 403 `person_required`) |
+| Reply | Anyone who sees the thread, while it is not closed |
+| Edit a message | Its author (`expectedVersion`; 409 `stale`) |
+| Delete a message | Its author, or a workspace admin |
+| Delete a question (and its thread) | The asker, or a workspace admin |
+| Accept or un-accept an answer | The asker, a maintainer, or a workspace admin |
+| Close or reopen | The asker, the people asked, a maintainer, or a workspace admin |
+| Mention someone | Only people who can open the subject (422 `cannot_mention`) |
+| Change a source's Stewards | `workspace:datasource:manage` |
+| Change a source's Owner | `workspace:datasource:manage` and either `workspace:admin` or being the current Owner (403 `owner_locked`) |
+
+API keys reach none of it (`api_key_surface.py` lists no conversations route).
+
+**Who a question reaches.** The asker chooses *View's owners* (the creator and editor
+grantees) and *Data owners* (the source's named Owner and Stewards; a source naming
+nobody derives them — who created it and the people named on the data requests
+connected as it), and may add up to 20 people. When nobody chosen can be reached,
+or the source names and derives nobody, it goes to the workspace's admins, else the
+Org Admins. Only people who can open the subject are reached — the rest come back as
+`notReached` (`cannot_read`, `not_a_person`, `inactive`, `group_too_large`) — at most
+50, a group's first 50 members.
+
+**Notifications** (`resource_type` `discussion`, the thread's id): `discussion.asked`
+(the people asked), `discussion.mentioned`, `discussion.replied` (followers; one
+unread per thread), `discussion.answered` (the asker, the answer's author, followers),
+`discussion.closed` (the asker, when someone else closed it), `discussion.reminder`
+(day 3 with no response from anyone but the asker: the people asked),
+`discussion.escalated` (day 7: the workspace's admins, else the Org Admins) and
+`discussion.watched` (watchers of the subject, for each new open question). Naming
+someone a data contact sends `data_source.contact_added` (`resource_type`
+`data_source`). Nobody is told of their own action, a muted thread tells its
+participant nothing, and nobody who can no longer open the subject is told.
+
+**Events** (ids only, never what anyone wrote): `collaboration.discussion.asked`,
+`.answered`, `.closed`, `.reopened`, `.deleted`,
+`collaboration.discussion_message.deleted`, and
+`workspace.data_source.contacts_changed`. The `collaboration.*` events are for
+auditors only.
+
+**Watching** a view or a data source (`PUT /discussions/subjects/{type}/{id}/watch`)
+takes being able to open it; the background pass tells watchers of each new open
+question, only while they can still open it — never of a private one. **Your own
+conversations** (`/me/discussions?box=to-me|mine|mentions|watching`,
+`/me/discussions/summary`, `/me/watches`) list only threads about subjects you can
+still open. **Profiles** (`GET /people/{userId}`, anyone signed in) name the
+workspaces the person runs and the sources they are a data contact for only where the
+reader can open them; a service account has none (404).
+
+With `conversationsEnabled` off, asking, replying, editing, watching, following and
+changing data contacts are refused `403 feature_disabled`; reading, marking read,
+muting, unfollowing, unwatching, answering, closing and deleting still work, and
+reminders and watcher notices pause.
+
 ## Invites
 
 A platform administrator (`system:admin`) can mint an invite for **any**
@@ -1279,9 +1428,11 @@ last 7 days. Through the API:
 | Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
 | Who may let whom in (ceilings, requestable roles, provenance) | `backend/app/services/workspace_access.py` |
+| A workspace's own groups               | `backend/app/services/workspace_groups.py`                    |
+| Identity-provider link requests, sign-in group snapshots | `backend/app/services/idp_links.py`         |
 | Access requests and Find a workspace   | `backend/app/api/v1/endpoints/access_requests.py`, `workspace_directory.py` |
 | Access reviews                         | `backend/app/api/v1/endpoints/access_reviews.py`              |
-| Access reminders (ending, waiting, overdue reviews) | `backend/app/services/access_housekeeping.py` |
+| Access reminders (ending, waiting, overdue reviews; workspace, data and link requests left waiting) | `backend/app/services/access_housekeeping.py` |
 | Activity catalogue (category, audience)| `backend/app/services/activity/catalogue.py`                  |
 | Activity retention sweep               | `backend/app/services/activity_retention.py`                  |
 | Outbox → ledger relay                  | `backend/app/services/outbox_relay.py`                        |

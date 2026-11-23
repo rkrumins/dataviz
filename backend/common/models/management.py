@@ -667,9 +667,34 @@ class OntologyDefinitionResponse(BaseModel):
     deleted_at: Optional[str] = Field(None, alias="deletedAt")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    #: The workspace that owns it (a Playground maker's own layer, or one that moved with a
+    #: graph); None for an org layer.
+    owner_workspace_id: Optional[str] = Field(None, alias="ownerWorkspaceId")
+    #: An owned layer's reach: ``private`` to its maker, or ``workspace``.
+    owner_visibility: Optional[str] = Field(None, alias="ownerVisibility")
+    #: What the reader may do with it, filled in by the routes that answer with it.
+    access: Optional["LayerAccess"] = None
 
     class Config:
         populate_by_name = True
+
+
+class LayerAccess(BaseModel):
+    """What the reader may do with one semantic layer: an org layer by the semantic-layer
+    permission and switches, a Playground layer of one's own by being its maker."""
+    can_edit: bool = Field(False, alias="canEdit")
+    can_publish: bool = Field(False, alias="canPublish")
+    can_delete: bool = Field(False, alias="canDelete")
+    can_clone: bool = Field(False, alias="canClone")
+    can_share: bool = Field(False, alias="canShare")
+    can_assign: bool = Field(False, alias="canAssign")
+    is_own: bool = Field(False, alias="isOwn")
+
+    class Config:
+        populate_by_name = True
+
+
+OntologyDefinitionResponse.model_rebuild()
 
 
 class OntologyAuditEntry(BaseModel):
@@ -811,7 +836,9 @@ class MergedTypeVariant(BaseModel):
 
 
 class OntologySuggestResponse(BaseModel):
-    suggested: OntologyCreateRequest
+    #: The draft layer made from the graph's types; None where nothing is drafted (the
+    #: Playground's scoring of the layers on offer).
+    suggested: Optional[OntologyCreateRequest] = None
     matching_ontologies: List[OntologyMatchResult] = Field(default_factory=list, alias="matchingOntologies")
     # Canonical suggested type id → the source spellings merged into it (Task E §1c).
     # Present only for types the source spelled >1 way; the suggest-review UI shows these
@@ -962,6 +989,15 @@ class DataSourceResponse(BaseModel):
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
     aggregation_edge_count: int = Field(0, alias="aggregationEdgeCount")
     aggregation_schedule: Optional[str] = Field(None, alias="aggregationSchedule")
+    #: Its details (``data_source_repo.metadata_fields``). ``catalog_description`` is the catalog
+    #: item's, when the read loaded it — shown when the source has no description of its own.
+    description: Optional[str] = None
+    catalog_description: Optional[str] = Field(None, alias="catalogDescription")
+    tags: List[str] = Field(default_factory=list)
+    classification: Optional[str] = None   # public | internal | confidential | restricted
+    trust_status: Optional[str] = Field(None, alias="trustStatus")   # certified | in_review | deprecated
+    #: Who made it — in the Playground, the person whose experiment it is.
+    created_by: Optional[str] = Field(None, alias="createdBy")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -1040,6 +1076,8 @@ class WorkspaceResponse(BaseModel):
     access_mode: str = Field("app", alias="accessMode")
     access_note: Optional[str] = Field(None, alias="accessNote")
     request_policy: str = Field("approval", alias="requestPolicy")
+    #: 'standard', or 'playground' — the shared sandbox (see playground_policy).
+    kind: str = Field("standard", alias="kind")
 
     class Config:
         populate_by_name = True
@@ -1344,6 +1382,9 @@ class ViewResponse(BaseModel):
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     data_source_id: Optional[str] = Field(None, alias="dataSourceId")
     data_source_name: Optional[str] = Field(None, alias="dataSourceName")
+    #: The data source's trust, for "Built on" badges: null when it has none, or is deleted.
+    data_source_classification: Optional[str] = Field(None, alias="dataSourceClassification")
+    data_source_trust_status: Optional[str] = Field(None, alias="dataSourceTrustStatus")
     view_type: str = Field(alias="viewType")
     # Layout algorithm (reference | hierarchical | force | …). Projected from
     # config.layoutType so metadata-only consumers (e.g. the ViewWizard's

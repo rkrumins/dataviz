@@ -57,7 +57,6 @@ import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
 import { useViewUsage } from '@/hooks/useContentInsights'
-import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
@@ -203,9 +202,8 @@ export default function WorkspaceViewsSection({
     // its own usage would be one request per tile.
     const usageIds = useMemo(() => loadedViews.map(v => v.id), [loadedViews])
     const { data: usageMap } = useViewUsage(usageIds)
-    // "Most opened" is finished on the client — opens live in the event log
-    // and views in the catalogue, and this repo bans cross-domain JOINs.
-    const views = useOpensOrdering(loadedViews, usageMap, sort)
+    // Every sort, "Most opened" included, is the server's order.
+    const views = loadedViews
 
     // Server-authoritative attention count for the whole workspace.
     const { stats } = useViewStats(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))
@@ -701,7 +699,7 @@ export default function WorkspaceViewsSection({
                     </Link>
                     {importEnabled && (
                         <button
-                            onClick={() => openViewEditor(undefined, { journey: 'import' })}
+                            onClick={() => openViewEditor(undefined, { journey: 'import', workspaceId: wsId })}
                             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
                             title="Import a view exported from another environment"
                         >
@@ -709,7 +707,7 @@ export default function WorkspaceViewsSection({
                         </button>
                     )}
                     <button
-                        onClick={() => openViewEditor()}
+                        onClick={() => openViewEditor(undefined, { workspaceId: wsId })}
                         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
                     >
                         <Plus className="w-4 h-4" /> New view
@@ -881,7 +879,7 @@ export default function WorkspaceViewsSection({
                         </button>
                     ) : (
                         <button
-                            onClick={() => openViewEditor()}
+                            onClick={() => openViewEditor(undefined, { workspaceId: wsId })}
                             className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
                         >
                             <Plus className="w-4 h-4" /> New view

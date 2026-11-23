@@ -58,6 +58,11 @@ _PURGE = "20261025_1600_sa_purge"
 _POLICY = "20261026_1000_sa_policy"
 _ORG_READ = "20261026_1200_sa_org_read"
 _QUERY = "20261024_1000_native_query"
+#: The one later revision that does touch the ledger: an index for a data source's history
+#: (``idx_aal_ds_type_occurred``). Every database it runs on is already past ``_LAST``, so the
+#: upgrade that holds the ledger's lock through later revisions is not one that reaches it; its
+#: own lock wait is bounded (``_ON_LIVE_TABLES``), and its build is the only thing it does.
+_SOURCE_HISTORY = "20261124_1100_aal_ds_type"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -78,6 +83,7 @@ _ON_LIVE_TABLES = {
     f"{_POLICY}.py": ("upgrade", "downgrade"),
     f"{_ORG_READ}.py": ("upgrade", "downgrade"),
     f"{_QUERY}.py": ("upgrade", "downgrade"),
+    f"{_SOURCE_HISTORY}.py": ("upgrade", "downgrade"),
     # graphver.projection_state, which every projection pass writes.
     "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
     "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
@@ -203,7 +209,8 @@ def test_the_chain_ends_at_the_ledger_revision():
         if s.revision != _LAST[:-3]
     ]
     assert [
-        s.revision for s in later if "auth_audit_log" in Path(s.path).read_text()
+        s.revision for s in later
+        if "auth_audit_log" in Path(s.path).read_text() and s.revision != _SOURCE_HISTORY
     ] == []
     # The cheap revisions right after the ledger's stay in order, so the ledger's lock still
     # covers only them before the ones that follow.

@@ -50,6 +50,10 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "WorkspaceORM": "workspace",
     "WorkspaceDataSourceORM": "workspace",
     "DataSourceTransferORM": "workspace",
+    "WorkspaceRequestORM": "workspace",
+    "IdpLinkRequestORM": "workspace",
+    "DataRequestORM": "workspace",
+    "DataSourceContactORM": "workspace",
     "AssignmentRuleSetORM": "workspace",
     # provider
     "ProviderORM": "provider",
@@ -82,6 +86,11 @@ ORM_TO_DOMAIN: dict[str, str] = {
     "AnnouncementConfigORM": "platform",
     "ManagementDbConfigORM": "platform",
     "SchemaMigrationORM": "platform",
+    # collaboration
+    "DiscussionORM": "collaboration",
+    "DiscussionMessageORM": "collaboration",
+    "DiscussionParticipantORM": "collaboration",
+    "WatchORM": "collaboration",
     # events
     "OutboxEventORM": "events",
     "AuthAuditLogORM": "events",

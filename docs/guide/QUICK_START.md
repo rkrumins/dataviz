@@ -7,7 +7,9 @@ don't need to know anything about graphs.
 
 > **Before you start:** You need an account and membership of at least one
 > workspace that has a view in it. Not sure you have that? Ask your
-> administrator, or see [Requesting Access](/guide/requesting-access).
+> administrator, or see [Requesting Access](/guide/requesting-access). No
+> workspace at all? Where it's on, the **Playground** in the sidebar is open to
+> everyone — see [The Playground](/guide/playground).
 
 ```tour-getting-started
 ```
@@ -109,6 +111,8 @@ results naming the workspace you picked.
 > team's, and click **Request access** — or, if there's no **Find a workspace**
 > button, ask a colleague for a link to their workspace and request access from
 > there. See [Requesting Access](/guide/requesting-access#find-a-workspace).
+> Meanwhile, if your deployment has the **Playground**, open it from the
+> sidebar: start from a sample graph and come back to these steps with it.
 
 ---
 
@@ -223,3 +227,5 @@ You've used every core idea once. You can now:
 - [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you want to go
   deeper into tracing.
 - [Creating Views](/guide/creating-views) — when you're ready to build your own.
+- [The Playground](/guide/playground) — when you want a graph of your own to try
+  things on: a sample, your own data, or blank.

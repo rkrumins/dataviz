@@ -93,6 +93,21 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "workspaceDirectoryEnabled":
         "Find a workspace is turned off for this deployment. Ask a colleague for a link to the "
         "workspace, or an administrator can enable it under Admin → Features.",
+    "playgroundEnabled":
+        "The Playground is turned off for this deployment. "
+        "An administrator can enable it under Admin → Features.",
+    "workspaceRequestsEnabled":
+        "Requesting a workspace is turned off for this deployment. Requests already sent are kept. "
+        "An administrator can enable it under Admin → Features.",
+    "dataRequestsEnabled":
+        "Asking for data is turned off for this deployment. Requests already sent are kept. "
+        "An administrator can enable it under Admin → Features.",
+    "conversationsEnabled":
+        "Questions and conversations are turned off for this deployment; those already started are kept. "
+        "An administrator can enable them under Admin → Features.",
+    "dataSourceMetadataEnabled":
+        "Data source details are turned off for this deployment, so they can't be changed. "
+        "An administrator can enable them under Admin → Features.",
     "allowedViewModes":
         "That view type is not available in this deployment. "
         "An administrator chooses the available types under Admin → Features.",
@@ -611,6 +626,87 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 6,
         "deprecated": False,
     },
+    {
+        "key": "playgroundEnabled",
+        "name": "Playground",
+        "description": (
+            "One shared sandbox workspace that anyone who can sign in may join, to build their "
+            "own graphs from blank and try views out — without access to any team's workspace "
+            "or its data."
+        ),
+        "impact_when_off": (
+            "Try the Playground disappears and the server refuses joining it and starting new "
+            "graphs in it. People already in it keep their graphs and views, which stay in the "
+            "workspace; nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "On, everyone who can sign in may join the Playground and create graphs on its "
+            "sandbox provider, up to the quota you set. Give it a provider of its own, kept apart "
+            "from production, before turning this on. It needs Version control and Build lineage "
+            "from scratch, which turning it on here turns on too."
+        ),
+        "sort_order": 8,
+        "deprecated": False,
+    },
+    {
+        "key": "workspaceRequestsEnabled",
+        "name": "Workspace requests",
+        "description": (
+            "Let anyone who can sign in ask for a workspace of their own — its name, what it is "
+            "for, the teammates to add and the Playground graphs to bring along — for Org and "
+            "Super Admins to approve, send back with a question, or decline."
+        ),
+        "impact_when_off": (
+            "Request a workspace and the requests screens disappear, the server refuses new and "
+            "resubmitted requests, and nobody is reminded of waiting ones. Requests already sent "
+            "are kept and come back when it is turned on again (the API still reads, withdraws "
+            "and answers them); workspaces made from them keep everything. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Approving creates the workspace, makes the requester its Workspace Admin and their "
+            "teammates its Members, and moves the Playground graphs they chose into it with their "
+            "views."
+        ),
+        "sort_order": 9,
+        "deprecated": False,
+    },
+    {
+        "key": "dataRequestsEnabled",
+        "name": "Data requests",
+        "description": (
+            "Let anyone who can read a workspace ask for data to be connected to it — where it "
+            "lives (Snowflake, Databricks, a dbt project, a file…), what of it, why, by when and "
+            "who knows it — for the platform team to take on, connect, or decline."
+        ),
+        "impact_when_off": (
+            "Ask for data and the data requests screens disappear, the server refuses new "
+            "requests, and nobody is reminded of waiting ones. Requests already sent are kept and "
+            "come back when it is turned on again (the API still reads, withdraws and answers "
+            "them); data sources connected for them are kept. Nothing is deleted."
+        ),
+        "category_id": "auth",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Org and Super Admins answer every workspace's requests under Workspaces → Requests. "
+            "A workspace's admins may start and connect that workspace's requests, and a source's "
+            "named Owner or Stewards may connect a request as that source. Nobody answers their own."
+        ),
+        "sort_order": 10,
+        "deprecated": False,
+    },
     # ── Lineage ────────────────────────────────────────────────────────────────
     {
         "key": "versioningEnabled",
@@ -991,6 +1087,34 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 4,
         "deprecated": False,
     },
+    {
+        "key": "dataSourceMetadataEnabled",
+        "name": "Data source details",
+        "description": (
+            "Let people describe each data source — what it is, links to read more, and tags — and "
+            "say whether to trust it: how sensitive it is (Public, Internal, Confidential or "
+            "Restricted) and whether it is Certified, In review or Deprecated. Each source also "
+            "shows how it was connected and its history."
+        ),
+        "impact_when_off": (
+            "Details can no longer be changed, and the About card, the trust badges, the tags "
+            "filter and a source's Activity tab disappear. Everything already written is kept and "
+            "comes back when it is turned on again. Nothing is deleted."
+        ),
+        "category_id": "governance",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. Anyone who manages a source edits its description, links and tags; its "
+            "sensitivity and status are set by the workspace's admins and the source's named Owner "
+            "and Stewards. Turning this on also lets people name a source's data contacts, as "
+            "Questions and conversations does."
+        ),
+        "sort_order": 5,
+        "deprecated": False,
+    },
     # ── Display & UI ──────────────────────────────────────────────────────────
     {
         "key": "nodeSortingEnabled",
@@ -1191,6 +1315,35 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "The fastest way to silence every banner at once without going through them one by one."
         ),
         "sort_order": 0,
+        "deprecated": False,
+    },
+    {
+        "key": "conversationsEnabled",
+        "name": "Questions and conversations",
+        "description": (
+            "Let anyone who can open a view or a data source ask the people behind it about it — "
+            "its owners and the people named as its data contacts — openly or privately, mention "
+            "colleagues who can open it too, answer and accept answers, and watch a view or a "
+            "source for new questions. Workspace admins name each source's Owner and Stewards."
+        ),
+        "impact_when_off": (
+            "Questions, profiles and question counts disappear, and nobody can ask, reply, edit, "
+            "watch or (unless Data source details is on) change a source's data contacts; "
+            "reminders and watcher notices stop. Everything already said is kept and comes back "
+            "when it is turned on again (the API still reads, closes and deletes it), and deleted "
+            "messages are still blanked after 30 days. Nothing else is deleted."
+        ),
+        "category_id": "notifications",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "A preview. A question reaches only people who can open what it is about; private "
+            "questions are seen by the people in them, the view's owners or the source's data "
+            "contacts, and the workspace's admins."
+        ),
+        "sort_order": 1,
         "deprecated": False,
     },
     # ── Experimental ───────────────────────────────────────────────────────────

@@ -214,3 +214,12 @@ describe('an owner who simply lacks the publish permission', () => {
             .toMatch(/Publish views/)
     })
 })
+
+describe('defaultVisibilityFor', () => {
+    it('starts a new view with its maker alone, and shared with everyone in the Playground', async () => {
+        const { defaultVisibilityFor } = await import('../viewVisibility')
+        expect(defaultVisibilityFor('standard')).toBe('private')
+        expect(defaultVisibilityFor(undefined)).toBe('private')
+        expect(defaultVisibilityFor('playground')).toBe('workspace')
+    })
+})

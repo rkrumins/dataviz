@@ -116,7 +116,7 @@ async def search_directory(
         )
         rows = (await session.execute(
             select(GroupORM, member_count)
-            .where(GroupORM.name.ilike(pattern))
+            .where(GroupORM.name.ilike(pattern), GroupORM.deleted_at.is_(None))
             .order_by(GroupORM.name)
             .limit(limit)
         )).all()

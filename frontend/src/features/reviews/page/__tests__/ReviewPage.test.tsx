@@ -100,7 +100,7 @@ function renderPage(search = '', qc = new QueryClient({ defaultOptions: { querie
       <MemoryRouter initialEntries={[`/workspaces/ws1/reviews/pr_1${search}`]}>
         <Routes>
           <Route path="/workspaces/:wsId/reviews/:prId" element={<><WorkspaceReviewPage /><Where /></>} />
-          <Route path="/workspaces/:wsId/reviews" element={<p>The reviews</p>} />
+          <Route path="/reviews" element={<p>The reviews</p>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -118,7 +118,7 @@ describe('ReviewPage', () => {
   it('lays out the changes, the change open and where the review stands', async () => {
     renderPage()
     expect(await screen.findByRole('heading', { name: 'Tidy owners' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Reviews/ })).toHaveAttribute('href', '/workspaces/ws1/reviews')
+    expect(screen.getByRole('link', { name: /Reviews/ })).toHaveAttribute('href', '/reviews?workspace=ws1')
     const changes = screen.getByRole('complementary', { name: 'Changes' })
     expect(await within(changes).findByText('Orders')).toBeInTheDocument()
     expect(within(changes).getByText(/of 3 viewed/)).toBeInTheDocument()

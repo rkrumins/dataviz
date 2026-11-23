@@ -165,6 +165,14 @@ const DATA_SOURCE_FIELDS: FieldSpec<DataSourceWithContext>[] = [
     { get: x => x.dataSource.id, weight: 0.2 },
 ]
 
+// With data source details on, what a source says about itself finds it too — its
+// description (else the catalog's) like a view's, its tags like a view's.
+const DATA_SOURCE_DETAIL_FIELDS: FieldSpec<DataSourceWithContext>[] = [
+    ...DATA_SOURCE_FIELDS,
+    { get: x => x.dataSource.description || x.dataSource.catalogDescription, weight: 0.4 },
+    { get: x => x.dataSource.tags, weight: 0.6 },
+]
+
 
 /**
  * Unified ranked search across views, workspaces, data sources, templates,
@@ -202,6 +210,7 @@ export function useGlobalSearch(
     const analyticsAllowed = useAnalyticsAccess().allowed
     // A page behind a switch leaves search the moment an admin turns it off.
     const featureValues = useFeaturesStore(s => s.values)
+    const sourceDetails = isFeatureOn(featureValues, 'dataSourceMetadataEnabled')
     const brand = useBrand()
 
     // Each versioned-graph setting is a destination too; its index is the
@@ -281,7 +290,7 @@ export function useGlobalSearch(
         const dsCandidates: DataSourceWithContext[] = (workspaces ?? []).flatMap(ws =>
             (ws.dataSources ?? []).map(ds => ({ workspace: ws, dataSource: ds }))
         )
-        const dsScored = scoreCandidates(dsCandidates, debouncedQuery, DATA_SOURCE_FIELDS)
+        const dsScored = scoreCandidates(dsCandidates, debouncedQuery, sourceDetails ? DATA_SOURCE_DETAIL_FIELDS : DATA_SOURCE_FIELDS)
         const dataSourceHits: DataSourceHit[] = dsScored.map(({ item, score }) => ({
             id: `ds-${item.dataSource.id}`,
             category: 'Data Source',
@@ -389,7 +398,7 @@ export function useGlobalSearch(
             totalByCategory,
             viewsHasMore: viewsQuery.data?.hasMore ?? false,
         }
-    }, [debouncedQuery, trimmed, workspaces, templates, ontologies, viewsQuery.data, viewsQuery.isFetching, appWide, visiblePages, docsQuery.data, docsQuery.isFetching, brand, limitPerCategory])
+    }, [debouncedQuery, trimmed, workspaces, templates, ontologies, viewsQuery.data, viewsQuery.isFetching, appWide, visiblePages, docsQuery.data, docsQuery.isFetching, brand, limitPerCategory, sourceDetails])
 }
 
 /** Flattens hits in canonical category order for consumers that want a single list. */

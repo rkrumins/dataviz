@@ -7,6 +7,7 @@ a mid-window arrival, and assert the arithmetic.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -211,6 +212,149 @@ async def test_the_document_is_a_bounded_number_of_reads(db_session):
     finally:
         db_session.execute = original
     assert len(issued) <= 25, f"{len(issued)} reads"
+
+
+async def _seed_details(session):
+    """What the sources say about themselves, who to ask about them, and the
+    requests for data and for workspaces around them."""
+    from backend.app.db.models import DataRequestORM, DataSourceContactORM, WorkspaceRequestORM
+
+    ledger = await session.get(WorkspaceDataSourceORM, "ds_1")
+    ledger.description, ledger.tags = "The general ledger", json.dumps(["Finance", "pii"])
+    ledger.trust_status, ledger.classification = "certified", "confidential"
+    catalog = await session.get(WorkspaceDataSourceORM, "ds_2")
+    # Blank is not a description; a tag used only in Beta.
+    catalog.description, catalog.tags = "   ", json.dumps(["finance", "project-x"])
+    catalog.trust_status = "deprecated"
+    gone = await session.get(WorkspaceDataSourceORM, "ds_gone")
+    gone.description = "Deleted sources are not counted"
+    session.add_all([
+        WorkspaceDataSourceORM(
+            id="ds_3", workspace_id="ws_a", provider_id="prov_f", graph_name="g5",
+            label="Events", trust_status="in_review", classification="internal",
+            created_at="2026-04-01T00:00:00+00:00",
+        ),
+        # A fork's row: never listed, so never counted.
+        WorkspaceDataSourceORM(
+            id="dsfork_1", workspace_id="ws_a", provider_id="prov_f", graph_name=None,
+            label="Ledger fork", description="A fork", fork_of_data_source_id="ds_1",
+            created_at="2026-04-01T00:00:00+00:00",
+        ),
+        DataSourceContactORM(data_source_id="ds_1", role="owner", subject_type="user", subject_id="usr_o"),
+        DataSourceContactORM(data_source_id="ds_3", role="steward", subject_type="group", subject_id="grp_s"),
+        DataSourceContactORM(data_source_id="ds_gone", role="owner", subject_type="user", subject_id="usr_o"),
+    ])
+
+    def _dr(rid, created, status="pending", resolved=None, urgency="no_rush", ws="ws_a"):
+        return DataRequestORM(
+            id=rid, workspace_id=ws, requested_by="usr_r", title=rid, system="postgres",
+            urgency=urgency, status=status, resolved_at=resolved,
+            assignee_id="usr_p" if status == "in_progress" else None,
+            created_at=created, updated_at=created,
+        )
+
+    def _wr(rid, created, status="pending", resolved=None):
+        return WorkspaceRequestORM(
+            id=rid, requester_id=f"usr_{rid}", name=rid, purpose="team", status=status,
+            resolved_at=resolved, workspace_id="ws_new" if status == "approved" else None,
+            question="Which team?" if status == "changes_requested" else None,
+            created_at=created, updated_at=created,
+        )
+
+    session.add_all([
+        # Window: 06-08 12:00 → 06-15 12:00.
+        _dr("dr1", "2026-06-09T10:00:00+00:00", "connected", "2026-06-10T10:00:00+00:00"),
+        _dr("dr2", "2026-06-10T10:00:00+00:00", "declined", "2026-06-11T10:00:00+00:00"),
+        _dr("dr3", "2026-06-12T10:00:00+00:00", urgency="this_week", ws="ws_b"),
+        _dr("dr6", "2026-06-13T10:00:00+00:00", "withdrawn", "2026-06-13T11:00:00+00:00"),
+        # The window before.
+        _dr("dr4", "2026-06-02T10:00:00+00:00", "in_progress", ws="ws_b"),
+        _dr("dr5", "2026-06-07T10:00:00+00:00", "connected", "2026-06-09T10:00:00+00:00"),
+        _wr("wr1", "2026-06-09T10:00:00+00:00", "approved", "2026-06-09T22:00:00+00:00"),
+        _wr("wr2", "2026-06-11T10:00:00+00:00", "declined", "2026-06-12T10:00:00+00:00"),
+        _wr("wr3", "2026-06-13T10:00:00+00:00"),
+        _wr("wr5", "2026-06-12T10:00:00+00:00", "withdrawn", "2026-06-12T12:00:00+00:00"),
+        _wr("wr4", "2026-06-05T10:00:00+00:00", "changes_requested"),
+    ])
+    await session.commit()
+
+
+async def test_details_say_how_well_the_listed_sources_are_described(db_session):
+    await _seed(db_session)
+    await _seed_details(db_session)
+    details = (await analytics_data_repo.platform_data(db_session, days=7, now=NOW))["details"]
+
+    # Ledger, Catalog, Events — not the deleted source, not the fork.
+    assert details["sources"] == 3
+    assert details["described"] == 1 and details["tagged"] == 2 and details["withContacts"] == 2
+    assert {t["key"]: t["count"] for t in details["trust"]} == {
+        "certified": 1, "in_review": 1, "deprecated": 1, "none": 0,
+    }
+    assert {c["key"]: c["count"] for c in details["classification"]} == {
+        "public": 0, "internal": 1, "confidential": 1, "restricted": 0, "none": 1,
+    }
+    # Counted case-insensitively, under the spelling first seen.
+    tags = {t["key"]: (t["count"], t["workspaceIds"]) for t in details["topTags"]}
+    assert tags == {"Finance": (2, ["ws_a", "ws_b"]), "pii": (1, ["ws_a"]), "project-x": (1, ["ws_b"])}
+    rows = [(r["workspaceId"], r["name"], r["sources"], r["described"], r["tagged"],
+             r["withContacts"], r["certified"]) for r in details["byWorkspace"]]
+    assert rows == [("ws_a", "Alpha", 2, 1, 1, 2, 1), ("ws_b", "Beta", 1, 0, 1, 0, 0)]
+
+
+async def test_requests_for_data_and_for_workspaces(db_session):
+    await _seed(db_session)
+    await _seed_details(db_session)
+    req = (await analytics_data_repo.platform_data(db_session, days=7, now=NOW))["requests"]
+
+    data = req["data"]
+    assert data["asked"] == {"total": 6, "current": 4, "previous": 2, "changePct": 100.0}
+    # Decided in the window: dr1 and dr5 connected, dr2 declined; a withdrawal is neither.
+    assert (data["connected"], data["declined"], data["open"]) == (2, 1, 2)
+    assert data["openByUrgency"] == [
+        {"key": "this_week", "count": 1}, {"key": "this_month", "count": 0},
+        {"key": "no_rush", "count": 1},
+    ]
+    assert data["medianHoursToConnect"] == 36.0   # 24h and 48h
+
+    ws = req["workspaces"]
+    assert ws["submitted"] == {"total": 5, "current": 4, "previous": 1, "changePct": 300.0}
+    assert (ws["approved"], ws["declined"], ws["open"], ws["changesRequested"]) == (1, 1, 2, 1)
+    assert ws["medianHoursToDecision"] == 18.0    # 12h and 24h
+
+
+async def test_a_reader_sees_coverage_but_only_tags_and_workspaces_they_may_see(db_session):
+    await _seed(db_session)
+    await _seed_details(db_session)
+    doc = await analytics_data_repo.platform_data(db_session, days=7, now=NOW)
+    reader = ViewerScope(privileged=False, visible_workspaces=frozenset({"ws_a"}),
+                         privacy=PrivacyMode.INTERNAL)
+    seen = analytics_data_repo.redact_data(doc, reader)
+
+    details = seen["details"]
+    assert details["described"] == 1 and details["sources"] == 3, "coverage is platform-wide"
+    # A tag used only in Beta says what Beta is working on.
+    assert details["topTags"] == [{"key": "Finance", "count": 2}, {"key": "pii", "count": 1}]
+    beta = details["byWorkspace"][1]
+    assert beta["name"] == analytics_repo.REDACTED_WORKSPACE and beta["workspaceId"] is None
+    assert beta["sources"] == 1 and beta["redacted"] is True
+    assert details["byWorkspace"][0]["canOpen"] is True
+    # Who is waiting for data is operations, withheld below the posture that shows it.
+    assert "requests" not in seen and seen["redaction"]["showsOperations"] is False
+    full = analytics_data_repo.redact_data(doc, ViewerScope(
+        privileged=False, visible_workspaces=frozenset({"ws_a"}), privacy=PrivacyMode.FULL))
+    assert full["requests"] == doc["requests"]
+    # The cached original is untouched.
+    assert any(t["key"] == "project-x" for t in doc["details"]["topTags"])
+
+
+async def test_the_drill_in_carries_its_own_source_details(db_session):
+    await _seed(db_session)
+    await _seed_details(db_session)
+    detail = await analytics_repo.workspace_detail(db_session, "ws_a", days=7, now=NOW)
+
+    sd = detail["sourceDetails"]
+    assert (sd["sources"], sd["described"], sd["tagged"], sd["withContacts"]) == (2, 1, 1, 2)
+    assert {t["key"]: t["count"] for t in sd["trust"]}["certified"] == 1
 
 
 @pytest.mark.parametrize("setting, kept", [(None, 90), ("30", 30), ("0", None), ("ninety", 90)])

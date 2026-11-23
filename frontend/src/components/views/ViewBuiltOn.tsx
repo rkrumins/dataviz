@@ -73,6 +73,8 @@ import { useSidebarSpec } from '@/store/navCatalogue'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { workspaceColor } from '@/lib/workspaceColor'
 import type { View } from '@/services/viewApiService'
+import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
+import { TrustBadges } from '@/components/dataSource/TrustBadges'
 
 /** Same neutral map AdminInfrastructure's GraphProvidersPanel uses — no
  *  privileged provider, and never the raw `falkordb` token in the UI. */
@@ -102,6 +104,8 @@ interface Rung {
     value?: string
     /** Right-aligned on the value line: a version, a health state. */
     badge?: string
+    /** Beside the value: the data source's trust status and sensitivity. */
+    chips?: React.ReactNode
     status?: { dot: string; label: string }
     secondary?: string
     to?: string
@@ -144,6 +148,7 @@ export function ViewBuiltOn({ view }: { view: View }) {
     // `unknown` is a non-fact, so it is dropped rather than printed.
     const health = useProviderHealth(view.providerId)
     const versioningEnabled = useFeature('versioningEnabled')
+    const sourceDetails = useFeature(DATA_SOURCE_METADATA_FEATURE)
 
     // A destination only counts if the route would open. Both pages sit behind
     // the same nav spec their <RequireNav> guard reads, so asking here is
@@ -183,6 +188,9 @@ export function ViewBuiltOn({ view }: { view: View }) {
         if (view.sourceKind && versioningEnabled) parts.push(KIND_TEXT[view.sourceKind].label)
         if (view.dataUpdatedAt) parts.push(`Data updated ${timeAgo(view.dataUpdatedAt)}`)
         const catalogId = dataSourceRow?.catalogItemId
+        // Free too: the view names its source's trust. No tooltips here — the rung is
+        // itself a link with one; the disclosure below says what they mean.
+        const trusted = sourceDetails && (view.dataSourceTrustStatus || view.dataSourceClassification)
         rungs.push({
             key: 'dataSource',
             label: 'Data source',
@@ -193,8 +201,11 @@ export function ViewBuiltOn({ view }: { view: View }) {
             secondary: parts.join(' · ') || undefined,
             to: catalogId && canReachIngestion ? `/datasources/${catalogId}` : undefined,
             linkLabel: `Open the ${view.dataSourceName} data source`,
+            chips: trusted ? <TrustBadges trustStatus={view.dataSourceTrustStatus} classification={view.dataSourceClassification} tip={false} /> : undefined,
             what: 'The system this view reads from. Change what it holds and '
-                + 'this view follows.',
+                + 'this view follows.'
+                + (trusted ? ' Its badges say whether its Owner or Stewards have certified it, '
+                    + 'and how sensitive its data is.' : ''),
         })
     }
 
@@ -355,6 +366,7 @@ function RungRow({ rung, last }: { rung: Rung; last: boolean }) {
                         >
                             {rung.value}
                         </span>
+                        {rung.chips}
                         {rung.badge && (
                             <span className="shrink-0 rounded-md border border-black/10 bg-black/[0.03] px-1.5 py-px text-[10px] font-bold tabular-nums text-ink-secondary dark:border-white/[0.12] dark:bg-white/[0.04]">
                                 {rung.badge}

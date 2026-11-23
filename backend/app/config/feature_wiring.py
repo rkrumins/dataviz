@@ -222,6 +222,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "versioning_gate.py — every /graph write (drafts, commits, merges, reverts)",
             "versioned_write_provider.py — backstop on the write-through path",
+            "GET /playground/samples, POST /playground/samples/{sample_id}, POST /playground/graphs — a starter "
+            "graph is a versioned graph (and a sample's first version and example draft)",
         ),
         ui_surfaces=(
             "Canvas edit mode, drafts, reviews and history",
@@ -552,6 +554,86 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Workspaces, their access settings and every request are kept",
         ),
     ),
+    # Lets anyone who can sign in into a workspace and onto a provider: when it cannot
+    # be read, assume it is off, and nobody is let in.
+    "playgroundEnabled": FeatureWiring(
+        key="playgroundEnabled",
+        posture="security",
+        server_gates=(
+            "POST /playground/join — refused while off",
+            "GET /playground — says the Playground is off, and offers nothing",
+            "GET /playground/samples, POST /playground/samples/{sample_id} — refused while off",
+            "POST /playground/graphs (start a graph for your own data) — refused while off",
+            "POST /{ws_id}/versioning/blank-graphs in the Playground — starting a new graph there is refused",
+            "GET /playground/models and /playground/models/{id}/template — the semantic layers a member "
+            "may build on, and their import templates — refused while off",
+            "POST /playground/models/match (with Suggest semantic layers) — scoring the layers on offer "
+            "against a file — refused while off",
+            "POST /playground/layers, /playground/layers/{id}/share and /playground/layers/{id}/types — "
+            "making, sharing and adding types to a semantic layer of your own — refused while off",
+            "Editing, publishing, deleting, importing into, exporting and reading the history of a "
+            "Playground maker's own semantic layer without the semantic-layer switches — while off, "
+            "the org's rules apply to it, and nobody but a platform admin changes it",
+        ),
+        ui_surfaces=(
+            "Playground — in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
+            "Setting the Playground up, on Workspaces, for platform administrators",
+            "Start from a sample, under Your experiments in the Playground",
+            "Bring your own data and Start a blank graph, under Your experiments (with Version control and "
+            "Build lineage from scratch)",
+            "Your first steps — the Playground's builder checklist",
+            "The Playground chip on a view's header",
+            "The blank-graph wizard's way back to a sample or your own data, in the Playground",
+        ),
+        still_allowed=(
+            "People already in the Playground keep their graphs and views; nothing is deleted",
+            "Semantic layers of their own are kept, and still read by them and the graphs built on them",
+            "Leaving the Playground",
+            "Moving an experiment out into a workspace, or asking to — its own semantic layer goes with it",
+        ),
+        # A Playground graph is a blank, versioned graph: without these it can make nothing.
+        depends_on=("versioningEnabled", "blankModelsEnabled"),
+    ),
+    # Preview: the screens are still being built, so it ships OFF, and the gates pass
+    # default=False — a definition not seeded yet means off, as on a fresh deployment.
+    "workspaceRequestsEnabled": FeatureWiring(
+        key="workspaceRequestsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /workspace-requests — refused while off",
+            "PUT /me/workspace-requests/{id} (resubmitting one sent back) — refused while off",
+            "Reminders and escalations of requests left waiting pause",
+        ),
+        ui_surfaces=(
+            "Request a workspace — the wizard, from the Playground, Dashboard and Workspaces",
+            "Workspace requests — your own, and Workspaces → Requests for platform and org admins",
+        ),
+        still_allowed=(
+            "Requests already sent are kept, and shown again when it is turned back on",
+            "Through the API: reading, withdrawing and answering requests already sent",
+            "Workspaces made from a request keep everything; nothing is deleted",
+        ),
+    ),
+    # Preview, like workspace requests: it ships OFF and the gate passes default=False.
+    "dataRequestsEnabled": FeatureWiring(
+        key="dataRequestsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /admin/workspaces/{ws_id}/data-requests — refused while off",
+            "Reminders and escalations of requests left waiting pause",
+        ),
+        ui_surfaces=(
+            "Ask for data — the wizard, from a workspace's Data → Sources and its Overview",
+            "Data requests — a workspace's Data → Sources, and Workspaces → Requests for platform and org admins",
+        ),
+        still_allowed=(
+            "Requests already sent are kept, and shown again when it is turned back on",
+            "Through the API: reading, withdrawing and answering requests already sent",
+            "Data sources connected for a request are kept; nothing is deleted",
+        ),
+    ),
     # ── Notifications ──────────────────────────────────────────────────────────
     "announcementsEnabled": FeatureWiring(
         key="announcementsEnabled",
@@ -562,6 +644,36 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ui_surfaces=(),
         still_allowed=(
             "Announcements are hidden, not deactivated — turning this back on restores them",
+        ),
+    ),
+    # Preview, like data requests: it ships OFF and every gate passes default=False.
+    "conversationsEnabled": FeatureWiring(
+        key="conversationsEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /discussions/subjects/{type}/{id} — asking is refused while off",
+            "POST /discussions/{id}/messages, PATCH /discussions/{id}/messages/{mid} — replying and editing",
+            "PUT /discussions/subjects/{type}/{id}/watch, PUT /discussions/{id}/me (following) — watching",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts "
+            "(open while this or dataSourceMetadataEnabled is on)",
+            "Watcher notices, reminders and escalations pause (deleted messages are still blanked after 30 days)",
+        ),
+        ui_surfaces=(
+            "Questions — the view header, the Explorer preview, a data source's Questions tab and Watch",
+            "Ask about this — a canvas node's menu; question marks on canvas rows",
+            "Question counts on view and data source cards",
+            "Who to ask and Data contacts — a view's About sheet, a data source's Overview",
+            "Profiles — /me/profile and /people/{id}, links from people's names, the menu under your avatar, "
+            "your account settings, the command palette",
+            "Conversations and Watching — your profile; the Inbox's All conversations",
+            "Analytics — the Collaboration tab's figures, and its findings on the Overview",
+        ),
+        still_allowed=(
+            "Conversations already started are kept, and shown again when it is turned back on",
+            "Through the API: reading them, marking read, muting, unfollowing, unwatching, closing and deleting",
+            "GET /people/{id} — a person's profile, through the API",
+            "Data contacts already named are kept; nothing is deleted",
         ),
     ),
     # ── Data governance ────────────────────────────────────────────────────────
@@ -647,13 +759,41 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=("Building views in the wizard", "Exporting views"),
         depends_on=("viewPortabilityEnabled",),
     ),
+    # Preview, like conversations: it ships OFF and every gate passes default=False.
+    "dataSourceMetadataEnabled": FeatureWiring(
+        key="dataSourceMetadataEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata — description, links and tags",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata/trust — sensitivity and status",
+            "GET /admin/workspaces/{ws_id}/data-sources/{ds_id}/activity/events — a source's history",
+            "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts — naming data contacts "
+            "(open while this or conversationsEnabled is on)",
+        ),
+        ui_surfaces=(
+            "About this data source — a data source's Overview, with its edit and status forms",
+            "Trust badges — the data source drawer, the Sources grid and a view's Built on",
+            "Tags and the filter bar — the Sources grid; description and tags in the search palette",
+            "Activity — a data source's history tab",
+        ),
+        still_allowed=(
+            "Reading a source's details (GET …/metadata), with nothing editable",
+            "Details already written stay on every data source and view read; nothing is deleted",
+        ),
+    ),
     "blankModelsEnabled": FeatureWiring(
         key="blankModelsEnabled",
         posture="capability",
-        server_gates=("POST /blank-graphs — provision a lineage model with no data source",),
+        server_gates=(
+            "POST /blank-graphs — provision a lineage model with no data source",
+            "GET /playground/samples, POST /playground/samples/{sample_id} — a sample is a blank model",
+            "POST /playground/graphs — a graph started for your own data is a blank model",
+        ),
         ui_surfaces=(
             "Blank-model option in the View wizard",
             "'Start from scratch' on the canvas empty state",
+            "Start from a sample, in the Playground",
         ),
         still_allowed=(
             "Every blank model already built keeps working and stays editable",
@@ -695,12 +835,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /admin/ontologies/{id}/restore",
             "POST /admin/ontologies/{id}/new-version",
             "POST /admin/ontologies/import and /{id}/import — importing IS editing",
+            "POST /admin/ontologies/{id}/approve — approving a workspace's layer for everyone",
         ),
         ui_surfaces=(
             "Create / Edit / Delete controls on the semantic layer pages",
             "The layer editor is read-only",
         ),
-        still_allowed=("Publishing", "Cloning", "Exporting", "Reading every layer"),
+        still_allowed=("Publishing", "Cloning", "Exporting", "Reading every layer",
+                       "A Playground maker's own layers, which they edit whatever this says"),
     ),
     "semanticLayerImportEnabled": FeatureWiring(
         key="semanticLayerImportEnabled",
@@ -710,7 +852,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /admin/ontologies/{id}/import — import into an existing layer",
         ),
         ui_surfaces=("Import button on the semantic layer pages",),
-        still_allowed=("Editing layers in the UI editor", "Exporting"),
+        still_allowed=("Editing layers in the UI editor", "Exporting",
+                       "A Playground maker importing into their own layer, or starting one from a layer file"),
         # An import rewrites a layer's content, so it is a form of editing: it also answers to
         # the edit gate. Without this, "semantic layers are read-only" would be false the moment
         # someone uploaded a file — the exact hole these flags exist to close.
@@ -721,12 +864,14 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         posture="capability",
         server_gates=("GET /admin/ontologies/{id}/export — download the definition as JSON",),
         ui_surfaces=("Export button on the semantic layer pages",),
-        still_allowed=("Reading and editing layers in the UI",),
+        still_allowed=("Reading and editing layers in the UI",
+                       "A Playground maker exporting their own layers"),
     ),
     "semanticLayerAutoSuggest": FeatureWiring(
         key="semanticLayerAutoSuggest",
         posture="capability",
-        server_gates=("POST /admin/ontologies/suggest — score layers against a graph",),
+        server_gates=("POST /admin/ontologies/suggest — score layers against a graph",
+                      "POST /playground/models/match — score the Playground's layers against a file"),
         ui_surfaces=(
             "Suggest-from-graph step in the onboarding and data-source wizards",
             "Match percentages when choosing a layer",
@@ -744,6 +889,7 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=(
             "History is hidden, not deleted — every version is retained and returns when "
             "this is switched back on",
+            "A Playground maker reading the history of their own layers",
         ),
     ),
     "semanticLayerNonAdminEditing": FeatureWiring(
@@ -753,10 +899,11 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         posture="security",
         server_gates=(
             "Every semantic-layer write (create, update, delete, restore, new-version, "
-            "publish, clone, import) — a non-admin is refused unless this is on",
+            "publish, clone, import, approve) — a non-admin is refused unless this is on",
         ),
         ui_surfaces=("Edit controls are hidden from non-admins on the semantic layer pages",),
-        still_allowed=("Admins can always manage layers", "Everyone can read layers"),
+        still_allowed=("Admins can always manage layers", "Everyone can read layers",
+                       "A Playground maker manages their own layers whatever this says"),
         depends_on=("semanticLayerEditMode",),
     ),
     # ── Experimental ─────────────────────────────────────────────────────────────

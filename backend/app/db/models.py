@@ -727,6 +727,13 @@ class OntologyORM(Base):
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)             # soft delete timestamp
+    # The workspace that owns it: a Playground maker's own layer (with ``created_by`` its maker),
+    # or one that moved into a workspace with its graph. NULL: an org layer, as every layer was.
+    owner_workspace_id = Column(
+        Text, ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, default=None,
+    )
+    # An owned layer: ``private`` to its maker, or ``workspace`` — shared with its workspace.
+    owner_visibility = Column(Text, nullable=True, default=None)
 
     # Relationships
     data_sources = relationship(
@@ -735,6 +742,7 @@ class OntologyORM(Base):
 
     __table_args__ = (
         Index("idx_ontologies_name_version", "name", "version"),
+        Index("idx_ontologies_owner_workspace", "owner_workspace_id"),
         Index("idx_ontologies_is_system", "is_system"),
         Index("idx_ontologies_schema_id", "schema_id"),
         Index("idx_ontologies_deleted", "deleted_at"),
@@ -780,7 +788,7 @@ class OntologyAuditLogORM(Base):
         Index("idx_oal_created", "created_at"),
         Index("idx_oal_actor_action", "actor", "action", "created_at"),
         CheckConstraint(
-            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned')",
+            "action IN ('created', 'updated', 'published', 'deleted', 'restored', 'cloned', 'imported')",
             name="ck_oal_action_enum",
         ),
     )
@@ -902,6 +910,16 @@ class WorkspaceORM(Base):
     review_self_merge = Column(Boolean, nullable=True)
     review_required_approvals = Column(Integer, nullable=True)
     review_threads_hold = Column(Boolean, nullable=True)
+    # What kind of workspace this is. 'standard' — a team's own, with the data it
+    # onboards. 'playground' — the one platform-provided sandbox anyone can join to
+    # build their own graphs from blank: no production data can be attached, nothing
+    # is published to everyone, and each person changes only what they made
+    # (``backend.app.services.playground_policy``). At most one (partial unique index).
+    kind = Column(Text, nullable=False, default="standard", server_default="standard")
+    # The playground's own settings, as JSON: ``sandboxProviderId`` (the only provider
+    # its blank graphs go on), ``starterOntologyIds`` (the data models its members may
+    # start from) and ``graphQuota`` (graphs per person). NULL on a standard workspace.
+    playground_settings = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -939,6 +957,12 @@ class WorkspaceORM(Base):
         CheckConstraint(
             "review_required_approvals IS NULL OR review_required_approvals BETWEEN 0 AND 10",
             name="ck_workspaces_required_approvals",
+        ),
+        CheckConstraint("kind IN ('standard', 'playground')", name="ck_workspaces_kind"),
+        Index(
+            "uq_workspaces_one_playground", "kind", unique=True,
+            postgresql_where=text("kind = 'playground' AND deleted_at IS NULL"),
+            sqlite_where=text("kind = 'playground' AND deleted_at IS NULL"),
         ),
     )
 
@@ -1041,6 +1065,22 @@ class WorkspaceDataSourceORM(Base):
     aggregation_edge_count = Column(Integer, nullable=False, default=0)  # count of AGGREGATED edges created
     graph_fingerprint = Column(Text, nullable=True)  # JSON hash of node/edge counts by type (change detection)
     aggregation_schedule = Column(Text, nullable=True)  # Cron expression (e.g., "0 */6 * * *") for periodic checks
+    # ── Details (``backend.app.services.data_source_metadata``) ──
+    # What it is and where to read more — anyone who manages the source edits these.
+    description = Column(Text, nullable=True)             # ≤4000
+    links = Column(Text, nullable=True)                   # JSON [{label, url}], ≤10, http(s) only
+    tags = Column(Text, nullable=True)                    # JSON [str], ≤20 × 40 chars
+    # Whether to trust it — the workspace's admins and the source's named contacts set these.
+    # ``classification`` is how sensitive the data is; it is NOT ``is_restricted`` (the publish gate).
+    classification = Column(Text, nullable=True)          # public | internal | confidential | restricted
+    trust_status = Column(Text, nullable=True)            # certified | in_review | deprecated
+    trust_note = Column(Text, nullable=True)              # ≤500, e.g. "Use Finance v2 instead"
+    trust_status_by = Column(Text, nullable=True)         # who set the CURRENT status, and when
+    trust_status_at = Column(Text, nullable=True)
+    # The last change to any detail — and the lock token a save sends back. Not ``updated_at``,
+    # which aggregation writes.
+    metadata_updated_by = Column(Text, nullable=True)
+    metadata_updated_at = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission.
     created_by = Column(Text, nullable=True, default=None)
     created_at = Column(Text, nullable=False, default=_now)
@@ -1122,6 +1162,22 @@ class WorkspaceDataSourceORM(Base):
             "source_mode IS NULL OR source_mode IN ('managed', 'federated')",
             name="ck_ds_source_mode",
         ),
+        CheckConstraint(
+            "description IS NULL OR length(description) <= 4000",
+            name="ck_ds_description_len",
+        ),
+        CheckConstraint(
+            "classification IS NULL OR classification IN ('public', 'internal', 'confidential', 'restricted')",
+            name="ck_ds_classification",
+        ),
+        CheckConstraint(
+            "trust_status IS NULL OR trust_status IN ('certified', 'in_review', 'deprecated')",
+            name="ck_ds_trust_status",
+        ),
+        CheckConstraint(
+            "trust_note IS NULL OR length(trust_note) <= 500",
+            name="ck_ds_trust_note_len",
+        ),
     )
 
 
@@ -1199,6 +1255,345 @@ class DataSourceTransferORM(Base):
             f"<DataSourceTransfer id={self.id!r} ds={self.data_source_id!r} "
             f"{self.from_workspace_id!r}->{self.to_workspace_id!r} status={self.status!r}>"
         )
+
+
+class WorkspaceRequestORM(Base):
+    """Someone asking for a workspace of their own, for the people who create
+    workspaces to answer.
+
+    ``pending`` → ``approved`` | ``declined`` | ``withdrawn``, or ``pending`` →
+    ``changes_requested`` (an approver asked a ``question``) → ``pending`` again when
+    the requester edits and resubmits, or ``withdrawn`` / ``declined``. Approval
+    creates the workspace (``workspace_id``) and records what it did in ``outcome``
+    (JSON): the Playground graphs moved into it, those that could not be, and the
+    teammates added. One open request per person (``uq_workspace_requests_one_open``).
+
+    ``teammate_ids`` and ``playground_source_ids`` are JSON lists of ids;
+    ``proposed_groups`` a JSON list of the groups to make with it (``ProposedGroup``):
+    each with its role, the people to put in it, and the identity-provider group to
+    link it to. No foreign
+    keys, like ``data_source_transfers``: people, workspaces and sources are named by
+    id, and the record outlives them.
+    """
+    __tablename__ = "workspace_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"wsr_{uuid.uuid4().hex[:12]}")
+    requester_id = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    purpose = Column(Text, nullable=False)
+    team_name = Column(Text, nullable=True)
+    teammate_ids = Column(Text, nullable=False, default="[]")            # JSON
+    playground_source_ids = Column(Text, nullable=False, default="[]")   # JSON
+    proposed_groups = Column(Text, nullable=False, default="[]")         # JSON
+    data_needs = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="pending")
+    question = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    workspace_id = Column(Text, nullable=True)
+    outcome = Column(Text, nullable=True)                                # JSON
+    #: When a request left waiting was brought up again to the approvers, then to
+    #: the platform administrators (``access_housekeeping``); cleared on resubmit.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_workspace_requests_status_created", "status", "created_at"),
+        Index("idx_workspace_requests_requester", "requester_id", "created_at"),
+        CheckConstraint(
+            "purpose IN ('team', 'project', 'poc', 'reporting', 'other')",
+            name="ck_workspace_requests_purpose",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'changes_requested', 'approved', 'declined', 'withdrawn')",
+            name="ck_workspace_requests_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND resolved_at IS NULL) "
+            "OR (status = 'changes_requested' AND resolved_at IS NULL AND question IS NOT NULL) "
+            "OR (status = 'approved' AND resolved_at IS NOT NULL AND workspace_id IS NOT NULL) "
+            "OR (status IN ('declined', 'withdrawn') AND resolved_at IS NOT NULL)",
+            name="ck_workspace_requests_state_consistency",
+        ),
+        # Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_workspace_requests_one_open", "requester_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'changes_requested')"),
+            sqlite_where=text("status IN ('pending', 'changes_requested')"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<WorkspaceRequest id={self.id!r} requester={self.requester_id!r} "
+            f"name={self.name!r} status={self.status!r}>"
+        )
+
+
+class DataRequestORM(Base):
+    """Someone in a workspace asking for data to be connected to it, for the
+    platform team (or the workspace's admins, or the source's named contacts) to connect.
+
+    ``pending`` → ``in_progress`` (someone took it: ``assignee_id``) →
+    ``connected`` (optionally naming the ``data_source_id`` it became) or
+    ``declined``; a ``pending`` one may also be connected or declined straight
+    away, or ``withdrawn`` by the person who asked. ``system`` is where the data
+    lives, ``details`` what of it, ``purpose`` why, ``urgency`` by when, and
+    ``contact_ids`` (JSON list) the people who know it.
+
+    No foreign keys, like ``workspace_requests``: the workspace, people and the
+    data source are named by id, and the record outlives them.
+    """
+    __tablename__ = "data_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dr_{uuid.uuid4().hex[:12]}")
+    workspace_id = Column(Text, nullable=False)
+    requested_by = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    system = Column(Text, nullable=False)
+    details = Column(Text, nullable=True)
+    purpose = Column(Text, nullable=True)
+    urgency = Column(Text, nullable=False, default="no_rush")
+    contact_ids = Column(Text, nullable=False, default="[]")             # JSON
+    status = Column(Text, nullable=False, default="pending")
+    assignee_id = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    data_source_id = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    #: When a request left waiting was brought up again to the people who connect it,
+    #: then to the platform team (``access_housekeeping``). Once each.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_data_requests_workspace_created", "workspace_id", "created_at"),
+        Index("idx_data_requests_status_created", "status", "created_at"),
+        Index("idx_data_requests_requester", "requested_by", "created_at"),
+        Index("idx_data_requests_source", "data_source_id",
+              postgresql_where=text("data_source_id IS NOT NULL"),
+              sqlite_where=text("data_source_id IS NOT NULL")),
+        CheckConstraint(
+            "system IN ('snowflake', 'databricks', 'bigquery', 'postgres', 'dbt', 'datahub', "
+            "'neo4j', 'file', 'other')",
+            name="ck_data_requests_system",
+        ),
+        CheckConstraint(
+            "urgency IN ('no_rush', 'this_month', 'this_week')",
+            name="ck_data_requests_urgency",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'in_progress', 'connected', 'declined', 'withdrawn')",
+            name="ck_data_requests_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND resolved_at IS NULL) "
+            "OR (status = 'in_progress' AND resolved_at IS NULL AND assignee_id IS NOT NULL) "
+            "OR (status IN ('connected', 'declined', 'withdrawn') AND resolved_at IS NOT NULL)",
+            name="ck_data_requests_state_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataRequest id={self.id!r} workspace={self.workspace_id!r} "
+            f"title={self.title!r} status={self.status!r}>"
+        )
+
+
+class DataSourceContactORM(Base):
+    """A data source's named data contacts: at most one ``owner`` and up to ten
+    ``steward`` rows, each a person (``subject_type='user'``) or a group.
+
+    Who to ask about a source's data. When a source names nobody, its contacts are
+    worked out when read (``services.discussions.readers``); the first save writes
+    them down. A save replaces the whole set, so every row of one save carries the
+    same ``created_at`` and the newest of them is the set's ``updatedAt``.
+    The person or group is named by id (no FK out of the workspace domain).
+    """
+    __tablename__ = "data_source_contacts"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dsct_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(
+        Text, ForeignKey("workspace_data_sources.id", ondelete="CASCADE"), nullable=False,
+    )
+    role = Column(Text, nullable=False)
+    subject_type = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    added_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("data_source_id", "subject_type", "subject_id", name="uq_data_source_contacts"),
+        Index("uq_data_source_contacts_owner", "data_source_id", unique=True,
+              postgresql_where=text("role = 'owner'"),
+              sqlite_where=text("role = 'owner'")),
+        Index("idx_data_source_contacts_subject", "subject_type", "subject_id"),
+        CheckConstraint("role IN ('owner', 'steward')", name="ck_data_source_contacts_role"),
+        CheckConstraint("subject_type IN ('user', 'group')", name="ck_data_source_contacts_subject"),
+    )
+
+
+# ------------------------------------------------------------------ #
+# collaboration: questions and conversations about views and sources  #
+# ------------------------------------------------------------------ #
+
+class DiscussionORM(Base):
+    """A question about a view or a data source (``subject_type`` / ``subject_id``),
+    optionally about one entity in it (``entity_id``), and the conversation after it.
+
+    ``visibility`` ``open`` (everyone who can open the subject) or ``private`` (the
+    people in it, the subject's maintainers and the workspace's admins — who must
+    still be able to open the subject). ``status`` ``open`` → ``answered`` (a reply
+    accepted: ``answer_message_id``) or ``closed``. ``version`` is bumped by status,
+    answer and delete changes only, which are checked against it.
+
+    The counters (``message_count``, ``participant_count``, ``last_activity_at``,
+    ``last_message_by``, ``first_response_at``) are kept by the same conditional
+    UPDATE that adds a message, so lists never aggregate. The subject's workspace
+    is not stored: a data source can move, so it is looked up when read.
+    """
+    __tablename__ = "discussions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dis_{uuid.uuid4().hex[:12]}")
+    subject_type = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=True)
+    entity_label = Column(Text, nullable=True)
+    visibility = Column(Text, nullable=False, default="open")
+    status = Column(Text, nullable=False, default="open")
+    asked_by = Column(Text, nullable=False)
+    excerpt = Column(Text, nullable=False)
+    answer_message_id = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    message_count = Column(Integer, nullable=False, default=1)
+    participant_count = Column(Integer, nullable=False, default=0)
+    last_activity_at = Column(Text, nullable=False, default=_now)
+    last_message_by = Column(Text, nullable=False)
+    first_response_at = Column(Text, nullable=True)
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
+    watchers_notified_at = Column(Text, nullable=True)
+    watchers_cursor = Column(Text, nullable=True)
+    archived_at = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now)
+    deleted_at = Column(Text, nullable=True)
+    deleted_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_discussions_subject_activity", "subject_type", "subject_id", "last_activity_at", "id"),
+        Index("idx_discussions_subject_updated", "subject_type", "subject_id", "updated_at"),
+        Index("idx_discussions_subject_entity", "subject_type", "subject_id", "entity_id",
+              postgresql_where=text("entity_id IS NOT NULL"),
+              sqlite_where=text("entity_id IS NOT NULL")),
+        Index("idx_discussions_status_response", "status", "first_response_at", "created_at"),
+        Index("idx_discussions_asker_activity", "asked_by", "last_activity_at", "id"),
+        # Analytics: the questions asked in a window, platform-wide.
+        Index("idx_discussions_created", "created_at"),
+        # The watcher fan-out's queue: open questions whose watchers have not all heard.
+        Index("idx_discussions_fanout", "created_at",
+              postgresql_where=text("watchers_notified_at IS NULL AND visibility = 'open' AND deleted_at IS NULL"),
+              sqlite_where=text("watchers_notified_at IS NULL AND visibility = 'open' AND deleted_at IS NULL")),
+        CheckConstraint("subject_type IN ('view', 'data_source')", name="ck_discussions_subject_type"),
+        CheckConstraint("visibility IN ('open', 'private')", name="ck_discussions_visibility"),
+        CheckConstraint("status IN ('open', 'answered', 'closed')", name="ck_discussions_status"),
+    )
+
+
+class DiscussionMessageORM(Base):
+    """The question (``kind='question'``, one per thread) or a reply. ``mentions`` is a
+    JSON list of person ids. ``(author_id, client_key)`` is unique: a post retried with
+    the same key is answered with the original. A deleted message keeps its row; its
+    body is blanked 30 days later."""
+    __tablename__ = "discussion_messages"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dmsg_{uuid.uuid4().hex[:12]}")
+    discussion_id = Column(Text, ForeignKey("discussions.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(Text, nullable=False)
+    author_id = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    mentions = Column(Text, nullable=False, default="[]")                # JSON
+    client_key = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(Text, nullable=False, default=_now)
+    edited_at = Column(Text, nullable=True)
+    deleted_at = Column(Text, nullable=True)
+    deleted_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("author_id", "client_key", name="uq_discussion_messages_client_key"),
+        Index("idx_discussion_messages_thread", "discussion_id", "created_at", "id"),
+        # Analytics: the replies posted in a window, platform-wide.
+        Index("idx_discussion_messages_replies", "created_at",
+              postgresql_where=text("kind = 'reply'"),
+              sqlite_where=text("kind = 'reply'")),
+        Index("uq_discussion_messages_question", "discussion_id", unique=True,
+              postgresql_where=text("kind = 'question'"),
+              sqlite_where=text("kind = 'question'")),
+        CheckConstraint("kind IN ('question', 'reply')", name="ck_discussion_messages_kind"),
+        CheckConstraint("length(body) <= 10000", name="ck_discussion_messages_body"),
+    )
+
+
+class DiscussionParticipantORM(Base):
+    """Someone in a thread: how they joined (``joined_via``), whether it was asked of
+    them (``asked_to``), when they were last mentioned, last posted and last read, and
+    whether they follow it (hear about replies) or muted it (hear nothing).
+
+    Unread = the thread's ``last_activity_at`` is after ``last_read_at`` and its last
+    message is not theirs. No per-message receipts."""
+    __tablename__ = "discussion_participants"
+
+    id = Column(Text, primary_key=True, default=lambda: f"dpt_{uuid.uuid4().hex[:12]}")
+    discussion_id = Column(Text, ForeignKey("discussions.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, nullable=False)
+    joined_via = Column(Text, nullable=False)
+    asked_to = Column(Boolean, nullable=False, default=False, server_default="false")
+    mentioned_at = Column(Text, nullable=True)
+    muted = Column(Boolean, nullable=False, default=False, server_default="false")
+    following = Column(Boolean, nullable=False, default=True, server_default="true")
+    last_read_at = Column(Text, nullable=True)
+    posted_at = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("discussion_id", "user_id", name="uq_discussion_participants"),
+        Index("idx_discussion_participants_user", "user_id", "discussion_id"),
+        Index("idx_discussion_participants_mentions", "user_id", "mentioned_at"),
+        CheckConstraint(
+            "joined_via IN ('asked', 'asked_to', 'mentioned', 'replied', 'followed')",
+            name="ck_discussion_participants_joined_via",
+        ),
+    )
+
+
+class WatchORM(Base):
+    """Someone watching a view or a data source: they hear about each new open
+    question on it (``services.discussions.housekeeping``'s fan-out)."""
+    __tablename__ = "watches"
+
+    id = Column(Text, primary_key=True, default=lambda: f"wch_{uuid.uuid4().hex[:12]}")
+    user_id = Column(Text, nullable=False)
+    subject_type = Column(Text, nullable=False)
+    subject_id = Column(Text, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("subject_type", "subject_id", "user_id", name="uq_watches_subject_user"),
+        Index("idx_watches_user", "user_id", "created_at"),
+        CheckConstraint("subject_type IN ('view', 'data_source')", name="ck_watches_subject_type"),
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -3322,6 +3717,11 @@ class GroupORM(Base):
     # an IdP group->group mapping. Set on groups that confer elevated
     # access so admin-only flows remain the only way to add members.
     is_protected = Column(Boolean, nullable=False, default=False)
+    # The workspace that owns the group, when one does: its admins manage it from
+    # the workspace (``services.workspace_groups``), and its name carries the
+    # workspace's — ``"<workspace> · <name>"``. NULL: a platform group. A plain id.
+    workspace_id = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -3335,6 +3735,7 @@ class GroupORM(Base):
         UniqueConstraint("name", name="uq_groups_name"),
         Index("idx_groups_deleted_at", "deleted_at"),
         Index("idx_groups_external_id", "external_id"),
+        Index("idx_groups_workspace", "workspace_id"),
         CheckConstraint(
             "source IN ('local', 'scim')",
             name="ck_groups_source",
@@ -3487,6 +3888,73 @@ class IdpGroupRoleMappingORM(Base):
             f"<IdpGroupRoleMapping id={self.id!r} "
             f"group={self.idp_group!r} role={self.role_name!r} "
             f"{self.scope_type}={self.scope_id!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# idp_link_requests  (asking a platform admin to link a group to the   #
+# identity provider)                                                   #
+# ------------------------------------------------------------------ #
+
+
+class IdpLinkRequestORM(Base):
+    """A workspace's group waiting to be linked to an identity-provider group.
+
+    Linking a group to the identity provider is a platform administrator's call
+    (``system:admin``, the SSO rules' bar), so a workspace admin — or an approval
+    by someone without it — asks for one here. ``pending`` → ``linked`` (the
+    mapping it made: ``mapping_id``) | ``declined`` (``resolution_note``) |
+    ``cancelled`` (the group was deleted). ``source`` says where it was asked:
+    ``workspace`` (the workspace's Groups) or ``workspace_request`` (an approved
+    workspace request: ``source_id``). One pending per group
+    (``uq_idp_link_requests_one_pending``). No foreign keys: the group, workspace,
+    provider and people are named by id, and the record outlives them.
+    """
+    __tablename__ = "idp_link_requests"
+
+    id = Column(Text, primary_key=True, default=lambda: f"ilr_{uuid.uuid4().hex[:12]}")
+    group_id = Column(Text, nullable=False)
+    workspace_id = Column(Text, nullable=False)
+    idp_group = Column(Text, nullable=False)
+    provider_id = Column(Text, nullable=True)
+    requested_by = Column(Text, nullable=False)
+    requested_at = Column(Text, nullable=False, default=_now)
+    status = Column(Text, nullable=False, default="pending")
+    source = Column(Text, nullable=False, default="workspace")
+    source_id = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    mapping_id = Column(Text, nullable=True)
+    #: When a request left waiting was brought up again to the platform administrators,
+    #: then a last time (``access_housekeeping``). Once each.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_idp_link_requests_status", "status", "requested_at"),
+        Index("idx_idp_link_requests_group", "group_id"),
+        CheckConstraint(
+            "status IN ('pending', 'linked', 'declined', 'cancelled')",
+            name="ck_idp_link_requests_status",
+        ),
+        CheckConstraint(
+            "source IN ('workspace', 'workspace_request')",
+            name="ck_idp_link_requests_source",
+        ),
+        # Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_idp_link_requests_one_pending", "group_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<IdpLinkRequest id={self.id!r} group={self.group_id!r} "
+            f"idp_group={self.idp_group!r} status={self.status!r}>"
         )
 
 
@@ -4442,6 +4910,11 @@ class AuthAuditLogORM(Base):
               postgresql_where=text("category = 'operations' AND data_source_id IS NOT NULL"),
               sqlite_where=text("category = 'operations' AND data_source_id IS NOT NULL")),
         Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
+        # A source's history (``GET …/data-sources/{ds}/activity/events``): its events of the
+        # allowed types, newest first. Alembic 20261124_1100_aal_ds_type.
+        Index("idx_aal_ds_type_occurred", "data_source_id", "event_type", "occurred_at",
+              postgresql_where=text("data_source_id IS NOT NULL"),
+              sqlite_where=text("data_source_id IS NOT NULL")),
         Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),
         Index("idx_aal_correlation", "correlation_id"),

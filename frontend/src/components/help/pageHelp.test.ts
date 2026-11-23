@@ -26,6 +26,7 @@ const EXEMPT = new Set([
   'workspaces/:workspaceId/views', // redirects to the workspace page
   'datasources/:catalogId/history', // redirects to the data source page
   'me/service-accounts/:accountId', // redirects to the service account's page
+  'conversations', // redirects to your profile's Conversations tab
 ])
 
 /** Router paths are relative to their parent ('overview' under 'admin'). */

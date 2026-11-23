@@ -144,6 +144,33 @@ def _summary_access_request(verb: str):
     return _build
 
 
+def _summary_workspace_request(verb: str):
+    def _build(p: dict) -> str:
+        return f"Workspace request '{p.get('name') or p.get('request_id') or '?'}' {verb}"
+    return _build
+
+
+def _summary_idp_link_request(verb: str):
+    def _build(p: dict) -> str:
+        return (f"Link of group '{p.get('group_id') or '?'}' to IdP group "
+                f"'{p.get('idp_group') or '?'}' {verb}")
+    return _build
+
+
+def _summary_data_request(verb: str):
+    def _build(p: dict) -> str:
+        return f"Data request '{p.get('title') or p.get('request_id') or '?'}' {verb}"
+    return _build
+
+
+def _summary_discussion(verb: str):
+    def _build(p: dict) -> str:
+        where = "a data source" if p.get("subject_type") == "data_source" else "a view"
+        private = "private " if p.get("visibility") == "private" else ""
+        return f"{verb} a {private}question about {where} ({p.get('subject_id') or '?'})"
+    return _build
+
+
 def _summary_idp_provider(verb: str):
     def _build(p: dict) -> str:
         slug = p.get("slug") or p.get("provider_id") or "?"
@@ -565,6 +592,29 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
     "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
+    "workspace.request.submitted": ("info", _summary_workspace_request("submitted")),
+    "workspace.request.resubmitted": ("info", _summary_workspace_request("resubmitted")),
+    "workspace.request.approved": ("info", _summary_workspace_request("approved")),
+    "workspace.request.sent_back": ("info", _summary_workspace_request("sent back with a question")),
+    "workspace.request.declined": ("warning", _summary_workspace_request("declined")),
+    "workspace.request.withdrawn": ("info", _summary_workspace_request("withdrawn")),
+    "rbac.idp_link_request.created": ("info", _summary_idp_link_request("requested")),
+    "rbac.idp_link_request.linked": ("info", _summary_idp_link_request("made")),
+    "rbac.idp_link_request.declined": ("warning", _summary_idp_link_request("declined")),
+    "rbac.idp_link_request.cancelled": ("info", _summary_idp_link_request("cancelled")),
+    "workspace.data_request.submitted": ("info", _summary_data_request("submitted")),
+    "workspace.data_request.started": ("info", _summary_data_request("started")),
+    "workspace.data_request.connected": ("info", _summary_data_request("connected")),
+    "workspace.data_request.declined": ("warning", _summary_data_request("declined")),
+    "workspace.data_request.withdrawn": ("info", _summary_data_request("withdrawn")),
+    "collaboration.discussion.asked": ("info", _summary_discussion("Asked")),
+    "collaboration.discussion.answered": ("info", _summary_discussion("Accepted an answer to")),
+    "collaboration.discussion.closed": ("info", _summary_discussion("Closed")),
+    "collaboration.discussion.reopened": ("info", _summary_discussion("Reopened")),
+    "collaboration.discussion.deleted": ("warning", _summary_discussion("Deleted")),
+    "collaboration.discussion_message.deleted": (
+        "warning", lambda p: f"Deleted a message in conversation {p.get('discussion_id') or '?'}",
+    ),
     "identity.api_key.created": (
         "info", lambda p: f"API key {_api_key_label(p)} created",
     ),
@@ -808,6 +858,39 @@ def _summary_graph_loaded(p: dict) -> str:
             f"{_detail(p, 'master') or '?'}{took} ({_bytes(_detail(p, 'bytes'))})")
 
 
+def _and(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _summary_ds_details(p: dict) -> str:
+    """Which of a source's details changed — never what they say."""
+    fields = [f for f in ("description", "links", "tags") if f in (_detail(p, "fields") or ())]
+    return f"Changed the {_and(fields) if fields else 'details'} of {_subject(p)}"
+
+
+_STATUS_WORDS = {"certified": "Certified {s}", "in_review": "Marked {s} in review",
+                 "deprecated": "Marked {s} deprecated", None: "Cleared the status of {s}"}
+
+
+def _summary_ds_trust(p: dict) -> str:
+    """A source's status and classification, as what happened: "Certified Ledger", "Marked
+    Ledger deprecated and classified it as Confidential"."""
+    s = _subject(p)
+    status, classed = _detail(p, "trustStatus"), _detail(p, "classification")
+    parts = []
+    if isinstance(status, dict):
+        parts.append(_STATUS_WORDS.get(status.get("to"), "Changed the status of {s}").format(s=s))
+    if isinstance(classed, dict):
+        to = classed.get("to")
+        if parts:
+            parts.append(f"classified it as {str(to).capitalize()}" if to else "cleared its classification")
+        else:
+            parts.append(f"Classified {s} as {str(to).capitalize()}" if to else f"Cleared the classification of {s}")
+    if not parts:
+        return f"Changed the status note of {s}" if _detail(p, "noteChanged") else f"Changed the status of {s}"
+    return " and ".join(parts)
+
+
 def _transfer_summary(leaving: str, arriving: str) -> Callable[[dict], str]:
     """A data-source transfer is recorded once in each workspace; the summary reads from the
     side it is filed under. ``leaving`` / ``arriving`` hold ``{s}`` (the source) and ``{ws}``
@@ -857,6 +940,11 @@ _EVENT_META.update({
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
     "workspace.data_source.native_query_run": ("info", _summary_native_query),
+    "workspace.data_source.contacts_changed": (
+        "info", lambda p: f"Changed the data contacts of data source {p.get('data_source_id') or '?'}",
+    ),
+    "workspace.data_source.metadata_changed": ("info", _summary_ds_details),
+    "workspace.data_source.trust_changed": ("info", _summary_ds_trust),
     "workspace.data_source.moved": ("info", _transfer_summary(
         "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
     "workspace.data_source.move_undone": ("info", _transfer_summary(
@@ -991,6 +1079,9 @@ LABELS: dict[str, str] = {
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
     "workspace.data_source.native_query_run": "Ran a native query",
+    "workspace.data_source.contacts_changed": "Changed a data source's data contacts",
+    "workspace.data_source.metadata_changed": "Changed a data source's details",
+    "workspace.data_source.trust_changed": "Changed a data source's status",
     "workspace.data_source.moved": "Moved a data source",
     "workspace.data_source.move_undone": "Undid a data source move",
     "workspace.data_source.transfer_requested": "Requested a data source transfer",
@@ -1074,6 +1165,27 @@ LABELS: dict[str, str] = {
     "rbac.access_request.routed": "Pointed a request to the identity provider",
     "rbac.access_request.fulfilled": "Access arrived through the identity provider",
     "rbac.access_request.escalated": "Sent a waiting request to the Org Admins",
+    "workspace.request.submitted": "Requested a workspace",
+    "workspace.request.resubmitted": "Resubmitted a workspace request",
+    "workspace.request.approved": "Approved a workspace request",
+    "workspace.request.sent_back": "Sent a workspace request back",
+    "workspace.request.declined": "Declined a workspace request",
+    "workspace.request.withdrawn": "Withdrew a workspace request",
+    "rbac.idp_link_request.created": "Asked to link a group to the identity provider",
+    "rbac.idp_link_request.linked": "Linked a group to the identity provider",
+    "rbac.idp_link_request.declined": "Declined linking a group to the identity provider",
+    "rbac.idp_link_request.cancelled": "Cancelled a group's identity-provider link request",
+    "workspace.data_request.submitted": "Asked for data",
+    "workspace.data_request.started": "Started connecting requested data",
+    "workspace.data_request.connected": "Connected requested data",
+    "workspace.data_request.declined": "Declined a data request",
+    "workspace.data_request.withdrawn": "Withdrew a data request",
+    "collaboration.discussion.asked": "Asked a question",
+    "collaboration.discussion.answered": "Accepted an answer",
+    "collaboration.discussion.closed": "Closed a question",
+    "collaboration.discussion.reopened": "Reopened a question",
+    "collaboration.discussion.deleted": "Deleted a question",
+    "collaboration.discussion_message.deleted": "Deleted a message in a conversation",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -1171,6 +1283,8 @@ _CATEGORY_RULES: tuple[tuple[str, str], ...] = tuple(sorted((
     ("workspace.", "data"),
     ("provider.", "data"),
     ("ontology.", "content"),
+    # Questions and conversations about views and data sources: auditor-only.
+    ("collaboration.", "content"),
     ("visualization.", "content"),
     ("view.", "content"),
     ("branding.", "platform"),
@@ -1201,6 +1315,29 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "workspace.data_source.",
     "workspace.datasource.moved",
     "workspace.versioning.",
+    # Every reader of the workspace already sees its data requests.
+    "workspace.data_request.",
+)
+
+#: What a data source's history shows everyone who can read the source
+#: (``GET …/data-sources/{ds}/activity/events``): changes to the source itself. An
+#: allow-list on purpose, like the one above — and narrower: no operations, no queries
+#: anyone ran, nothing about access.
+SOURCE_HISTORY_TYPES: tuple[str, ...] = (
+    "workspace.data_source.added",
+    "workspace.data_source.updated",
+    "workspace.data_source.removed",
+    "workspace.data_source.restored",
+    "workspace.data_source.primary_set",
+    "workspace.data_source.projection_changed",
+    "workspace.data_source.contacts_changed",
+    "workspace.data_source.moved",
+    "workspace.data_source.move_undone",
+    "workspace.data_source.metadata_changed",
+    "workspace.data_source.trust_changed",
+    "workspace.datasource.moved",
+    "workspace.data_request.connected",
+    "workspace.versioning.enabled",
 )
 
 #: Payload keys that name who acted, in the order they are trusted. Payloads
@@ -1337,7 +1474,7 @@ def _subject_user(event_type: str, p: dict) -> Optional[str]:
     """The person an event is ABOUT, when it is about one."""
     if p.get("subject_type") == "user":
         return _str(p.get("subject_id"), 128)
-    if event_type.startswith("rbac.access_request."):
+    if event_type.startswith(("rbac.access_request.", "workspace.request.", "workspace.data_request.")):
         return _str(p.get("requester_id"), 128)
     return _str(p.get("user_id") or p.get("target_user_id"), 128)
 

@@ -64,6 +64,7 @@ import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPa
 
 // UX components
 import { CanvasContextMenu, type ContextMenuAction } from './CanvasContextMenu'
+import { useAskAboutNode } from '@/features/discussions/useAskAboutNode'
 import { compareSelectionAction, menuSelection } from './selectionMenu'
 import { SelectionBar } from './context-view/SelectionBar'
 import { StagedChangesPanel } from './context-view/StagedChangesPanel'
@@ -83,6 +84,7 @@ import { BuildPanel } from './create/buildmode/BuildPanel'
 // Hooks
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useCanvasReveal } from '@/store/canvasReveal'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useElkLayout } from '@/hooks/useElkLayout'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
@@ -336,6 +338,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // Reveal a search hit on this canvas — same flow as ContextViewCanvas
   // (walk ancestor chain, expand each step, then select + scroll).
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
+
+  // "Ask about this" on a node — nothing while questions are off.
+  const askAboutNode = useAskAboutNode()
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({
@@ -718,6 +723,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     },
   })
+  // "Show on canvas" from a question pans here the same way.
+  useCanvasReveal(revealAndFocus)
 
   // Multi-locate: reveal a batch of targets in parallel, then fit the
   // viewport so all of them are on screen. Each reveal runs the same
@@ -1846,6 +1853,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        onAskAboutNode={askAboutNode}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}

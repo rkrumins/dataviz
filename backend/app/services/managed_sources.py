@@ -415,13 +415,13 @@ async def claim_graph_name(session: AsyncSession, provider_id: str, graph_name: 
 async def create_managed_data_source(
     session: AsyncSession, ws_id: str, *, provider_id: str, ontology_id: Optional[str],
     label: str, actor: str, graph_name: Optional[str] = None,
-    origin: Optional[Dict[str, Any]] = None,
+    origin: Optional[Dict[str, Any]] = None, description: Optional[str] = None,
 ) -> Tuple[str, str]:
     """A manual, managed data source on ``provider_id`` — no catalog item, ``ontology_id`` bound —
     committed. Its physical graph is ``graph_name`` (claimed by :func:`claim_graph_name`), else a
     collision-proof ``blank_<ds_id>`` (a full projection seed wipes its named graph, so a minted
     key is never user-supplied). ``origin`` is recorded as ``extra_config.origin`` (what the source
-    was made from). Returns ``(data_source_id, graph_name)``."""
+    was made from), and ``description`` as its description. Returns ``(data_source_id, graph_name)``."""
     from backend.app.db.repositories import data_source_repo
     from backend.common.models.management import DataSourceCreateRequest
 
@@ -433,6 +433,7 @@ async def create_managed_data_source(
     row.graph_name = graph_name
     row.source_mode = "managed"
     row.created_by = actor
+    row.description = (description or "").strip() or None
     if origin is not None:
         row.extra_config = json.dumps({"origin": origin})
     await session.commit()

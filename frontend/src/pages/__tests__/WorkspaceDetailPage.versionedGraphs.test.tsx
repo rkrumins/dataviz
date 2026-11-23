@@ -1,10 +1,11 @@
 /**
  * The workspace page's Versioned graphs tab: offered while version control is on, it holds the
  * workspace's defaults, its graphs and their history (WorkspaceVersionedGraphs has its own spec).
- * Changes staged there survive a look at another tab, whose button says how many. The drafts and
- * reviews policy moved there: Data Sources no longer carries it.
+ * Changes staged there survive a look at another tab, whose tab says how many. The drafts and
+ * reviews policy moved there: the Settings tab keeps the drafts whose owner left, and says where
+ * the policy is now.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -47,6 +48,7 @@ vi.mock('@/components/admin/AdminVersionedGraphs/WorkspaceVersionedGraphs', () =
     ),
 }))
 vi.mock('@/features/reviews/components/WorkspaceReviewsInbox', () => ({ WorkspaceReviewsInbox: () => null }))
+vi.mock('@/components/admin/workspace/overview/WorkspaceOverview', () => ({ WorkspaceOverview: () => null }))
 vi.mock('@/components/admin/workspace/DeletedDataSources', () => ({ DeletedDataSources: () => null }))
 vi.mock('@/components/admin/workspace/AddDataSourceWizard', () => ({ AddDataSourceWizard: () => null }))
 vi.mock('@/components/admin/workspace/DataSourceGridCard', () => ({ DataSourceGridCard: () => null }))
@@ -94,30 +96,32 @@ describe('the workspace page’s Versioned graphs tab', () => {
         renderPage('/workspaces/ws1').unmount()
         versioningOn = false
         renderPage('/workspaces/ws1?tab=versioned-graphs')
-        expect(screen.queryByRole('button', { name: /Versioned graphs/ })).not.toBeInTheDocument()
+        expect(screen.queryByRole('tab', { name: /Versioned graphs/ })).not.toBeInTheDocument()
         expect(screen.queryByTestId('versioned-graphs')).not.toBeInTheDocument()
     })
 
     it('keeps what is staged there while another tab is open, and says how much on its button', async () => {
         renderPage('/workspaces/ws1?tab=versioned-graphs')
         fireEvent.click(await screen.findByRole('button', { name: 'Stage two changes' }))
-        fireEvent.click(screen.getByRole('button', { name: /Data Sources/ }))
+        fireEvent.mouseDown(screen.getByRole('tab', { name: /^Data/ }))
         // Hidden, not gone: the staged changes are still there when it opens again.
-        expect(screen.getByTestId('versioned-graphs').parentElement).not.toBeVisible()
-        expect(screen.getByRole('button', { name: /Versioned graphs/ })).toHaveTextContent('2 not saved')
-        fireEvent.click(screen.getByRole('button', { name: /Versioned graphs/ }))
-        expect(screen.getByTestId('versioned-graphs')).toBeVisible()
+        await waitFor(() => expect(screen.getByTestId('versioned-graphs').parentElement).not.toBeVisible())
+        expect(screen.getByRole('tab', { name: /Versioned graphs/ })).toHaveTextContent('2 not saved')
+        fireEvent.mouseDown(screen.getByRole('tab', { name: /Versioned graphs/ }))
+        await waitFor(() => expect(screen.getByTestId('versioned-graphs')).toBeVisible())
     })
 
     it('opens Data Sources when the tab asks for them (no versioned graph yet)', async () => {
         renderPage('/workspaces/ws1?tab=versioned-graphs')
         fireEvent.click(await screen.findByRole('button', { name: 'Open data sources' }))
-        expect(screen.getByText(/Data sources are the graph databases that feed this workspace/)).toBeInTheDocument()
+        await waitFor(() => expect(screen.getByRole('tab', { name: /^Data/ })).toHaveAttribute('aria-selected', 'true'))
         expect(screen.queryByTestId('versioned-graphs')).not.toBeInTheDocument()
     })
 
-    it('keeps the drafts whose owner left on Data Sources', () => {
-        renderPage('/workspaces/ws1')
+    it('keeps the drafts whose owner left on Settings, which says where the policy went', async () => {
+        renderPage('/workspaces/ws1?tab=settings')
         expect(screen.getByTestId('drafts-owner-left')).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'Versioned graphs' }))
+        expect(await screen.findByTestId('versioned-graphs')).toBeVisible()
     })
 })

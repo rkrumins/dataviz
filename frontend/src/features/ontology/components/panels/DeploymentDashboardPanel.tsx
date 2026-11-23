@@ -35,7 +35,7 @@ import { TablePagination } from '@/components/ui/TablePagination'
 const GROUP_PAGE_SIZE = 10
 /** Matrix cell budget — beyond this the matrix slices workspaces and says so. */
 const MATRIX_MAX_CELLS = 400
-import { WORKSPACE_PALETTES } from '@/components/dashboard/dashboard-constants'
+import { workspaceColor } from '@/lib/workspaceColor'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
@@ -88,9 +88,7 @@ const STATUS_STYLES: Record<string, { text: string; bg: string; border: string; 
 }
 
 function paletteForWorkspace(wsId: string) {
-  let hash = 0
-  for (let i = 0; i < wsId.length; i++) hash = (hash * 31 + wsId.charCodeAt(i)) | 0
-  return WORKSPACE_PALETTES[Math.abs(hash) % WORKSPACE_PALETTES.length]
+  return workspaceColor(wsId)
 }
 
 // ---------------------------------------------------------------------------

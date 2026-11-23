@@ -20,6 +20,7 @@ import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import {
   useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph, useSetGraphFrozen,
 } from '../hooks/useVersioning'
+import { useMayPublish } from '../hooks/useMayPublish'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
@@ -75,6 +76,8 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
   const [forking, setForking] = useState(false)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
+  // Pausing editing advances main's lifecycle: publish, or in the Playground having made the graph.
+  const mayPublish = useMayPublish(wsId, graphId)
   const frozen = resolve.data?.lifecycleState === 'frozen'
   const freeze = useSetGraphFrozen(wsId)
   // The drafts in play; merged and abandoned ones are read only once the Archived tab opens.
@@ -231,7 +234,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, label }
           {freeze.error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400" role="alert">{freeze.error.message}</p>}
         </div>
         {graphId && <DigestChip workspaceId={wsId} graphId={graphId} onOpen={() => openDigest(true)} />}
-        {canManage && canPublish && graphId && (
+        {canManage && mayPublish && graphId && (
           <Button size="sm" variant="secondary" leftIcon={frozen ? Play : Pause} loading={freeze.isPending}
             onClick={() => freeze.mutate({ graphId, frozen: !frozen, expectedRev: resolve.data?.lifecycleRev ?? 0 })}>
             {frozen ? 'Resume editing' : 'Pause editing'}
@@ -493,7 +496,7 @@ function ForkRow({ wsId, fork, parentDataSourceId, canManage, canPublish, forksO
               Open
             </Button>
           )}
-          {forksOn && canPublish && <UpdateFromParentButton wsId={wsId} forkGraphId={fork.graphId} />}
+          {forksOn && (fork.canPublish ?? canPublish) && <UpdateFromParentButton wsId={wsId} forkGraphId={fork.graphId} />}
           {forksOn && (
             <ProposeToParentButton wsId={wsId} forkGraphId={fork.graphId} parentDataSourceId={parentDataSourceId}
               behind={fork.behind ?? 0} />

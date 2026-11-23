@@ -30,6 +30,8 @@ import type { WorkspaceResponse } from '@/services/workspaceService'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
 import { useOntologyVersions } from '../hooks/useOntologies'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { OwnLayerActions } from './OwnLayerActions'
+import { ApproveForEveryone } from './ApproveForEveryone'
 
 import type { SemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 
@@ -40,8 +42,8 @@ interface OntologyDetailHeaderProps {
    *  write-action affordance — Edit / Delete / Publish / Import /
    *  Clone / New Version. Read actions (Export, Find data sources,
    *  Assignments) remain available. */
-  /** What this deployment + this user actually allow. Mirrors the server's gate stack —
-   *  see features/ontology/lib/useSemanticLayerAccess.ts. */
+  /** What this deployment + this user actually allow, for this layer. Mirrors the server's gate
+   *  stack — see features/ontology/lib/useSemanticLayerAccess.ts. */
   access: SemanticLayerAccess
   hasPendingChanges: boolean
   isSaving: boolean
@@ -249,6 +251,9 @@ export function OntologyDetailHeader({
             )}
           </div>
 
+          {access.isOwn && <OwnLayerActions ontology={ontology} access={access} workspaces={workspaces} />}
+          {!access.isOwn && <ApproveForEveryone ontology={ontology} />}
+
           {/* Tier 2: Expandable details */}
           {expanded && (
             <div className="mt-2 space-y-1.5 animate-in slide-in-from-top-1 fade-in duration-150">
@@ -313,8 +318,8 @@ export function OntologyDetailHeader({
                   <ShieldCheck className="w-3.5 h-3.5" />
                   Validate{hasPendingChanges ? ' (save first)' : ''}
                 </DropdownMenu.Item>
-                {/* Clone creates a new draft ontology — manage-only. */}
-                {access.canPublish && (
+                {/* Clone creates a new draft ontology — manage-only, or the maker's own. */}
+                {access.canClone && (
                   <DropdownMenu.Item
                     onClick={onClone}
                     className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] cursor-pointer outline-none transition-colors"
@@ -351,7 +356,7 @@ export function OntologyDetailHeader({
                     Import JSON
                   </DropdownMenu.Item>
                 )}
-                {access.canEdit && !ontology.isSystem && !ontology.isPublished && (
+                {access.canDelete && !ontology.isSystem && !ontology.isPublished && (
                   <>
                     <DropdownMenu.Separator className="h-px bg-glass-border/60 my-1" />
                     <DropdownMenu.Item

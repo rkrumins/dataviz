@@ -546,6 +546,122 @@
       "dependsOn": []
     },
     {
+      "key": "playgroundEnabled",
+      "name": "Playground",
+      "description": "One shared sandbox workspace that anyone who can sign in may join, to build their own graphs from blank and try views out \u2014 without access to any team's workspace or its data.",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "On, everyone who can sign in may join the Playground and create graphs on its sandbox provider, up to the quota you set. Give it a provider of its own, kept apart from production, before turning this on. It needs Version control and Build lineage from scratch, which turning it on here turns on too.",
+      "impactWhenOff": "Try the Playground disappears and the server refuses joining it and starting new graphs in it. People already in it keep their graphs and views, which stay in the workspace; nothing is deleted.",
+      "impactWhenOn": null,
+      "sortOrder": 8,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "POST /playground/join \u2014 refused while off",
+        "GET /playground \u2014 says the Playground is off, and offers nothing",
+        "GET /playground/samples, POST /playground/samples/{sample_id} \u2014 refused while off",
+        "POST /playground/graphs (start a graph for your own data) \u2014 refused while off",
+        "POST /{ws_id}/versioning/blank-graphs in the Playground \u2014 starting a new graph there is refused",
+        "GET /playground/models and /playground/models/{id}/template \u2014 the semantic layers a member may build on, and their import templates \u2014 refused while off",
+        "POST /playground/models/match (with Suggest semantic layers) \u2014 scoring the layers on offer against a file \u2014 refused while off",
+        "POST /playground/layers, /playground/layers/{id}/share and /playground/layers/{id}/types \u2014 making, sharing and adding types to a semantic layer of your own \u2014 refused while off",
+        "Editing, publishing, deleting, importing into, exporting and reading the history of a Playground maker's own semantic layer without the semantic-layer switches \u2014 while off, the org's rules apply to it, and nobody but a platform admin changes it"
+      ],
+      "uiSurfaces": [
+        "Playground \u2014 in the sidebar, and on the Dashboard and Workspaces, opening it for anyone",
+        "Setting the Playground up, on Workspaces, for platform administrators",
+        "Start from a sample, under Your experiments in the Playground",
+        "Bring your own data and Start a blank graph, under Your experiments (with Version control and Build lineage from scratch)",
+        "Your first steps \u2014 the Playground's builder checklist",
+        "The Playground chip on a view's header",
+        "The blank-graph wizard's way back to a sample or your own data, in the Playground"
+      ],
+      "stillAllowed": [
+        "People already in the Playground keep their graphs and views; nothing is deleted",
+        "Semantic layers of their own are kept, and still read by them and the graphs built on them",
+        "Leaving the Playground",
+        "Moving an experiment out into a workspace, or asking to \u2014 its own semantic layer goes with it"
+      ],
+      "dependsOn": [
+        "versioningEnabled",
+        "blankModelsEnabled"
+      ]
+    },
+    {
+      "key": "workspaceRequestsEnabled",
+      "name": "Workspace requests",
+      "description": "Let anyone who can sign in ask for a workspace of their own \u2014 its name, what it is for, the teammates to add and the Playground graphs to bring along \u2014 for Org and Super Admins to approve, send back with a question, or decline.",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Approving creates the workspace, makes the requester its Workspace Admin and their teammates its Members, and moves the Playground graphs they chose into it with their views.",
+      "impactWhenOff": "Request a workspace and the requests screens disappear, the server refuses new and resubmitted requests, and nobody is reminded of waiting ones. Requests already sent are kept and come back when it is turned on again (the API still reads, withdraws and answers them); workspaces made from them keep everything. Nothing is deleted.",
+      "impactWhenOn": null,
+      "sortOrder": 9,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /workspace-requests \u2014 refused while off",
+        "PUT /me/workspace-requests/{id} (resubmitting one sent back) \u2014 refused while off",
+        "Reminders and escalations of requests left waiting pause"
+      ],
+      "uiSurfaces": [
+        "Request a workspace \u2014 the wizard, from the Playground, Dashboard and Workspaces",
+        "Workspace requests \u2014 your own, and Workspaces \u2192 Requests for platform and org admins"
+      ],
+      "stillAllowed": [
+        "Requests already sent are kept, and shown again when it is turned back on",
+        "Through the API: reading, withdrawing and answering requests already sent",
+        "Workspaces made from a request keep everything; nothing is deleted"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "dataRequestsEnabled",
+      "name": "Data requests",
+      "description": "Let anyone who can read a workspace ask for data to be connected to it \u2014 where it lives (Snowflake, Databricks, a dbt project, a file\u2026), what of it, why, by when and who knows it \u2014 for the platform team to take on, connect, or decline.",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Org and Super Admins answer every workspace's requests under Workspaces \u2192 Requests. A workspace's admins may start and connect that workspace's requests, and a source's named Owner or Stewards may connect a request as that source. Nobody answers their own.",
+      "impactWhenOff": "Ask for data and the data requests screens disappear, the server refuses new requests, and nobody is reminded of waiting ones. Requests already sent are kept and come back when it is turned on again (the API still reads, withdraws and answers them); data sources connected for them are kept. Nothing is deleted.",
+      "impactWhenOn": null,
+      "sortOrder": 10,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /admin/workspaces/{ws_id}/data-requests \u2014 refused while off",
+        "Reminders and escalations of requests left waiting pause"
+      ],
+      "uiSurfaces": [
+        "Ask for data \u2014 the wizard, from a workspace's Data \u2192 Sources and its Overview",
+        "Data requests \u2014 a workspace's Data \u2192 Sources, and Workspaces \u2192 Requests for platform and org admins"
+      ],
+      "stillAllowed": [
+        "Requests already sent are kept, and shown again when it is turned back on",
+        "Through the API: reading, withdrawing and answering requests already sent",
+        "Data sources connected for a request are kept; nothing is deleted"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "versioningEnabled",
       "name": "Version control",
       "description": "Drafts, reviews, publishing, history and rollback for data sources \u2014 the whole change-management workflow.",
@@ -565,7 +681,8 @@
       "posture": "capability",
       "serverGates": [
         "versioning_gate.py \u2014 every /graph write (drafts, commits, merges, reverts)",
-        "versioned_write_provider.py \u2014 backstop on the write-through path"
+        "versioned_write_provider.py \u2014 backstop on the write-through path",
+        "GET /playground/samples, POST /playground/samples/{sample_id}, POST /playground/graphs \u2014 a starter graph is a versioned graph (and a sample's first version and example draft)"
       ],
       "uiSurfaces": [
         "Canvas edit mode, drafts, reviews and history",
@@ -689,6 +806,36 @@
       ]
     },
     {
+      "key": "importInMemoryReconcile",
+      "name": "Reconcile imports in memory",
+      "description": "An import compares its file with the graph in memory, a batch at a time, and writes into Postgres only the rows that change something. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/docs/versioning-import-export#3f-reconciling-in-memory",
+      "adminHint": "Turn this on where imports send whole snapshots that change little each time. The import workers need the memory for it: about 12 bits per name the file holds (about 250 MB for a 4 GB file), with 8 GiB per worker pod. Results are the same either way; only what is written to get there differs.",
+      "impactWhenOff": "Every row of an import's file is staged in Postgres before it is compared with the graph, as before. An import already under way keeps the way it started.",
+      "impactWhenOn": "A file sent again with a few rows changed \u2014 a full snapshot \u2014 stages only those rows whole: the rest are recorded in a few bytes each, so the import writes a fraction of the staged rows and WAL, and finishes sooner. The file is read twice, nodes then edges. Imports into an empty graph, and into types matched by team keys, run as before. Applies to imports that start after it is turned on.",
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Whether a new import job decides its unchanged rows in memory, a batch at a time, and stages them slim \u2014 reading the file twice, nodes then edges \u2014 or stages every row whole"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Every import, with the same result: only how much it writes into Postgres differs",
+        "An import already under way finishes the way it started"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
       "key": "traceEnabled",
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
@@ -740,11 +887,13 @@
         "GET /graph/export/plan and /stream \u2014 the same for a data source without version control",
         "POST /graphs/{id}/exports \u2014 start an export job",
         "GET /graphs/{id}/exports/{job}/download \u2014 take the file",
-        "POST /graph/search/exports and GET /graph/search/exports/{id}/download \u2014 write, then take, every match of a search"
+        "POST /graph/search/exports and GET /graph/search/exports/{id}/download \u2014 write, then take, every match of a search",
+        "POST /graph/member-sets, GET /graph/member-sets/{id}/members and /download \u2014 resolve in full, list, then take everything a set of seeds reaches"
       ],
       "uiSurfaces": [
         "Export controls on the canvas and the context-view menu",
-        "Export on a search's matches"
+        "Export on a search's matches",
+        "Everything it reaches\u2026 on the trace dock, and a search's matches with their sources & consumers"
       ],
       "stillAllowed": [
         "Reading, filtering and tracing every graph in the product",
@@ -849,11 +998,14 @@
       "enforcedServerSide": true,
       "posture": "capability",
       "serverGates": [
-        "POST /blank-graphs \u2014 provision a lineage model with no data source"
+        "POST /blank-graphs \u2014 provision a lineage model with no data source",
+        "GET /playground/samples, POST /playground/samples/{sample_id} \u2014 a sample is a blank model",
+        "POST /playground/graphs \u2014 a graph started for your own data is a blank model"
       ],
       "uiSurfaces": [
         "Blank-model option in the View wizard",
-        "'Start from scratch' on the canvas empty state"
+        "'Start from scratch' on the canvas empty state",
+        "Start from a sample, in the Playground"
       ],
       "stillAllowed": [
         "Every blank model already built keeps working and stays editable",
@@ -970,6 +1122,42 @@
       ]
     },
     {
+      "key": "dataSourceMetadataEnabled",
+      "name": "Data source details",
+      "description": "Let people describe each data source \u2014 what it is, links to read more, and tags \u2014 and say whether to trust it: how sensitive it is (Public, Internal, Confidential or Restricted) and whether it is Certified, In review or Deprecated. Each source also shows how it was connected and its history.",
+      "category": "governance",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A preview. Anyone who manages a source edits its description, links and tags; its sensitivity and status are set by the workspace's admins and the source's named Owner and Stewards. Turning this on also lets people name a source's data contacts, as Questions and conversations does.",
+      "impactWhenOff": "Details can no longer be changed, and the About card, the trust badges, the tags filter and a source's Activity tab disappear. Everything already written is kept and comes back when it is turned on again. Nothing is deleted.",
+      "impactWhenOn": null,
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata \u2014 description, links and tags",
+        "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/metadata/trust \u2014 sensitivity and status",
+        "GET /admin/workspaces/{ws_id}/data-sources/{ds_id}/activity/events \u2014 a source's history",
+        "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts \u2014 naming data contacts (open while this or conversationsEnabled is on)"
+      ],
+      "uiSurfaces": [
+        "About this data source \u2014 a data source's Overview, with its edit and status forms",
+        "Trust badges \u2014 the data source drawer, the Sources grid and a view's Built on",
+        "Tags and the filter bar \u2014 the Sources grid; description and tags in the search palette",
+        "Activity \u2014 a data source's history tab"
+      ],
+      "stillAllowed": [
+        "Reading a source's details (GET \u2026/metadata), with nothing editable",
+        "Details already written stay on every data source and view read; nothing is deleted"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "nodeSortingEnabled",
       "name": "Node sorting controls",
       "description": "Let people choose how nodes are ordered inside a Context View layer \u2014 alphabetical, by type, by size, or a hand-arranged custom order (drag to reorder in a draft).",
@@ -1024,7 +1212,8 @@
         "DELETE /admin/ontologies/{id} \u2014 delete",
         "POST /admin/ontologies/{id}/restore",
         "POST /admin/ontologies/{id}/new-version",
-        "POST /admin/ontologies/import and /{id}/import \u2014 importing IS editing"
+        "POST /admin/ontologies/import and /{id}/import \u2014 importing IS editing",
+        "POST /admin/ontologies/{id}/approve \u2014 approving a workspace's layer for everyone"
       ],
       "uiSurfaces": [
         "Create / Edit / Delete controls on the semantic layer pages",
@@ -1034,7 +1223,8 @@
         "Publishing",
         "Cloning",
         "Exporting",
-        "Reading every layer"
+        "Reading every layer",
+        "A Playground maker's own layers, which they edit whatever this says"
       ],
       "dependsOn": []
     },
@@ -1057,14 +1247,15 @@
       "enforcedServerSide": true,
       "posture": "security",
       "serverGates": [
-        "Every semantic-layer write (create, update, delete, restore, new-version, publish, clone, import) \u2014 a non-admin is refused unless this is on"
+        "Every semantic-layer write (create, update, delete, restore, new-version, publish, clone, import, approve) \u2014 a non-admin is refused unless this is on"
       ],
       "uiSurfaces": [
         "Edit controls are hidden from non-admins on the semantic layer pages"
       ],
       "stillAllowed": [
         "Admins can always manage layers",
-        "Everyone can read layers"
+        "Everyone can read layers",
+        "A Playground maker manages their own layers whatever this says"
       ],
       "dependsOn": [
         "semanticLayerEditMode"
@@ -1097,7 +1288,8 @@
       ],
       "stillAllowed": [
         "Editing layers in the UI editor",
-        "Exporting"
+        "Exporting",
+        "A Playground maker importing into their own layer, or starting one from a layer file"
       ],
       "dependsOn": [
         "semanticLayerEditMode"
@@ -1128,7 +1320,8 @@
         "Export button on the semantic layer pages"
       ],
       "stillAllowed": [
-        "Reading and editing layers in the UI"
+        "Reading and editing layers in the UI",
+        "A Playground maker exporting their own layers"
       ],
       "dependsOn": []
     },
@@ -1151,7 +1344,8 @@
       "enforcedServerSide": true,
       "posture": "capability",
       "serverGates": [
-        "POST /admin/ontologies/suggest \u2014 score layers against a graph"
+        "POST /admin/ontologies/suggest \u2014 score layers against a graph",
+        "POST /playground/models/match \u2014 score the Playground's layers against a file"
       ],
       "uiSurfaces": [
         "Suggest-from-graph step in the onboarding and data-source wizards",
@@ -1189,7 +1383,8 @@
         "History and audit tabs on a semantic layer"
       ],
       "stillAllowed": [
-        "History is hidden, not deleted \u2014 every version is retained and returns when this is switched back on"
+        "History is hidden, not deleted \u2014 every version is retained and returns when this is switched back on",
+        "A Playground maker reading the history of their own layers"
       ],
       "dependsOn": []
     },
@@ -1217,6 +1412,48 @@
       "uiSurfaces": [],
       "stillAllowed": [
         "Announcements are hidden, not deactivated \u2014 turning this back on restores them"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "conversationsEnabled",
+      "name": "Questions and conversations",
+      "description": "Let anyone who can open a view or a data source ask the people behind it about it \u2014 its owners and the people named as its data contacts \u2014 openly or privately, mention colleagues who can open it too, answer and accept answers, and watch a view or a source for new questions. Workspace admins name each source's Owner and Stewards.",
+      "category": "notifications",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A preview. A question reaches only people who can open what it is about; private questions are seen by the people in them, the view's owners or the source's data contacts, and the workspace's admins.",
+      "impactWhenOff": "Questions, profiles and question counts disappear, and nobody can ask, reply, edit, watch or (unless Data source details is on) change a source's data contacts; reminders and watcher notices stop. Everything already said is kept and comes back when it is turned on again (the API still reads, closes and deletes it), and deleted messages are still blanked after 30 days. Nothing else is deleted.",
+      "impactWhenOn": null,
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /discussions/subjects/{type}/{id} \u2014 asking is refused while off",
+        "POST /discussions/{id}/messages, PATCH /discussions/{id}/messages/{mid} \u2014 replying and editing",
+        "PUT /discussions/subjects/{type}/{id}/watch, PUT /discussions/{id}/me (following) \u2014 watching",
+        "PUT /admin/workspaces/{ws_id}/data-sources/{ds_id}/contacts \u2014 naming data contacts (open while this or dataSourceMetadataEnabled is on)",
+        "Watcher notices, reminders and escalations pause (deleted messages are still blanked after 30 days)"
+      ],
+      "uiSurfaces": [
+        "Questions \u2014 the view header, the Explorer preview, a data source's Questions tab and Watch",
+        "Ask about this \u2014 a canvas node's menu; question marks on canvas rows",
+        "Question counts on view and data source cards",
+        "Who to ask and Data contacts \u2014 a view's About sheet, a data source's Overview",
+        "Profiles \u2014 /me/profile and /people/{id}, links from people's names, the menu under your avatar, your account settings, the command palette",
+        "Conversations and Watching \u2014 your profile; the Inbox's All conversations",
+        "Analytics \u2014 the Collaboration tab's figures, and its findings on the Overview"
+      ],
+      "stillAllowed": [
+        "Conversations already started are kept, and shown again when it is turned back on",
+        "Through the API: reading them, marking read, muting, unfollowing, unwatching, closing and deleting",
+        "GET /people/{id} \u2014 a person's profile, through the API",
+        "Data contacts already named are kept; nothing is deleted"
       ],
       "dependsOn": []
     },
@@ -1337,6 +1574,107 @@
         "Search's Layer filter places by the shared rule either way"
       ],
       "dependsOn": []
+    },
+    {
+      "key": "viewMembershipEnabled",
+      "name": "Narrow: chosen entities and what they reach",
+      "description": "Narrow a Context View to the entities you choose and what they reach \u2014 what is inside them, their sources and consumers one step out or the whole way \u2014 worked out on the server, so it is the same answer for everyone and for any script. Save as view keeps a narrowing as a view of its own: a list of its members, auto-updating or a snapshot.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/guide/exploring-graph#show-only-some-entities-and-what-they-reach",
+      "adminHint": "Sources and consumers also need Lineage trace on. Each narrowing is one resolution, cached and shared by everyone who asks the same question, and paced by the trace's fair-share bucket when fair share is on.",
+      "impactWhenOff": "Narrow and Save as view (as a list) are not offered, and POST /graph/members, /graph/members/plan, /views/from-members and a list view's membership routes are refused. Views already made as lists keep the members they last had and stop updating; an auto-updating one says its updates are paused, and catches up when it is opened with this on again. Other views, searches, Isolate and traces work exactly as before. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/members \u2014 resolves a scope: seeds, what is inside them, their sources and consumers",
+        "POST /graph/members/plan \u2014 previews what a list view would hold",
+        "POST /views/from-members \u2014 makes a list view of a narrowing",
+        "GET/PUT /views/{id}/membership, POST /views/{id}/membership/members and /views/{id}/membership/refresh \u2014 a list view's members and its updates",
+        "GET /views/{id}/subsets \u2014 with searchViewsEnabled, either lists a view's subsets (a list view that follows it is one)"
+      ],
+      "uiSurfaces": [
+        "Context View: Narrow\u2026 on a selection, Narrow to this in an entity's right-click menu, Narrow\u2026 on Advanced Search's matches, and the Narrowed chip",
+        "Save as view\u2026 as a list, from the Narrowed chip, Narrow and search results",
+        "A list view's Auto-updating / Snapshot chip, which reads Updates paused while this is off"
+      ],
+      "stillAllowed": [
+        "Other views, searches, Isolate and traces work as before. Views already made as lists keep the members they last had (POST /graph/view-members still pages them), and stop updating until this is on again"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "searchViewsEnabled",
+      "name": "Subset views: a search's matches as a view",
+      "description": "Save an Advanced Search's matches inside a view as a view of their own \u2014 always current, any size, created at once \u2014 laid out like the view it came from and shared like any other view.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/guide/managing-views#subset-views-a-searchs-matches-as-a-view",
+      "adminHint": "Turn it on once the web app that ships with it is deployed. Each layer of a subset view is one search, shared by every view and viewer asking the same question, served from its last complete answer for a few minutes after the data changes (DEEP_SEARCH_VIEW_FEED_REUSE), and scanned in a lane of its own (DEEP_SEARCH_VIEW_FEED_LANE) paced by the view-feed fair-share bucket.",
+      "impactWhenOff": "Save as view is not offered on search results, subset views can't be made or edited, and their layers say the preview is off instead of listing matches. Nothing saved changes, and every other view works as before. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/search/view-feed \u2014 a page of one layer of a subset view",
+        "POST /views/from-search and PUT /views/{id}/search \u2014 making and editing subset views",
+        "GET /views/{id}/subsets \u2014 with viewMembershipEnabled, either lists a view's subsets"
+      ],
+      "uiSurfaces": [
+        "Advanced Search: Save as view\u2026 on a search's matches",
+        "Context View: a subset view's layers and its Subset of chip"
+      ],
+      "stillAllowed": [
+        "Every other view, search and export works as before; subset views already saved keep their definition, and say the preview is off instead of listing matches"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "revisionViewerEnabled",
+      "name": "Revision history viewer: the graph as it was",
+      "description": "Open a data source's published graph as it was at any past revision, or at the end of a past month, read-only, with what changed since \u2014 and compare any two revisions. Needs Version control.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turn it on once the web app that ships with it is deployed. A past revision is the published graph with everything changed since put back: it costs what changed since, never the whole graph \u2014 about 1.2 KB of memory per changed entity in each API process while it is open \u2014 and one more than GRAPHVER_REVISION_REWIND_MAX changes back (100,000 by default) can be compared and exported but not opened.",
+      "impactWhenOff": "The graph opens only as it is now: a view's History shows each revision's changes, but no past revision can be opened on the canvas or compared with another. Nothing is changed or deleted. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 6,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Every /graph read that names a past revision (?asOfSeq=) \u2014 the canvas, its nodes, edges, children and rollups as they were then"
+      ],
+      "uiSurfaces": [
+        "Reviews \u2192 History: Open on canvas, Compare with now, Compare with\u2026 and Copy link on a revision, the month picker, and two revisions compared",
+        "The canvas: the past-revision banner, its ?rev= link, and a comparison highlighted"
+      ],
+      "stillAllowed": [
+        "Every read of the graph as it is now, and every draft",
+        "History: each revision's changes, and Undo and Restore for the people who can publish",
+        "The change lists of drafts, revisions and reviews"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
     }
   ],
   "categories": [
@@ -1502,10 +1840,14 @@
     "apiKeySsoRoundTripStepUp": false,
     "serviceAccountUnmanagedGrace": "14",
     "workspaceDirectoryEnabled": false,
+    "playgroundEnabled": false,
+    "workspaceRequestsEnabled": false,
+    "dataRequestsEnabled": false,
     "versioningEnabled": true,
     "forksEnabled": false,
     "residencyEnabled": false,
     "candidateKeysEnabled": false,
+    "importInMemoryReconcile": false,
     "traceEnabled": true,
     "graphExportEnabled": true,
     "nativeQueryEnabled": true,
@@ -1514,6 +1856,7 @@
     "viewPortabilityEnabled": false,
     "viewExportEnabled": true,
     "viewImportEnabled": true,
+    "dataSourceMetadataEnabled": false,
     "nodeSortingEnabled": true,
     "semanticLayerEditMode": true,
     "semanticLayerNonAdminEditing": true,
@@ -1522,10 +1865,14 @@
     "semanticLayerAutoSuggest": true,
     "semanticLayerVersionHistory": true,
     "announcementsEnabled": true,
+    "conversationsEnabled": false,
     "toursEnabled": false,
     "canvasLayerFoldEnabled": false,
     "canvasLineageRollupEnabled": false,
-    "placementContractEnabled": false
+    "placementContractEnabled": false,
+    "viewMembershipEnabled": false,
+    "searchViewsEnabled": false,
+    "revisionViewerEnabled": false
   },
   "experimentalNotice": {
     "title": "Early access",

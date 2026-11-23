@@ -93,7 +93,7 @@ from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
 from backend.app.services import graph_reads as _graph_reads
-from backend.app.services import graph_waits
+from backend.app.services import graph_waits, playground_policy
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -256,14 +256,31 @@ async def get_context_engine(
     )
 
 
+async def require_playground_maker(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    user=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """A write into a draft in the Playground is on a graph the caller made (403
+    ``playground_not_yours``): another member's graph is theirs to read, not to change. The
+    request's own session (``requires()`` holds it already); a no-op elsewhere."""
+    if ws_id and branchId and branchId != "main":
+        await playground_policy.assert_graph_maker(session, ws_id, dataSourceId, user.id, claims)
+
+
 async def require_main_writer(
     ws_id: Optional[str] = None,
     engine: ContextEngine = Depends(get_context_engine),
     claims: PermissionClaims = Depends(get_permission_claims),
+    _draft_writer: None = Depends(require_playground_maker),
 ) -> None:
     """A write with no draft on a versioned data source commits to its main, and a person needs
     publish for that (``require_publish_for_main``). A write to a fork's data source, on its main or
-    a draft, needs forks on first. Any other draft write, and any write to a data source without
+    a draft, needs forks on first. A draft write in the Playground is on a graph the caller made
+    (``require_playground_maker``). Any other draft write, and any write to a data source without
     version control, is left to the route's other gates."""
     if (engine._data_source_id or "").startswith("dsfork_"):
         await require_forks_enabled()
@@ -4364,7 +4381,7 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False)
     return ops, assigned
 
 
-@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True, dependencies=[Depends(require_edit_mode), Depends(require_ws_manage)])
+@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True, dependencies=[Depends(require_edit_mode), Depends(require_ws_manage), Depends(require_playground_maker)])
 async def apply_graph_changes(
     ws_id: str,
     request: GraphChangesRequest = Body(...),
@@ -4375,7 +4392,8 @@ async def apply_graph_changes(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Apply a batch of canvas edits to a draft as ONE atomic commit — the unified
-    'save' path for draft editing (create/update/delete, nodes and edges, together).
+    'save' path for draft editing (create/update/delete, nodes and edges, together). In the
+    Playground, only on a graph the caller made (``require_playground_maker``).
 
     ``update`` payloads are partial and merged server-side onto the entity's current
     draft state, so the client sends only what changed. Deleting a node cascades to its

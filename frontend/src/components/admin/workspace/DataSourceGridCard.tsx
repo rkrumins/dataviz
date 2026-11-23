@@ -7,6 +7,16 @@ import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { getProviderLogo } from '../ProviderLogos'
 import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
+import type { DataSourceReadinessResponse } from '@/services/aggregationService'
+import { usePersonaMode } from '@/store/persona'
+import { useFeature } from '@/store/features'
+import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
+import { TrustBadges } from '@/components/dataSource/TrustBadges'
+import type { SubjectCount } from '@/services/discussionsService'
+import { QuestionCountChip } from '@/features/discussions/QuestionCountChip'
+
+/** Tags shown on a card; the rest are counted. */
+const TAGS_SHOWN = 3
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -47,6 +57,8 @@ interface DataSourceGridCardProps {
     ds: DataSourceResponse
     stats?: DataSourceStats
     providerInfo?: DataSourceProviderInfo
+    /** Live readiness, when the page has it: the card's status sentence. */
+    readiness?: DataSourceReadinessResponse
     ontologyName?: string
     ontologyVersion?: number
     ontologyPublished?: boolean
@@ -54,12 +66,32 @@ interface DataSourceGridCardProps {
     isSelected: boolean
     onSelect: () => void
     onSetPrimary?: () => void
+    /** Narrow the grid to the sources with this tag. */
+    onTagClick?: (tag: string) => void
+    /** Its questions, counted by the page for all its sources; none while the switch is off. */
+    questions?: SubjectCount
+    /** Open the source on its Questions tab. */
+    onOpenQuestions?: () => void
+}
+
+const PROVIDER_NAMES: Record<string, string> = { neo4j: 'Neo4j', falkordb: 'FalkorDB', datahub: 'DataHub' }
+
+/** Can I use this source right now — in a few words, with a colour. */
+function sourceStatus(ds: DataSourceResponse, readiness?: DataSourceReadinessResponse): { label: string; dot: string; text: string; title?: string } {
+    const status = readiness?.aggregationStatus ?? ds.aggregationStatus
+    if (ds.isActive === false) return { label: 'Paused', dot: 'bg-gray-400', text: 'text-ink-muted' }
+    if (status === 'failed') return { label: 'Last refresh didn’t finish', dot: 'bg-red-400', text: 'text-red-600 dark:text-red-400', title: readiness?.message }
+    if (readiness?.projectorCurrent === false) return { label: 'Behind its latest changes', dot: 'bg-red-400', text: 'text-red-600 dark:text-red-400', title: readiness?.message }
+    if (status === 'running' || status === 'pending') return { label: 'Refreshing…', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-600 dark:text-amber-400' }
+    if (readiness && !readiness.canCreateViews) return { label: 'Not ready for views yet', dot: 'bg-slate-400', text: 'text-ink-muted', title: readiness.message }
+    return { label: 'Ready to explore', dot: 'bg-emerald-400', text: 'text-emerald-600 dark:text-emerald-400', title: readiness?.message }
 }
 
 function DataSourceGridCardBase({
     ds,
     stats,
     providerInfo,
+    readiness,
     ontologyName,
     ontologyVersion,
     ontologyPublished,
@@ -67,29 +99,49 @@ function DataSourceGridCardBase({
     isSelected,
     onSelect,
     onSetPrimary,
+    onTagClick,
+    questions,
+    onOpenQuestions,
 }: DataSourceGridCardProps) {
     const ProviderLogo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
+    const technical = usePersonaMode() === 'technical'
+    const details = useFeature(DATA_SOURCE_METADATA_FEATURE)
+    const description = details ? (ds.description || ds.catalogDescription) : null
+    const tags = details ? (ds.tags ?? []) : []
+    const name = ds.label || providerInfo?.catalogItemName || 'Unnamed source'
+    const state = sourceStatus(ds, readiness)
+    const statCell = (value: React.ReactNode, label: string, title?: string) => (
+        <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={title}>
+            <div className="text-sm font-bold text-ink">{value}</div>
+            <div className="text-[10px] text-ink-muted">{label}</div>
+        </div>
+    )
+    const computing = stats?.computing
+    const counted = (n?: number) =>
+        computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(n ?? 0) : '\u2014'
 
     return (
         <div
-            onClick={onSelect}
             className={cn(
-                'border rounded-xl cursor-pointer transition-all duration-200 group overflow-hidden',
+                'relative border rounded-2xl transition-all duration-200 group overflow-hidden',
                 isSelected
                     ? 'border-indigo-500/40 bg-indigo-500/[0.03] dark:bg-indigo-500/[0.05] shadow-md ring-1 ring-indigo-500/20'
                     : 'border-glass-border bg-canvas-elevated hover:border-indigo-500/20 hover:shadow-md hover:-translate-y-0.5',
             )}
         >
-            {/* Provider accent bar at top */}
-            <div className={cn(
-                "h-1 w-full",
-                providerInfo?.providerType === 'neo4j' ? 'bg-gradient-to-r from-blue-500 to-blue-400' :
-                providerInfo?.providerType === 'falkordb' ? 'bg-gradient-to-r from-purple-500 via-pink-500 to-orange-400' :
-                providerInfo?.providerType === 'datahub' ? 'bg-gradient-to-r from-blue-600 via-orange-400 to-red-500' :
-                'bg-gradient-to-r from-indigo-500 to-violet-500'
-            )} />
+            {/* The whole card opens the source — one button under the content, so
+                the card is reachable by keyboard and Set primary stays its own control. */}
+            <button
+                type="button"
+                onClick={onSelect}
+                aria-pressed={isSelected}
+                aria-label={`Open ${name}`}
+                className="absolute inset-0 z-0 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
+            />
 
-            <div className="p-4">
+            <div className="h-1 w-full bg-gradient-to-r from-indigo-500 to-violet-500 opacity-80" />
+
+            <div className="relative p-4 pointer-events-none">
                 {/* Header */}
                 <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center gap-3 min-w-0">
@@ -106,100 +158,114 @@ function DataSourceGridCardBase({
                             )}
                         </div>
                         <div className="min-w-0">
-                            <h4 className="text-sm font-bold text-ink truncate">
-                                {ds.label || providerInfo?.catalogItemName || 'Unnamed Source'}
-                            </h4>
-                            {providerInfo && (
-                                <div className="flex items-center gap-1.5 mt-0.5">
-                                    <span className="text-[10px] text-ink-muted font-medium">
-                                        {providerInfo.providerName}
-                                    </span>
-                                    {providerInfo.sourceIdentifier && (
-                                        <>
-                                            <span className="text-[10px] text-ink-muted/50">/</span>
-                                            <span className="text-[10px] text-ink-muted font-mono truncate max-w-[120px]">
-                                                {providerInfo.sourceIdentifier}
-                                            </span>
-                                        </>
-                                    )}
-                                </div>
-                            )}
-                            {!providerInfo && (
-                                <p className="text-[10px] text-ink-muted font-mono truncate">{ds.catalogItemId}</p>
+                            <h4 className="text-sm font-bold text-ink truncate">{name}</h4>
+                            {technical ? (
+                                providerInfo ? (
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                        <span className="text-[10px] text-ink-muted font-medium">{providerInfo.providerName}</span>
+                                        {providerInfo.sourceIdentifier && (
+                                            <>
+                                                <span className="text-[10px] text-ink-muted/50">/</span>
+                                                <span className="text-[10px] text-ink-muted font-mono truncate max-w-[120px]">{providerInfo.sourceIdentifier}</span>
+                                            </>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <p className="text-[10px] text-ink-muted font-mono truncate">{ds.catalogItemId}</p>
+                                )
+                            ) : providerInfo && (
+                                <p className="text-[11px] text-ink-muted mt-0.5">From {PROVIDER_NAMES[providerInfo.providerType] ?? providerInfo.providerName}</p>
                             )}
                         </div>
                     </div>
                     <div className="flex flex-col items-end gap-1 shrink-0">
                         {ds.isPrimary && (
-                            <span className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                            <span title="The source this workspace opens by default" className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
                                 <Star className="w-2.5 h-2.5" /> Primary
                             </span>
                         )}
                         {!ds.isPrimary && onSetPrimary && (
                             <button
+                                type="button"
                                 onClick={(e) => { e.stopPropagation(); onSetPrimary() }}
-                                className="px-2 py-0.5 text-[10px] font-medium rounded-full text-ink-muted hover:text-amber-500 hover:bg-amber-500/10 transition-colors opacity-0 group-hover:opacity-100"
+                                className="pointer-events-auto px-2 py-0.5 text-[10px] font-medium rounded-full text-ink-muted hover:text-amber-500 hover:bg-amber-500/10 transition-colors opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                             >
-                                Set Primary
+                                Make primary
                             </button>
                         )}
                     </div>
                 </div>
 
-                {/* Status + Ontology — operational status (not the opt-in
-                    aggregation state, which is a per-source detail). */}
-                <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                        <span className={cn('flex items-center gap-1.5 text-[11px] font-semibold', ds.isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted')}>
-                            <span className={cn('w-2 h-2 rounded-full', ds.isActive ? 'bg-emerald-400' : 'bg-gray-400')} />
-                            {ds.isActive ? 'Active' : 'Inactive'}
-                        </span>
-                        <SourceModeChip mode={resolveSourceMode(ds)} />
-                        <NodeIdentityBadge value={ds.identityProperty} />
-                    </div>
-                    {ontologyName && (
-                        <span className="flex items-center gap-1 text-[11px] text-ink-muted">
-                            <GitBranch className="w-3 h-3" />
-                            {ontologyName} v{ontologyVersion}
-                            {ontologyPublished ? (
-                                <span className="px-1 py-0.5 text-[8px] font-bold rounded bg-emerald-500/10 text-emerald-500">PUB</span>
-                            ) : (
-                                <span className="px-1 py-0.5 text-[8px] font-bold rounded bg-amber-500/10 text-amber-500">DRAFT</span>
-                            )}
-                        </span>
+                {/* What it is, in its own words (else the catalog's). */}
+                {description && (
+                    <p title={description} className="-mt-1 mb-3 line-clamp-2 text-xs leading-relaxed text-ink-secondary">{description}</p>
+                )}
+
+                {/* Can I use it — and may I rely on it? */}
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                    <span title={state.title} className={cn('flex items-center gap-1.5 text-[11px] font-semibold', state.text)}>
+                        <span className={cn('w-2 h-2 rounded-full', state.dot)} />
+                        {state.label}
+                    </span>
+                    {(technical || (details && (ds.trustStatus || ds.classification))) && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            {details && <TrustBadges trustStatus={ds.trustStatus} classification={ds.classification} tip={false} />}
+                            {technical && <SourceModeChip mode={resolveSourceMode(ds)} />}
+                            {technical && <NodeIdentityBadge value={ds.identityProperty} />}
+                        </div>
                     )}
                 </div>
 
-                {/* Stats */}
+                {tags.length > 0 && (
+                    <ul aria-label="Tags" className="mb-3 flex flex-wrap items-center gap-1.5">
+                        {tags.slice(0, TAGS_SHOWN).map(t => (
+                            <li key={t}>
+                                {onTagClick ? (
+                                    <button type="button" onClick={e => { e.stopPropagation(); onTagClick(t) }}
+                                        aria-label={`Show the sources tagged ${t}`}
+                                        className="pointer-events-auto rounded-full border border-accent-lineage/20 bg-accent-lineage/10 px-2 py-0.5 text-[10px] font-semibold text-accent-lineage transition-colors hover:bg-accent-lineage/20">
+                                        {t}
+                                    </button>
+                                ) : (
+                                    <span className="rounded-full border border-accent-lineage/20 bg-accent-lineage/10 px-2 py-0.5 text-[10px] font-semibold text-accent-lineage">{t}</span>
+                                )}
+                            </li>
+                        ))}
+                        {tags.length > TAGS_SHOWN && (
+                            <li title={tags.slice(TAGS_SHOWN).join(', ')} className="text-[10px] font-semibold text-ink-muted">+{tags.length - TAGS_SHOWN}</li>
+                        )}
+                    </ul>
+                )}
+
+                {/* What's in it, and what's built on it */}
                 <div className="grid grid-cols-3 gap-2 mb-3">
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={stats?.computing ? 'Stats are being computed \u2014 check back shortly.' : undefined}>
-                        <div className="text-sm font-bold text-ink">
-                            {stats?.computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(stats.nodeCount) : '\u2014'}
-                        </div>
-                        <div className="text-[9px] text-ink-muted uppercase tracking-wider">Nodes</div>
-                    </div>
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={stats?.computing ? 'Stats are being computed \u2014 check back shortly.' : undefined}>
-                        <div className="text-sm font-bold text-ink">
-                            {stats?.computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(stats.edgeCount) : '\u2014'}
-                        </div>
-                        <div className="text-[9px] text-ink-muted uppercase tracking-wider">Edges</div>
-                    </div>
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">
-                        <div className="text-sm font-bold text-ink">{viewCount}</div>
-                        <div className="text-[9px] text-ink-muted uppercase tracking-wider">Views</div>
-                    </div>
+                    {statCell(viewCount, viewCount === 1 ? 'view' : 'views')}
+                    {statCell(counted(stats?.nodeCount), technical ? 'nodes' : 'things', computing ? 'Being counted \u2014 check back shortly.' : 'Entities in this source')}
+                    {statCell(counted(stats?.edgeCount), technical ? 'edges' : 'connections', computing ? 'Being counted \u2014 check back shortly.' : 'Relationships between them')}
                 </div>
 
                 {/* Footer */}
-                <div className="flex items-center justify-between text-[10px] text-ink-muted">
-                    <div className="flex items-center gap-3">
-                        <span>Updated {new Date(ds.updatedAt).toLocaleDateString()}</span>
-                        {ds.lastAggregatedAt && (
-                            <span>&middot; Aggregated {new Date(ds.lastAggregatedAt).toLocaleDateString()}</span>
+                <div className="flex items-center justify-between gap-2 text-[10px] text-ink-muted">
+                    <span className="flex items-center gap-1 min-w-0 truncate">
+                        {ontologyName ? (
+                            <>
+                                <GitBranch className="w-3 h-3 shrink-0" />
+                                <span className="truncate">{technical ? `${ontologyName} v${ontologyVersion}` : ontologyName}</span>
+                                {technical && (ontologyPublished ? (
+                                    <span className="px-1 py-0.5 text-[8px] font-bold rounded bg-emerald-500/10 text-emerald-500">PUB</span>
+                                ) : (
+                                    <span className="px-1 py-0.5 text-[8px] font-bold rounded bg-amber-500/10 text-amber-500">DRAFT</span>
+                                ))}
+                            </>
+                        ) : (
+                            <span>Updated {new Date(ds.updatedAt).toLocaleDateString()}</span>
                         )}
-                    </div>
-                    <span className="flex items-center gap-0.5 text-indigo-500 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
-                        Inspect <ChevronRight className="w-3 h-3" />
+                    </span>
+                    <span className="flex items-center gap-2 shrink-0">
+                        <span className="flex items-center gap-0.5 text-indigo-500 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                            Open <ChevronRight className="w-3 h-3" />
+                        </span>
+                        {onOpenQuestions && <QuestionCountChip count={questions} onOpen={onOpenQuestions} className="pointer-events-auto" />}
                     </span>
                 </div>
             </div>

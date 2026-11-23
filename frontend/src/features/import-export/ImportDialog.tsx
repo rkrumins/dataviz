@@ -5,97 +5,69 @@
  * the action) that mirrors the ViewWizard's scale. Drop a file → choose how it reconciles → the
  * server imports it onto your working **draft** → review the added/updated/deleted changes in the
  * normal Changes UI and Publish/PR. It's the manual create/edit flow, at scale.
+ *
+ * Two front doors, one import: the standard file goes up as it is, and the simple files — a things
+ * CSV and a connections CSV (both at once), or one JSON file — are read here and go up as the
+ * standard's rows (`fileRows`), their types matched to the graph's by id, then by name. What was
+ * recognised is said before anything is sent, with the types the graph's data model lacks.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowRight, CheckCircle2, Download, FileUp, Info, Loader2, Lock, Plus, Pencil,
-  RefreshCw, ShieldAlert, Sparkles, Trash2, UploadCloud, X,
+  RefreshCw, Sparkles, Trash2, UploadCloud, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  detectFormat, getImport, getImportPreview, getImportSettings, importInParts, importLimit, jobProgressText,
-  MAX_IMPORT_BYTES, pollJob, queuePosition, resumeNote, templateDownloadUrl, triggerBrowserDownload,
+  getImportSettings, jobProgressText, queuePosition, resumeNote, templateDownloadUrl, triggerBrowserDownload,
   type ImportFormat, type ImportPreviewRow, type ImportSettings, type ImportSummary, type Job, type ReconcileMode,
-  type RefusedRows,
 } from '@/services/importExportApiService'
 import { prettyBytes } from './format'
 import { RefusedRowsPanel } from './RefusedRowsPanel'
-import { formatIdentifier, identifierLabel, MATCH_KINDS, parseIdentifier, type Match } from './identifier'
+import { formatIdentifier, identifierLabel, parseIdentifier, type Match } from './identifier'
+import { matchTypes, whereOf, type FileRead, type TypeMap, type TypeRef } from './fileRows'
+import { downloadSimpleTemplate, useFileIntake, type FileIntake } from './useFileIntake'
+import { blocked, byUrnFix, heldForRows, matchedNothing, refusedOf, useImportRun } from './useImportRun'
+import { ImportOptions, matchNote } from './ImportOptions'
+
+/** The graph's types, which the simple files' types are matched to. */
+export interface GraphTypes {
+  entity: TypeRef[]
+  relationship: TypeRef[]
+}
 
 export interface ImportDialogProps {
   wsId: string
   graphId: string
   branchId?: string
   viewId?: string
+  /** The graph's data model: the simple files' types are matched to it, and the ones it lacks named. */
+  types?: GraphTypes
   onClose: () => void
   onReviewChanges?: (branchId: string) => void
   /** The import committed to the draft — with what it did. */
   onImported?: (summary: ImportSummary | null) => void
 }
 
-type Phase = 'choose' | 'running' | 'done' | 'failed'
-
 const FORMATS: { id: ImportFormat; label: string }[] = [
   { id: 'xlsx', label: 'Excel' }, { id: 'csv', label: 'CSV' }, { id: 'tsv', label: 'TSV' },
   { id: 'ndjson', label: 'NDJSON' }, { id: 'json', label: 'JSON' },
 ]
 
-const UNSUPPORTED: Record<string, string> = {
-  xls: 'legacy Excel file', numbers: 'Numbers file', parquet: 'Parquet file', zip: 'Zip archive',
-}
-
-function unsupportedReason(name: string): string | null {
-  const ext = name.toLowerCase().split('.').pop() || ''
-  return UNSUPPORTED[ext]
-    ? `${UNSUPPORTED[ext]}s aren't supported yet. Please open it and 'Save As' CSV, then import that file.`
-    : null
-}
-
-/** Why a property can't be matched by (Import is then off), what matching by it first costs, or why
- *  a fork's default isn't its parent's. */
-function matchNote(match: Match | null, settings: ImportSettings | null): { block: boolean; text: string } | null {
-  if (!match && settings?.effective.sources.identifier === 'fork') {
-    return { block: false, text: 'This fork matches by Entity ID: its parent’s default is a property, and a '
-      + 'fork can’t match by one yet.' }
+/** The simple files' types as the graph's: the ones it has by id or name; any other as written
+ *  (the server refuses its rows, saying why). */
+function typeMapOf(read: FileRead | null, types?: GraphTypes): TypeMap {
+  if (!read || !types) return { entity: {}, relationship: {} }
+  return {
+    entity: matchTypes(read.summary.thingTypes.map(([t]) => t), types.entity),
+    relationship: matchTypes(read.summary.connectionTypes.map(([t]) => t), types.relationship),
   }
-  if (match?.kind !== 'prop') return null
-  const name = match.name.trim()
-  if (!name) return { block: true, text: 'Name the property its rows are matched by.' }
-  if (!settings) return null
-  const known = settings.matchingProperties.find((p) => p.name === name)
-  if (known?.status === 'ready') return null
-  if (!known && settings.matchingProperties.length >= settings.maxMatchingProperties) {
-    return { block: true, text: `This graph's imports already match by ${settings.maxMatchingProperties} `
-      + 'properties, its most: match by one of them, by Entity ID or by URN.' }
-  }
-  return { block: false, text: `No import has matched by ${name} yet: this one indexes it first, reading `
-    + 'every item once (minutes on a large graph). Later ones only catch up.' }
 }
 
-/** Refused before any of it uploads: the server holds the same limits. */
-function tooLargeReason(size: number, format: ImportFormat): string | null {
-  const cap = importLimit(format)
-  if (size <= cap) return null
-  return format === 'json' || format === 'xlsx'
-    ? `This file is ${prettyBytes(size)}. A${format === 'json' ? ' JSON' : 'n Excel'} file is read whole, so one import `
-      + `of it can be at most ${prettyBytes(cap)}. Export NDJSON or CSV instead: they can be up to ${prettyBytes(MAX_IMPORT_BYTES)}.`
-    : `This file is ${prettyBytes(size)}, and one import can be at most ${prettyBytes(cap)}. `
-      + 'Split it into smaller files and import them one after another: each adds to the same draft.'
-}
-
-export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onReviewChanges, onImported }: ImportDialogProps) {
-  const [file, setFile] = useState<File | null>(null)
-  const [format, setFormat] = useState<ImportFormat>('csv')
-  const [autoDetected, setAutoDetected] = useState(false)
+export function ImportDialog({ wsId, graphId, branchId, viewId, types, onClose, onReviewChanges, onImported }: ImportDialogProps) {
+  const intake = useFileIntake()
+  const run = useImportRun()
   const [reconcileMode, setReconcileMode] = useState<ReconcileMode>('upsert')
-  const [phase, setPhase] = useState<Phase>('choose')
-  const [job, setJob] = useState<Job | null>(null)
-  const [resultBranch, setResultBranch] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [dragging, setDragging] = useState(false)
-  const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([])
-  const [upload, setUpload] = useState<{ sent: number; total: number } | null>(null)
   // What its rows find their items by: null takes the graph's default, which the server applies.
   const [match, setMatch] = useState<Match | null>(null)
   // A replace by a property: delete only the items that hold it (replaceScope=keyed).
@@ -107,73 +79,30 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     getImportSettings(wsId, graphId).then((got) => { if (live) setSettings(got) }).catch(() => {})
     return () => { live = false }
   }, [wsId, graphId])
-  // Leaving stops an upload in flight (choosing the same file again resumes it), and stops
-  // following the import (it carries on on the server).
-  const uploadRun = useRef<AbortController | null>(null)
-  useEffect(() => () => uploadRun.current?.abort(), [])
 
-  const handleFile = useCallback((f: File | null) => {
-    setFile(f)
-    setAutoDetected(false)
-    if (f) detectFormat(f).then((fmt) => { setFormat(fmt); setAutoDetected(true) }).catch(() => {})
-  }, [])
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setDragging(false)
-    const f = e.dataTransfer.files?.[0]
-    if (f) handleFile(f)
-  }, [handleFile])
-
-  const warning = file ? unsupportedReason(file.name) ?? tooLargeReason(file.size, format) : null
+  const phase = run.phase === 'idle' ? 'choose' : run.phase
+  const typeMap = useMemo(() => typeMapOf(intake.read, types), [intake.read, types])
   const note = matchNote(match, settings)
+  const job = run.job
 
   /** ``past``: a replace that was held, sent again into its draft — past the replace guard, or
    *  (``refused``) without the rows it refused, or (``identifier``) matching by another key. */
   async function start(past?: { branchId: string; refused?: boolean; identifier?: string }) {
-    if (!file) return
-    setPhase('running')
-    setError(null)
-    setPreviewRows([])
-    setJob(null)
-    setUpload(null)
-    const run = new AbortController()
-    uploadRun.current = run
-    try {
-      const created = await importInParts(wsId, graphId, file, {
-        format, reconcileMode, branchId: past?.branchId ?? branchId, viewId, signal: run.signal,
-        identifier: past?.identifier ?? (match ? formatIdentifier(match) : undefined),
-        allowMassDelete: !!past && !past.refused && !past.identifier,
-        maxRefusedRows: past?.refused ? '-1' : undefined,
-        replaceScope: reconcileMode === 'replace' && keyedOnly ? 'keyed' : undefined,
-        onProgress: (sent, total) => setUpload({ sent, total }),
-      })
-      setResultBranch(created.branchId)
-      const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob, signal: run.signal })
-      if (done.status === 'failed' || done.status === 'cancelled') {
-        setJob(done)
-        setError(done.errorMessage
-          || (done.status === 'cancelled' ? 'The import was cancelled.' : 'The import could not be completed.'))
-        setPhase('failed')
-      } else {
-        setJob(done)
-        setPhase('done')
-        onImported?.((done.summary as ImportSummary | undefined) ?? null)
-        // Pull a sample of the resolved CHANGES so the dialog can preview exactly what was staged
-        // (added / updated / deleted) and surface anything that couldn't be applied, with reasons.
-        const sum = done.summary as ImportSummary
-        if (sum && sum.new + sum.updated + sum.deleted + sum.invalid > 0) {
-          getImportPreview(wsId, graphId, created.jobId)
-            .then((p) => setPreviewRows(p.sample))
-            .catch(() => {})
-        }
-      }
-    } catch (e) {
-      if (run.signal.aborted) return            // the dialog closed
-      setError(e instanceof Error ? e.message : 'The import could not be completed.')
-      setPhase('failed')
+    const up = intake.upload(typeMap)
+    if (!up) return
+    const done = await run.start({ wsId, graphId }, up.file, {
+      format: up.format, reconcileMode, branchId: past?.branchId ?? branchId, viewId,
+      identifier: past?.identifier ?? (match ? formatIdentifier(match) : undefined),
+      allowMassDelete: !!past && !past.refused && !past.identifier,
+      maxRefusedRows: past?.refused ? '-1' : undefined,
+      replaceScope: reconcileMode === 'replace' && keyedOnly ? 'keyed' : undefined,
+    })
+    if (done && done.status !== 'failed' && done.status !== 'cancelled') {
+      onImported?.((done.summary as ImportSummary | undefined) ?? null)
     }
   }
+
+  const ready = !!intake.read && !intake.reading && !intake.warning && !note?.block
 
   return (
     <>
@@ -204,25 +133,27 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
         <div className="flex-1 overflow-y-auto">
           {phase === 'choose' && (
             <ChooseStep
-              file={file} setFile={handleFile} dragging={dragging} setDragging={setDragging} onDrop={onDrop}
-              inputRef={inputRef} reconcileMode={reconcileMode} setReconcileMode={setReconcileMode}
-              format={format} setFormat={(f) => { setFormat(f); setAutoDetected(false) }} autoDetected={autoDetected}
-              warning={warning} viewScoped={!!viewId}
-              match={match} setMatch={setMatch} graphDefault={settings?.effective.identifier ?? null} note={note}
-              keyedOnly={keyedOnly} setKeyedOnly={setKeyedOnly}
+              intake={intake} inputRef={inputRef} types={types}
+              options={
+                <ImportOptions
+                  reconcile={{ mode: reconcileMode, onChange: setReconcileMode, viewScoped: !!viewId }}
+                  match={match} onMatch={setMatch} graphDefault={settings?.effective.identifier ?? null} note={note}
+                  keyedOnly={{ value: keyedOnly, onChange: setKeyedOnly }}
+                />
+              }
               onDownloadTemplate={(fmt) => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, fmt), `import-template.${fmt}`)}
             />
           )}
-          {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
-          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows}
+          {phase === 'running' && <RunningStep job={job} upload={run.upload} fileName={intake.files.map((f) => f.name).join(', ')} />}
+          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={run.previewRows}
             identifier={job?.identifier ?? null} wsId={wsId} graphId={graphId} jobId={job?.jobId ?? null} job={job} />}
-          {phase === 'failed' && <FailedStep error={error} job={job} wsId={wsId} graphId={graphId} />}
+          {phase === 'failed' && <FailedStep error={run.error} job={job} wsId={wsId} graphId={graphId} />}
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between gap-3 px-8 py-4 border-t border-glass-border/50 bg-black/[0.01] dark:bg-white/[0.01] flex-shrink-0">
           {phase === 'done' ? (
-            <button onClick={() => { setFile(null); setJob(null); setPhase('choose') }} className="px-3 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+            <button onClick={() => { intake.clear(); run.reset() }} className="px-3 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
               Import another
             </button>
           ) : <span />}
@@ -231,13 +162,13 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               {phase === 'done' ? 'Close' : 'Cancel'}
             </button>
             {phase === 'choose' && (
-              <button onClick={() => void start()} disabled={!file || !!warning || !!note?.block}
+              <button onClick={() => void start()} disabled={!ready}
                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-indigo-500/20">
                 <UploadCloud className="w-4 h-4" /> Import
               </button>
             )}
             {phase === 'done' && (
-              <button onClick={() => resultBranch && onReviewChanges?.(resultBranch)}
+              <button onClick={() => run.resultBranch && onReviewChanges?.(run.resultBranch)}
                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20">
                 Review changes <ArrowRight className="w-4 h-4" />
               </button>
@@ -265,7 +196,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               </button>
             )}
             {phase === 'failed' && (
-              <button onClick={() => setPhase('choose')}
+              <button onClick={run.reset}
                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
                 <RefreshCw className="w-4 h-4" /> Try again
               </button>
@@ -278,39 +209,65 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   )
 }
 
+/** The simple files' types the graph's data model has none of: their rows would be refused. */
+function missingTypes(read: FileRead, types: GraphTypes | undefined) {
+  if (!types) return { entity: [] as string[], relationship: [] as string[] }
+  const known = typeMapOf(read, types)
+  return {
+    entity: read.summary.thingTypes.map(([t]) => t).filter((t) => !known.entity[t]),
+    relationship: read.summary.connectionTypes.map(([t]) => t).filter((t) => !known.relationship[t]),
+  }
+}
+
+const count = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`
+
+/** What was recognised in the files, before anything is sent: their rows, the types the graph
+ *  lacks, and rows that would be refused. */
+function FileNote({ read, files, types }: { read: FileRead; files: File[]; types?: GraphTypes }) {
+  if (read.format === 'server') return null
+  const holds = [read.things.length > 0 && 'things', read.connections.length > 0 && 'connections'].filter(Boolean).join(' and ')
+  const what = read.format === 'standard' ? 'Standard import file'
+    : `${holds ? holds[0].toUpperCase() + holds.slice(1) : 'Simple'} file${files.length > 1 ? 's' : ''}`
+  const missing = missingTypes(read, types)
+  const lacks = [
+    ...missing.entity.map((t) => `${t} (things)`),
+    ...missing.relationship.map((t) => `${t} (connections)`),
+  ]
+  return (
+    <div role="note" aria-label="What the import reads" className="space-y-1.5 rounded-lg border border-indigo-200/70 dark:border-indigo-800/40 bg-indigo-50/60 dark:bg-indigo-950/20 px-3 py-2">
+      <p className="text-[11px] text-ink">
+        <span className="font-semibold">{what}:</span> {count(read.things.length, 'thing')}, {count(read.connections.length, 'connection')}
+      </p>
+      {lacks.length > 0 && (
+        <p className="text-[11px] text-amber-700 dark:text-amber-400">
+          This graph’s data model has no {lacks.join(', ')} type: those rows will be refused. Add the
+          type{lacks.length === 1 ? '' : 's'} to its semantic layer first, or change the file.
+        </p>
+      )}
+      {read.errors.length > 0 && (
+        <div className="text-[11px] text-amber-700 dark:text-amber-400">
+          <p>{count(read.errors.length, 'row')} may be refused:</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {read.errors.slice(0, 3).map((e) => (
+              <li key={`${e.section}:${e.index}:${e.field}`}>{whereOf(e)} · {e.field}: {e.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── choose (two columns: guide | action) ─────────────────────────────────────
-function ChooseStep(props: {
-  file: File | null
-  setFile: (f: File | null) => void
-  dragging: boolean
-  setDragging: (d: boolean) => void
-  onDrop: (e: React.DragEvent) => void
+function ChooseStep({ intake, inputRef, types, options, onDownloadTemplate }: {
+  intake: FileIntake
   inputRef: React.RefObject<HTMLInputElement | null>
-  reconcileMode: ReconcileMode
-  setReconcileMode: (m: ReconcileMode) => void
-  format: ImportFormat
-  setFormat: (f: ImportFormat) => void
-  autoDetected: boolean
-  warning: string | null
-  viewScoped: boolean
+  types?: GraphTypes
+  /** How it reconciles and what it matches by. */
+  options: React.ReactNode
   onDownloadTemplate: (format: ImportFormat) => void
-  match: Match | null
-  setMatch: (m: Match) => void
-  /** The graph's default identifier; null while it isn't known (the server applies it). */
-  graphDefault: string | null
-  note: { block: boolean; text: string } | null
-  keyedOnly: boolean
-  setKeyedOnly: (v: boolean) => void
 }) {
-  const {
-    file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode,
-    format, setFormat, autoDetected, warning, viewScoped, match, setMatch, graphDefault, note,
-    keyedOnly, setKeyedOnly,
-  } = props
-  const fallback = graphDefault ? parseIdentifier(graphDefault) : null
-  const shown = match ?? fallback
-  // A replace that deletes only what holds the property: the property's name.
-  const keyed = keyedOnly && shown?.kind === 'prop' ? shown.name.trim() || 'this property' : null
+  const { files, read, reading, errors, warning, dragging, setDragging, format, setFormat, autoDetected } = intake
   return (
     <div className="grid md:grid-cols-2">
       {/* Left — the guide (persistent context) */}
@@ -322,13 +279,13 @@ function ChooseStep(props: {
         <ol className="space-y-3">
           <Step n={1} title="Download a starter template" body="Every column your data can carry, with an example row of each type. To change what's there, export it instead." />
           <Step n={2} title="Edit it anywhere" body="Excel, Sheets, or any editor. Each property is its own column — edit a cell to change it, add a prop.<name> column for a new one." />
-          <Step n={3} title="Upload it here" body="Excel, CSV, TSV, NDJSON or JSON — the format is detected automatically." />
+          <Step n={3} title="Upload it here" body="Excel, CSV, TSV, NDJSON or JSON — the format is detected automatically. Or a things CSV and a connections CSV, together." />
           <Step n={4} title="Review every change" body="See exactly what's new, updated or deleted on a draft before it's live." />
           <Step n={5} title="Publish or open a PR" body="Nothing touches the published model until you approve it." />
         </ol>
         <div className="space-y-1.5">
           <button
-            onClick={() => props.onDownloadTemplate('xlsx')}
+            onClick={() => onDownloadTemplate('xlsx')}
             className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-indigo-200/80 dark:border-indigo-800/50 bg-white/70 dark:bg-white/[0.04] text-indigo-600 dark:text-indigo-400 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
           >
             <Download className="w-4 h-4" /> Download a starter template
@@ -338,9 +295,21 @@ function ChooseStep(props: {
             {(['csv', 'ndjson'] as const).map((fmt, i) => (
               <span key={fmt}>
                 {i > 0 && ' · '}
-                <button onClick={() => props.onDownloadTemplate(fmt)}
+                <button onClick={() => onDownloadTemplate(fmt)}
                   className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
                   {fmt === 'csv' ? 'CSV' : 'NDJSON'}
+                </button>
+              </span>
+            ))}
+          </p>
+          <p className="text-center text-[11px] text-ink-muted">
+            Or the simple files, a key, type and name a row:{' '}
+            {(['things.csv', 'connections.csv'] as const).map((name, i) => (
+              <span key={name}>
+                {i > 0 && ' · '}
+                <button onClick={() => downloadSimpleTemplate(name)}
+                  className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                  {name}
                 </button>
               </span>
             ))}
@@ -356,15 +325,14 @@ function ChooseStep(props: {
 
       {/* Right — the action */}
       <div className="px-8 py-6 space-y-5">
-        <input ref={inputRef} type="file" className="hidden"
-          onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])} />
+        <input ref={inputRef} type="file" multiple className="hidden" onChange={intake.onPick} />
 
-        {!file ? (
+        {!files.length ? (
           <button
             onClick={() => inputRef.current?.click()}
             onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
             onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
+            onDrop={intake.onDrop}
             className={cn(
               'w-full rounded-2xl border-2 border-dashed px-6 py-12 flex flex-col items-center gap-3 transition-all duration-200',
               dragging
@@ -383,25 +351,35 @@ function ChooseStep(props: {
           </button>
         ) : (
           <div className="space-y-3 animate-in fade-in slide-in-from-bottom-1 duration-200">
-            <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-4 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 flex items-center justify-center flex-shrink-0">
-                <FileUp className="w-5 h-5 text-indigo-500" />
+            {files.map((file) => (
+              <div key={`${file.name}:${file.lastModified}`} className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-4 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 flex items-center justify-center flex-shrink-0">
+                  <FileUp className="w-5 h-5 text-indigo-500" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-ink truncate">{file.name}</p>
+                  <p className="text-[11px] text-ink-muted mt-0.5">{prettyBytes(file.size)}</p>
+                </div>
+                <button onClick={() => intake.remove(file)} aria-label={`Remove ${file.name}`} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold text-ink truncate">{file.name}</p>
-                <p className="text-[11px] text-ink-muted mt-0.5">{prettyBytes(file.size)}</p>
-              </div>
-              <button onClick={() => setFile(null)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
-                <X className="w-4 h-4" />
+            ))}
+            {read?.format === 'simple' && files.length < 2 && !(read.things.length && read.connections.length) && (
+              <button onClick={() => inputRef.current?.click()}
+                className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                Add a {read.connections.length ? 'things' : 'connections'} file too
               </button>
-            </div>
+            )}
 
+            {reading && <p className="text-[11px] text-ink-muted flex items-center gap-1.5"><Loader2 className="w-3 h-3 animate-spin" /> Reading…</p>}
+            {read && <FileNote read={read} files={files} types={types} />}
             {warning ? (
               <div className="flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
                 <p className="text-[11px] text-amber-700 dark:text-amber-400">{warning}</p>
               </div>
-            ) : (
+            ) : read?.passthrough && (
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-xs font-medium text-ink-secondary">File format</label>
@@ -420,83 +398,13 @@ function ChooseStep(props: {
             )}
           </div>
         )}
-
-        <div>
-          <label className="block text-xs font-medium text-ink-secondary mb-2">How should it reconcile?</label>
-          <div className="space-y-2">
-            <ModeCard active={reconcileMode === 'upsert'} onClick={() => setReconcileMode('upsert')}
-              icon={<Sparkles className="w-4 h-4" />} title="Add & update" tone="indigo"
-              desc="Creates new items and updates matching ones. Never deletes — safe default." />
-            <ModeCard active={reconcileMode === 'replace'} onClick={() => setReconcileMode('replace')}
-              icon={<ShieldAlert className="w-4 h-4" />} title="Replace (authoritative)" tone="amber"
-              desc={keyed
-                ? `Removes ${viewScoped ? "this view's" : 'the'} items that have ${keyed} and aren't in your file; items without it are left alone.`
-                : viewScoped
-                ? "The file is the source of truth for this view — its items missing from the file are deleted."
-                : "The file becomes the source of truth — items missing from it are deleted."} />
+        {errors.length > 0 && (
+          <div role="alert" className="space-y-1 rounded-lg border border-rose-200 dark:border-rose-800/50 bg-rose-50/60 dark:bg-rose-950/20 px-3 py-2">
+            {errors.map((e) => <p key={e} className="text-[11px] text-rose-700 dark:text-rose-400">{e}</p>)}
           </div>
-          {reconcileMode === 'replace' && (
-            <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2 animate-in fade-in duration-150">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
-              <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                {viewScoped
-                  ? "Only entities in this view can be deleted — the rest of the data source is untouched. You'll review the exact count before publishing."
-                  : "You'll see exactly what would be deleted in the review before anything is published."}
-              </p>
-            </div>
-          )}
-        </div>
+        )}
 
-        <div>
-          <label className="block text-xs font-medium text-ink-secondary mb-2">Match existing items by</label>
-          <div role="radiogroup" aria-label="Match existing items by"
-            className="flex items-center gap-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] p-1">
-            {MATCH_KINDS.map((m) => (
-              <button key={m.kind} role="radio" aria-checked={shown?.kind === m.kind}
-                onClick={() => shown?.kind !== m.kind && setMatch({ kind: m.kind, name: m.kind === 'prop' ? (shown?.name ?? '') : '' })}
-                className={cn('flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors',
-                  shown?.kind === m.kind ? 'bg-white dark:bg-white/10 text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
-                {m.label}{fallback?.kind === m.kind && <>{' '}<span className="font-normal text-ink-muted">· default</span></>}
-              </button>
-            ))}
-          </div>
-          {shown?.kind === 'prop' && (
-            <>
-              <input aria-label="Property name" placeholder="external_id" value={shown.name}
-                onChange={(e) => setMatch({ ...shown, kind: 'prop', name: e.target.value })}
-                className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border text-[12px] font-mono text-ink focus:outline-none focus:border-indigo-500/50" />
-              <label className="mt-2 flex items-start gap-2 text-[11px] text-ink-muted leading-relaxed cursor-pointer">
-                <input type="checkbox" checked={!!shown.orUrn}
-                  onChange={(e) => setMatch({ ...shown, kind: 'prop', orUrn: e.target.checked })}
-                  className="mt-0.5 accent-indigo-500" />
-                <span>
-                  <span className="font-medium text-ink-secondary">Rows without it: find them by their urn.</span>{' '}
-                  For an item your source has no id for, such as a top-level container. An item found
-                  by its urn takes the property, so the next import finds it by the property.
-                </span>
-              </label>
-              {reconcileMode === 'replace' && (
-                <label className="mt-1.5 flex items-start gap-2 text-[11px] text-ink-muted leading-relaxed cursor-pointer">
-                  <input type="checkbox" checked={keyedOnly} onChange={(e) => setKeyedOnly(e.target.checked)}
-                    className="mt-0.5 accent-amber-500" />
-                  <span>
-                    <span className="font-medium text-ink-secondary">Delete only items that have this property.</span>{' '}
-                    Items made in the app or by another source, which never had it, are left alone.
-                  </span>
-                </label>
-              )}
-            </>
-          )}
-          <p className="text-[11px] text-ink-muted mt-1.5 leading-relaxed">
-            {shown ? MATCH_KINDS.find((m) => m.kind === shown.kind)!.help
-              : 'This graph’s default applies, unless you choose another.'}
-          </p>
-          {note && (
-            <p className={cn('text-[11px] mt-1 leading-relaxed', note.block ? 'text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>
-              {note.text}
-            </p>
-          )}
-        </div>
+        {options}
       </div>
     </div>
   )
@@ -511,33 +419,6 @@ function Step({ n, title, body }: { n: number; title: string; body: string }) {
         <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">{body}</p>
       </div>
     </li>
-  )
-}
-
-function ModeCard(props: {
-  active: boolean; onClick: () => void; icon: React.ReactNode; title: string; desc: string; tone: 'indigo' | 'amber'
-}) {
-  const activeRing = props.tone === 'indigo'
-    ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
-    : 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/20 shadow-sm shadow-amber-500/10'
-  const activeChip = props.tone === 'indigo'
-    ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-500'
-    : 'bg-amber-100 dark:bg-amber-900/50 text-amber-500'
-  return (
-    <button onClick={props.onClick}
-      className={cn('w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
-        props.active ? activeRing : 'border-glass-border hover:border-glass-border-hover')}>
-      <div className="flex items-center gap-3">
-        <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0',
-          props.active ? activeChip : 'bg-black/5 dark:bg-white/5 text-ink-muted')}>
-          {props.icon}
-        </div>
-        <div className="flex-1">
-          <span className="text-sm font-semibold text-ink">{props.title}</span>
-          <p className="text-[11px] text-ink-muted mt-0.5">{props.desc}</p>
-        </div>
-      </div>
-    </button>
   )
 }
 
@@ -735,38 +616,6 @@ function Stat({ n, label, icon, tone }: { n: number; label: string; icon: React.
   )
 }
 
-// ── failed ───────────────────────────────────────────────────────────────────
-/** A replace the replace guard refused: nothing deleted, its rows on the draft. */
-function blocked(job: Job | null): boolean {
-  return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'mass_delete_blocked'
-}
-
-/** The rows a job refused, as its summary reports them, if any were. */
-function refusedOf(job: Job | null): RefusedRows | null {
-  return (job?.summary as ImportSummary | null | undefined)?.refused ?? null
-}
-
-/** A replace held because rows of its file were refused: nothing deleted, its other rows on the draft. */
-function heldForRows(job: Job | null): boolean {
-  return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'rows_refused'
-}
-
-/** A replace stopped after its first rows, which found almost nothing by its identifier: nothing
- *  deleted, those rows on the draft. Sent with allowMassDelete, it goes on. */
-function matchedNothing(job: Job | null): boolean {
-  return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'identifier_matched_nothing'
-}
-
-/** For a job matched by a property alone whose refused rows have a urn but not the property: the
- *  identifier that finds them by their urn (`prop.<name>,urn`); else null. */
-function byUrnFix(job: Job | null): string | null {
-  const ident = job?.identifier
-  const hasUrn = refusedOf(job)?.hints?.by_urn ?? 0
-  if (!ident || !hasUrn) return null
-  const m = parseIdentifier(ident)
-  return m.kind === 'prop' && !m.orUrn ? formatIdentifier({ ...m, orUrn: true }) : null
-}
-
 /** For a job `byUrnFix` finds a fix for: how many of its refused rows their urn would find, and what
  *  "Find them by their urn" does. Nothing for any other job. */
 function ByUrnNote({ job }: { job: Job | null }) {
@@ -782,6 +631,7 @@ function ByUrnNote({ job }: { job: Job | null }) {
   )
 }
 
+// ── failed ───────────────────────────────────────────────────────────────────
 function FailedStep({ error, job, wsId, graphId }: {
   error: string | null
   job: Job | null

@@ -231,6 +231,28 @@ Features**. All six are on by default.
 | **Suggest from graph** | **Suggest from Graph** and the match percentages disappear; people choose a layer by hand |
 | **Layer history & audit** | The **History** tab disappears. Nothing is deleted — every version is still kept |
 
+### Layers of one's own, and layers a workspace owns
+
+Most semantic layers belong to the whole organization, and the rules above decide
+who changes them. Two kinds belong to someone narrower:
+
+* **A Playground member's own layer** — started blank, copied from an approved
+  layer, imported from a layer file, or made from a file in the Playground. Only
+  its maker (and the Playground's admins) changes and publishes it, whatever the
+  switches above say; the editor shows **Yours** on it. Its maker can **Share with
+  the Playground** so others build on it, read-only. See
+  [Playground](/guide/playground#your-own-semantic-layers).
+* **A workspace's layer** — a member's own layer that moved into a workspace with
+  a graph. That workspace's data engineers change it, under the rules above.
+  **Approve for everyone** makes it an organization-wide layer.
+
+Playground members can see the organization's published, organization-wide layers
+— their types and fields, never anyone's data — so they can build on them there.
+Layers kept to one workspace and system layers stay hidden from them.
+
+The **History** tab's Activity Log names who created, changed, published and
+deleted each version.
+
 ## History and audit
 
 The **History** tab has a **Version Timeline** — every version of the layer —

@@ -5,7 +5,8 @@
  * they may, and the server refuses a save they may not make.
  *
  * Shares the version list's and the freshness poll's queries with the switcher and the canvas bar,
- * so it asks the server nothing more.
+ * so it asks the server nothing more. `canPublish` is the server's word on publishing it straight
+ * away (the Playground's makers publish their own graphs), undefined when it gave none.
  */
 import { useAuthStore } from '@/store/auth'
 import type { Branch } from '@/services/versioningApiService'
@@ -14,7 +15,7 @@ import { useBranchFreshness, useBranches } from './useVersioning'
 
 export function useActiveDraftAccess(
   wsId: string | undefined, graphId: string | null | undefined, viewId: string | null, branchId: string | null,
-): { draft: Branch | null; canWrite: boolean; canManage: boolean } {
+): { draft: Branch | null; canWrite: boolean; canManage: boolean; canPublish: boolean | undefined } {
   const me = useAuthStore((s) => s.user?.id)
   const branchesQ = useBranches(wsId, viewId ? graphId : null, viewId)
   const freshness = useBranchFreshness(wsId, graphId, branchId)
@@ -24,5 +25,6 @@ export function useActiveDraftAccess(
     draft,
     canWrite: live ? live.canWrite : draft ? canWriteDraft(draft, me) : true,
     canManage: live ? live.canManage : draft ? canManageDraft(draft, me) : true,
+    canPublish: live?.canPublish ?? draft?.access?.canPublish,
   }
 }

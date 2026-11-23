@@ -9,7 +9,8 @@
  * only requires changing the data source, not this component.
  */
 
-import { useState, useMemo, useCallback, useEffect, useRef, memo, type ReactNode } from 'react'
+import { useState, useMemo, useCallback, useContext, useEffect, useRef, memo, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { useFeature } from '@/store/features'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -35,6 +36,8 @@ import {
     Sparkles,
     WifiOff,
     FileUp,
+    WandSparkles,
+    UploadCloud,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -43,12 +46,16 @@ import { TablePagination } from '@/components/ui/TablePagination'
 import { resolveSourceMode, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import type { PlaygroundModel } from '@/services/playgroundService'
+import { usePlaygroundModels } from '@/hooks/usePlayground'
+import { ModelBadge } from '@/components/playground/ModelBadge'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
 import { useWorkspacePage } from '@/hooks/useWorkspacePage'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import type { ScopeMode } from '../ViewWizard'
 import type { ProviderScopeOption } from '../useBlankScopeOptions'
 
@@ -859,10 +866,12 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
     )
 }
 
-/** Ontology card — semantic-layer tile, published badge, type counts, description. */
-function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDefinitionResponse; isSelected: boolean; onSelect: () => void }) {
-    const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
-    const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
+/** Ontology card — semantic-layer tile, published badge, type counts, description. A data model
+ *  the Playground offers (`PlaygroundModel`) carries its counts, and where it comes from. */
+function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDefinitionResponse | PlaygroundModel; isSelected: boolean; onSelect: () => void }) {
+    const offered = 'kind' in ontology ? ontology : null
+    const entityCount = offered ? offered.entityTypeCount : Object.keys((ontology as OntologyDefinitionResponse).entityTypeDefinitions ?? {}).length
+    const relCount = offered ? offered.relationshipTypeCount : Object.keys((ontology as OntologyDefinitionResponse).relationshipTypeDefinitions ?? {}).length
     return (
         <button
             type="button"
@@ -888,7 +897,8 @@ function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDe
                 <div className="min-w-0 flex-1 pr-6">
                     <div className="flex items-center gap-1.5 flex-wrap">
                         <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
-                        {ontology.isPublished && (
+                        {offered && <ModelBadge kind={offered.kind} />}
+                        {ontology.isPublished && !offered && (
                             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                                 <Check className="w-2.5 h-2.5" /> Published
                             </span>
@@ -980,6 +990,45 @@ function BlankPickerEmpty({ icon, title, hint, href, cta }: { icon: ReactNode; t
     )
 }
 
+/**
+ * In the Playground, no starter data model to begin a blank graph from is not a dead end: a
+ * sample or the member's own data makes a data model of its own. Both start on the Playground's
+ * front page, so the wizard closes on the way there.
+ */
+function PlaygroundNoModels() {
+    const close = useContext(ViewEditorContext)?.closeViewEditor
+    const starts = [
+        { to: '/playground?start=samples', label: 'Start from a sample', hint: 'A ready-made graph, with its own data model', icon: WandSparkles, tile: 'from-amber-400 to-orange-500' },
+        { to: '/playground?start=import', label: 'Bring your own data', hint: 'Your CSV or JSON files make the data model', icon: UploadCloud, tile: 'from-sky-400 to-indigo-500' },
+    ]
+    return (
+        <div className="rounded-xl border border-dashed border-violet-500/30 bg-violet-500/[0.04] px-4 py-6 text-center">
+            <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">No starter data models yet</p>
+            <p className="mx-auto mt-1 max-w-sm text-xs text-slate-500 dark:text-slate-400">
+                A blank graph begins from a data model, and none is offered here yet. Start from a sample or bring your own data instead — either makes one for you.
+            </p>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                {starts.map(s => (
+                    <Link
+                        key={s.to}
+                        to={s.to}
+                        onClick={() => close?.()}
+                        className="flex items-center gap-3 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2.5 text-left shadow-sm transition hover:border-violet-500/40 hover:shadow-md hover:shadow-violet-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50"
+                    >
+                        <span className={cn('flex w-8 h-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white', s.tile)}>
+                            <s.icon className="w-4 h-4" aria-hidden />
+                        </span>
+                        <span className="min-w-0">
+                            <span className="block text-xs font-semibold text-ink">{s.label}</span>
+                            <span className="block text-[11px] text-ink-muted">{s.hint}</span>
+                        </span>
+                    </Link>
+                ))}
+            </div>
+        </div>
+    )
+}
+
 function BlankScopePickers({
     providers,
     ontologies,
@@ -989,6 +1038,7 @@ function BlankScopePickers({
     onSelectProvider,
     onSelectOntology,
     ontologySlot,
+    isPlayground = false,
 }: {
     providers: ProviderScopeOption[]
     ontologies: OntologyDefinitionResponse[]
@@ -998,6 +1048,9 @@ function BlankScopePickers({
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
     ontologySlot?: ReactNode
+    /** The Playground: its members start from the data models it offers them (approved, shared,
+     *  their own, starters and samples), and without one, elsewhere. */
+    isPlayground?: boolean
 }) {
     const [typeFilter, setTypeFilter] = useState<'all' | string>('all')
 
@@ -1078,7 +1131,9 @@ function BlankScopePickers({
             </section>
 
             {/* Ontology picker */}
-            {ontologySlot ?? <section className="space-y-3">
+            {ontologySlot ?? (isPlayground ? (
+                <PlaygroundModelPicker selectedOntologyId={selectedOntologyId} onSelectOntology={onSelectOntology} />
+            ) : <section className="space-y-3">
                 <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                     <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
@@ -1106,8 +1161,44 @@ function BlankScopePickers({
                         ))}
                     </div>
                 )}
-            </section>}
+            </section>)}
         </div>
+    )
+}
+
+/** In the Playground, the data models it offers the member (`GET /playground/models`) — approved,
+ *  shared, their own, starters and samples — each saying which it is; with none, the starts that
+ *  make one. */
+function PlaygroundModelPicker({ selectedOntologyId, onSelectOntology }: {
+    selectedOntologyId: string | null
+    onSelectOntology: (id: string) => void
+}) {
+    const query = usePlaygroundModels()
+    const models = useMemo(() => (query.data ?? []).filter(m => m.isPublished), [query.data])
+    return (
+        <section className="space-y-3">
+            <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Data model</span>
+                <span className="text-xs text-slate-400 ml-auto">{models.length}</span>
+            </div>
+            {query.isLoading ? (
+                <PickerSkeleton />
+            ) : models.length === 0 ? (
+                <PlaygroundNoModels />
+            ) : (
+                <div className="grid gap-3 sm:grid-cols-2 items-stretch">
+                    {models.map(m => (
+                        <OntologyCard
+                            key={m.id}
+                            ontology={m}
+                            isSelected={m.id === selectedOntologyId}
+                            onSelect={() => onSelectOntology(m.id)}
+                        />
+                    ))}
+                </div>
+            )}
+        </section>
     )
 }
 
@@ -1522,6 +1613,7 @@ export function ScopeStep({
                             onSelectProvider={onSelectProvider}
                             onSelectOntology={onSelectOntology}
                             ontologySlot={blankOntologySlot}
+                            isPlayground={selectedWorkspace.kind === 'playground'}
                         />
                     ) : selectedWorkspace ? (
                         <>

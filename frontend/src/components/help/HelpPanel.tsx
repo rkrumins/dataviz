@@ -38,7 +38,7 @@ import {
 } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { useTourStore } from '@/features/tour/tourStore'
-import { TOURS } from '@/features/tour/tours'
+import { TOURS, isTourOffered } from '@/features/tour/tours'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -196,9 +196,7 @@ function HomeView({
   const { pathname } = useLocation()
   // Contextual tours (e.g. the canvas tour) only work on their own surface —
   // offer them from Help only while the user is there.
-  const visibleTours = TOURS.filter(
-    (t) => !t.contextual || (t.contextPathPrefix ? pathname.startsWith(t.contextPathPrefix) : false),
-  )
+  const visibleTours = TOURS.filter((t) => isTourOffered(t, pathname))
 
   // Focus the search input when the home view mounts (i.e. on open / back).
   useEffect(() => {

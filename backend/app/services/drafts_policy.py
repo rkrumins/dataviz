@@ -8,7 +8,9 @@ Each field is a setting in the settings store (``config/versioned_graph_settings
 the data source's graph's value (a fork's: its root's), then its workspace's, then the platform's,
 then the built-in default. Drafts start public, may be either level, the opener may approve and
 merge, a review needs everyone asked to approve it, and open threads don't hold it. A level that is
-the only one allowed is also where a new draft starts (the resolver derives it). The policy is read
+the only one allowed is also where a new draft starts (the resolver derives it). The Playground's
+drafts start private (``KIND_DEFAULTS``): an experiment's draft is its maker's until they share it,
+unless the Playground or the graph chose otherwise. The policy is read
 where a draft is created, changes level, or a review is read, reviewed, approved, merged or
 published. It is read fresh every time (``strict``), so a tightened rule holds from the next such
 request.
@@ -47,6 +49,10 @@ KEYS = {"defaultVisibility": "drafts.defaultVisibility", "levels": "drafts.level
 #: Where a value came from, as the resolver names it, in this policy's words: the platform's, the
 #: environment's and the built-in one are all ``default``.
 _SOURCES = {"graph": SOURCE_DATA_SOURCE, "workspace": SOURCE_WORKSPACE}
+
+
+#: Built-in defaults a kind of workspace has of its own, by API field.
+KIND_DEFAULTS = {"playground": {"defaultVisibility": "private"}}
 
 
 @dataclass(frozen=True)
@@ -91,8 +97,9 @@ def settings_of(row: Any) -> dict:
 def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPolicy:
     """The policy the old columns give a data source and its workspace (either may be None). Pure."""
     values, sources = {}, {}
+    kind_defaults = KIND_DEFAULTS.get(getattr(workspace, "kind", None), {})
     for column, api, default in FIELDS:
-        values[api], sources[api] = default, SOURCE_DEFAULT
+        values[api], sources[api] = kind_defaults.get(api, default), SOURCE_DEFAULT
         for row, source in ((data_source, SOURCE_DATA_SOURCE), (workspace, SOURCE_WORKSPACE)):
             value = getattr(row, column, None) if row is not None else None
             if value is not None:
@@ -111,19 +118,28 @@ def resolve(workspace: Any = None, data_source: Any = None) -> EffectiveDraftsPo
 
 
 async def effective(workspace_id: Optional[str] = None, data_source_id: Optional[str] = None, *,
-                    root_id: Optional[str] = None) -> EffectiveDraftsPolicy:
+                    root_id: Optional[str] = None, kind: Optional[str] = None) -> EffectiveDraftsPolicy:
     """The policy in force, from the settings store: a data source's (``data_source_id``, in
     ``workspace_id``; ``root_id``: a fork's root data source, whose values it follows), a
-    workspace's (no data source), or the platform's (neither). Read fresh."""
+    workspace's (no data source), or the platform's (neither). Read fresh.
+
+    ``kind``: the workspace's kind. Its own defaults (``KIND_DEFAULTS``: the Playground's drafts
+    start private) stand in for the platform's and the built-in value. A value the graph or the
+    workspace chose wins over them, and so do a platform lock and a level that is the only one
+    allowed."""
     from backend.app.services.settings import effective as settings, resolver
 
     ctx = await settings.refresh(strict=True)
     target = settings.target(workspace_id, data_source_id, {"fork_of": root_id} if root_id else None)
+    kind_defaults = KIND_DEFAULTS.get(kind, {})
     values, sources = {}, {}
     for api, key in KEYS.items():
         found = resolver.resolve(ctx, key, target)
         values[api] = resolver.encode(ctx.settings[key], found["effective"])
         sources[api] = _SOURCES.get(found["source"], SOURCE_DEFAULT)
+        if (api in kind_defaults and sources[api] == SOURCE_DEFAULT
+                and found.get("status") not in ("locked", "adjusted")):
+            values[api] = kind_defaults[api]
     return EffectiveDraftsPolicy(
         default_visibility=values["defaultVisibility"], levels=values["levels"],
         self_approval=bool(values["selfApproval"]), self_merge=bool(values["selfMerge"]),
@@ -134,14 +150,16 @@ async def effective(workspace_id: Optional[str] = None, data_source_id: Optional
 async def load(session, data_source_id: str) -> EffectiveDraftsPolicy:
     """The effective policy of a data source (:func:`effective`): its row read by primary key, and
     a fork's parents' up to its root. Raises ``LookupError`` for a data source that isn't there."""
-    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
     from backend.app.services import fork_sources
 
     ds = await session.get(WorkspaceDataSourceORM, data_source_id)
     if ds is None:
         raise LookupError(data_source_id)
     root = await fork_sources.governing_row(session, ds)
-    return await effective(ds.workspace_id, ds.id, root_id=root.id if root is not ds else None)
+    ws = await session.get(WorkspaceORM, ds.workspace_id)
+    return await effective(ds.workspace_id, ds.id, root_id=root.id if root is not ds else None,
+                           kind=getattr(ws, "kind", None))
 
 
 async def own(session, scope: str, scope_id: str) -> Dict[str, Any]:

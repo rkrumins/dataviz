@@ -13,7 +13,10 @@ can be put back:
   longer holds;
 * the versioned graph and every job run on it, in the version store, FIRST — that store can be
   a separate database, so if the rest fails the graph is put back (:func:`_execute`);
-* the aggregation state, so drift and reconciliation invalidate the right caches.
+* the aggregation state, so drift and reconciliation invalidate the right caches;
+* the semantic layer the source's workspace owns (a Playground maker's own): it becomes the
+  destination's layer — or, when other sources still use it, the destination gets its own copy
+  and the moved source is built on that (:func:`_layer_plan`).
 
 Access. Owners, and the people and groups a view is shared with, keep it wherever it lives, and
 published views stay published. Views shared with the whole workspace switch audience to the new
@@ -61,6 +64,7 @@ from backend.app.db.models import (
     GroupMemberORM,
     GroupORM,
     IdpGroupRoleMappingORM,
+    OntologyORM,
     ProviderORM,
     ResourceGrantORM,
     RoleBindingORM,
@@ -203,6 +207,12 @@ def _refuse(blockers: list[TransferIssue]) -> None:
         raise _conflict("blocked", blockers[0].message, blockers)
 
 
+def _playground_maker(source: WorkspaceORM, ds: WorkspaceDataSourceORM, actor_id: Optional[str]) -> bool:
+    """In the Playground nobody administers anyone's work: a graph's maker stands where a
+    workspace admin would to move it out (or ask to) — into a workspace they belong in."""
+    return getattr(source, "kind", None) == "playground" and bool(actor_id) and ds.created_by == actor_id
+
+
 def _is_admin(claims: PermissionClaims, ws_id: str) -> bool:
     return has_permission(claims, _ADMIN, workspace_id=ws_id)
 
@@ -322,6 +332,9 @@ class Preflight:
     #: Everyone who stops reading moved views: people who lose them directly and the members of
     #: groups that do, less anyone who reads views in the destination or across the organization.
     affected: set = field(default_factory=set)
+    #: The source's own semantic layer, when its workspace owns it: ``{id, name, action}``, the
+    #: action ``move`` (it becomes the destination's) or ``copy`` (others still use it).
+    layer: Optional[dict] = None
 
     @property
     def has_views(self) -> bool:
@@ -586,6 +599,10 @@ async def _destination_blockers(
     """What stops this source going to ``target`` right now — the half of the preflight a move
     and an undo share — and the version store's facts about it."""
     blockers: list[TransferIssue] = []
+    if getattr(target, "kind", None) == "playground":
+        # The Playground holds only graphs built in it from blank (playground_policy).
+        blockers.append(_issue(
+            "destination_playground", "The Playground only holds graphs built in it from blank.", "blocker"))
     if not target.is_active:
         blockers.append(_issue(
             "destination_unavailable", f"{target.name} is switched off, so it can't take data sources.",
@@ -652,6 +669,7 @@ async def preflight(
     claims: PermissionClaims,
     purpose: Optional[str] = None,
     transfer: Optional[DataSourceTransferORM] = None,
+    actor_id: Optional[str] = None,
 ) -> Preflight:
     """Everything a move of ``ds`` to ``to_ws_id`` would do, and everything in its way, without
     changing anything.
@@ -676,9 +694,10 @@ async def preflight(
     was_default = defaults.get(source.id) == ds.id
     views = await _views_on(session, ds, was_default)
     need = _ADMIN if views else _MANAGE
-    direct = (has_permission(claims, need, workspace_id=source.id)
+    maker = _playground_maker(source, ds, actor_id)
+    direct = ((has_permission(claims, need, workspace_id=source.id) or maker)
               and has_permission(claims, need, workspace_id=target.id))
-    mode = "direct" if direct else ("request" if _is_admin(claims, source.id) else None)
+    mode = "direct" if direct else ("request" if _is_admin(claims, source.id) or maker else None)
     effective = purpose or {"direct": "move", "request": "propose"}.get(mode or "")
 
     blockers, facts = await _destination_blockers(session, ds, target)
@@ -707,8 +726,9 @@ async def preflight(
         if ds.workspace_id != transfer.from_workspace_id:
             blockers.append(_issue(
                 "moved_since", "The data source has moved since this request was made.", "blocker"))
-        proposer_admin = False
-        if transfer.created_by:
+        # In the Playground the graph's maker asked in an admin's place.
+        proposer_admin = _playground_maker(source, ds, transfer.created_by)
+        if transfer.created_by and not proposer_admin:
             with contextlib.suppress(Exception):
                 proposer_admin = _is_admin(await resolve(session, transfer.created_by), source.id)
         if not proposer_admin:
@@ -856,7 +876,15 @@ async def preflight(
                 f"{source.name}. The views keep working, but people in {target.name} can't open "
                 f"{'that template' if len(local) == 1 else 'those templates'}.",
                 "warning", items=[ImpactedEntity(id=i, name=n, type="template") for i, n in local]))
-    if ds.ontology_id:
+    layer = await _layer_plan(session, ds, source)
+    if layer is not None:
+        notes.append(_issue(
+            "layer_moves",
+            f"Your layer “{layer['name']}” moves with it and becomes {target.name}'s layer; its data "
+            "engineers can edit it and approve it for everyone." if layer["action"] == "move" else
+            f"Your layer “{layer['name']}” is used by other graphs in {source.name} too, so {target.name} "
+            "gets its own copy of it; its data engineers can edit it and approve it for everyone."))
+    elif ds.ontology_id:
         others = await session.scalar(
             select(func.count()).select_from(WorkspaceDataSourceORM).where(
                 WorkspaceDataSourceORM.ontology_id == ds.ontology_id,
@@ -888,11 +916,92 @@ async def preflight(
         notes=notes, losers=losers, counts=counts, was_primary=was_primary,
         was_default=was_default, becomes_primary=becomes_primary,
         pin_destination_default=pin_dest, pin_destination_label=pin_label,
-        identity_pin=identity_pin, facts=facts, reach_b=reach_b, affected=affected,
+        identity_pin=identity_pin, facts=facts, reach_b=reach_b, affected=affected, layer=layer,
     )
     pre.token = _token(target.id, views, losers, was_default, becomes_primary, pin_dest, identity_pin,
                        restricted_open)
     return pre
+
+
+async def _layer_plan(session: AsyncSession, ds: WorkspaceDataSourceORM,
+                      source: WorkspaceORM) -> Optional[dict]:
+    """What a move does with the source's semantic layer: nothing, unless the source's workspace
+    owns it (a Playground maker's own layer). Then it ``move``s — every version becomes the
+    destination's — when no other live source uses any version of it; else the destination gets a
+    ``copy`` of the version the source is on. The source's forks move with it, so they don't
+    count."""
+    if not ds.ontology_id:
+        return None
+    row = await session.get(OntologyORM, ds.ontology_id)
+    if row is None or row.owner_workspace_id != source.id:
+        return None
+    from backend.app.db.repositories.ontology_definition_repo import lineage_of
+    moving = [ds.id, *await fork_sources.forks_of(session, ds.id)]
+    others = await session.scalar(
+        select(func.count()).select_from(WorkspaceDataSourceORM).where(
+            WorkspaceDataSourceORM.ontology_id.in_(select(OntologyORM.id).where(lineage_of(row))),
+            WorkspaceDataSourceORM.id.notin_(moving),
+            WorkspaceDataSourceORM.deleted_at.is_(None),
+        )) or 0
+    return {"id": row.id, "name": row.name, "action": "copy" if others else "move"}
+
+
+async def _carry_layer(session: AsyncSession, pre: Preflight, *, actor: str, now: str) -> Optional[dict]:
+    """Do :attr:`Preflight.layer`, in the move's transaction, before the forks take the source's
+    settings. Returns what undo needs: the layer, what was done, and its reach or its copy."""
+    plan, ds, target = pre.layer, pre.ds, pre.target
+    if plan is None:
+        return None
+    from backend.app.db.repositories.ontology_definition_repo import _record_audit, lineage_of
+    row = await session.get(OntologyORM, plan["id"])
+    done = {"id": row.id, "action": plan["action"], "visibility": row.owner_visibility}
+    if plan["action"] == "move":
+        await session.execute(
+            update(OntologyORM).where(lineage_of(row), OntologyORM.owner_workspace_id == pre.source.id)
+            .values(owner_workspace_id=target.id, owner_visibility=None, updated_by=actor, updated_at=now)
+            .execution_options(synchronize_session="fetch"))
+        await _record_audit(session, row, "updated", actor=actor,
+                            summary=f"Moved to {target.name} with {_label(ds)}")
+        return done
+    copy = OntologyORM(
+        name=row.name, description=row.description, version=1, evolution_policy=row.evolution_policy,
+        containment_edge_types=row.containment_edge_types, lineage_edge_types=row.lineage_edge_types,
+        edge_type_metadata=row.edge_type_metadata, entity_type_hierarchy=row.entity_type_hierarchy,
+        root_entity_types=row.root_entity_types, entity_type_definitions=row.entity_type_definitions,
+        relationship_type_definitions=row.relationship_type_definitions,
+        is_published=row.is_published, published_at=now if row.is_published else None,
+        published_by=actor if row.is_published else None, is_system=False, scope="workspace",
+        owner_workspace_id=target.id, owner_visibility=None, created_by=actor, updated_by=actor,
+    )
+    session.add(copy)
+    await session.flush()
+    copy.schema_id = copy.id
+    ds.ontology_id = copy.id
+    await session.flush()
+    await _record_audit(session, copy, "cloned", actor=actor,
+                        summary=f"Copied from \"{row.name}\" v{row.version} for {target.name}, with {_label(ds)}")
+    return {**done, "copyId": copy.id}
+
+
+async def _uncarry_layer(session: AsyncSession, ds: WorkspaceDataSourceORM, source: WorkspaceORM,
+                         target: WorkspaceORM, layer: Optional[dict]) -> None:
+    """Put back what :func:`_carry_layer` did: the layer is the source workspace's again (unless
+    the destination's editors approved it for everyone meanwhile), or the source is built on the
+    original again — its copy stays the destination's."""
+    if not layer:
+        return
+    from backend.app.db.repositories.ontology_definition_repo import lineage_of
+    row = await session.get(OntologyORM, layer["id"])
+    if row is None:
+        return
+    if layer["action"] == "move":
+        await session.execute(
+            update(OntologyORM).where(lineage_of(row), OntologyORM.owner_workspace_id == target.id)
+            .values(owner_workspace_id=source.id, owner_visibility=layer.get("visibility"))
+            .execution_options(synchronize_session="fetch"))
+    elif ds.ontology_id == layer.get("copyId"):
+        ds.ontology_id = row.id
+    await session.flush()
 
 
 async def _person_names(session: AsyncSession, user_ids: Iterable[str]) -> dict[str, str]:
@@ -1015,6 +1124,7 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         setattr(ds, column, value)
     ds.updated_at = now
     await session.flush()
+    layer = await _carry_layer(session, pre, actor=actor, now=now)
     # Its forks' sources, trashed ones too, live where it does and are governed as it is.
     sources = await _carry_forks(session, ds, target.id, now)
 
@@ -1070,6 +1180,7 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         # Who stopped reading the moved views, as it stood when the move ran.
         "lostAccess": _lost_counts(t for t, _ in pre.losers),
         "lost": [loser.recorded() for _, loser in sorted(pre.losers.items())],
+        "layer": layer,
     }
 
 
@@ -1248,7 +1359,7 @@ async def move(session: AsyncSession, *, ds_id: str, from_ws_id: str, claims: Pe
         raise _conflict("aggregation_running",
                         "An aggregation run is starting on this source. Try again once it finishes.")
     pre = await preflight(session, ds=ds, to_ws_id=req.target_workspace_id, claims=claims,
-                          purpose="move")
+                          purpose="move", actor_id=user_id)
     if pre.mode != "direct":
         need = _ADMIN if pre.has_views else _MANAGE
         missing = (pre.source.id if not has_permission(claims, need, workspace_id=pre.source.id)
@@ -1286,7 +1397,11 @@ async def propose(session: AsyncSession, *, ds_id: str, from_ws_id: str,
     await _expire_lapsed(session)
     ds = await source_in(session, ds_id, from_ws_id, lock=True)
     pre = await preflight(session, ds=ds, to_ws_id=req.target_workspace_id, claims=claims,
-                          purpose="propose")
+                          purpose="propose", actor_id=user_id)
+    if not (_is_admin(claims, pre.source.id) or _playground_maker(pre.source, ds, user_id)):
+        await _deny(session, user_id, _ADMIN, pre.source.id,
+                    "Asking to move a data source takes administering its workspace — or, in the "
+                    "Playground, having made it.")
     plan = _plan(pre)
     waiting = await transfer_repo.pending_for_source(session, ds.id)
     if (waiting is not None and waiting.created_by == user_id
@@ -1595,6 +1710,7 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
             setattr(ds, column, None)
     ds.updated_at = now
     await session.flush()
+    await _uncarry_layer(session, ds, source, target, manifest.get("layer"))
     sources = await _carry_forks(session, ds, source.id, now)
 
     pinned_default = manifest.get("pinnedDestinationDefault")
@@ -1852,9 +1968,9 @@ async def _invalidate_reads(*, ds_id: str, provider_id: Optional[str], graph_nam
 
 
 async def preview(session: AsyncSession, *, ds: WorkspaceDataSourceORM, to_ws_id: str,
-                  claims: PermissionClaims) -> TransferPreview:
+                  claims: PermissionClaims, actor_id: Optional[str] = None) -> TransferPreview:
     await _expire_lapsed(session)
-    pre = await preflight(session, ds=ds, to_ws_id=to_ws_id, claims=claims)
+    pre = await preflight(session, ds=ds, to_ws_id=to_ws_id, claims=claims, actor_id=actor_id)
     owners = await _person_names(session, {v.created_by for v in pre.views[:_VIEW_LIST_CAP]})
     return _preview(pre, mode=pre.mode, owners=owners)
 
@@ -1876,7 +1992,7 @@ async def _can_see(session: AsyncSession, claims: PermissionClaims, ws: Workspac
 
 
 async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
-                       claims: PermissionClaims) -> list[TransferDestination]:
+                       claims: PermissionClaims, actor_id: Optional[str] = None) -> list[TransferDestination]:
     """Where the source could go, and for each, whether the caller may move it there now, ask,
     or neither — and why not. Workspaces the caller couldn't otherwise see stay unlisted."""
     source_id = ds.workspace_id
@@ -1888,7 +2004,8 @@ async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
             select(func.count()).select_from(ViewORM).where(
                 ViewORM.workspace_id == source_id, ViewORM.data_source_id.is_(None))) or 0) > 0
     need = _ADMIN if has_views else _MANAGE
-    can_ask = _is_admin(claims, source_id)
+    maker = _playground_maker(await _live_workspace(session, source_id), ds, actor_id)
+    can_ask = _is_admin(claims, source_id) or maker
     directory = await _directory_on(session)
 
     workspaces = (await session.execute(
@@ -1915,7 +2032,7 @@ async def destinations(session: AsyncSession, *, ds: WorkspaceDataSourceORM,
     for ws in workspaces:
         if not await _can_see(session, claims, ws, directory=directory):
             continue
-        direct = (has_permission(claims, need, workspace_id=source_id)
+        direct = ((has_permission(claims, need, workspace_id=source_id) or maker)
                   and has_permission(claims, need, workspace_id=ws.id))
         mode = "direct" if direct else ("request" if can_ask else None)
         reason = None

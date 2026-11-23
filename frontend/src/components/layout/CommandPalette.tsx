@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useContext, useEffect, useState, useCallback } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Command } from 'cmdk'
 import {
@@ -19,6 +19,10 @@ import {
   BookOpen,
   Loader2,
   Upload,
+  Plus,
+  UserPlus,
+  Building2,
+  FlaskConical,
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
@@ -26,6 +30,14 @@ import { useBrand } from '@/store/branding'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
+import { useFeature } from '@/store/features'
+import { useAnyWorkspacePermission, useNavPermission, usePermission } from '@/store/auth'
+import { useSidebarSpec } from '@/store/navCatalogue'
+import { usePlayground } from '@/hooks/usePlayground'
+import {
+  WORKSPACE_REQUESTS_FEATURE, useCanAnswerWorkspaceRequests, useRequestWorkspaceWizard,
+} from '@/hooks/useWorkspaceRequests'
+import { ViewEditorContext } from './viewEditorContext'
 import { useRecentViews } from '@/hooks/useRecentViews'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import { useGlobalSearch, CATEGORY_ORDER, type SearchHit, type SearchCategory } from '@/hooks/useGlobalSearch'
@@ -113,6 +125,21 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
   const templatesOn = useLayoutTemplatesEnabled()
 
+  // Actions, each offered only to someone it would work for. On a workspace's own
+  // page, the ones that act on a workspace act on that one.
+  const wsHere = pathname.match(/^\/workspaces\/([^/]+)/)?.[1] ?? null
+  const viewEditor = useContext(ViewEditorContext)
+  const canCreateViewHere = usePermission('workspace:view:create', wsHere)
+  const canCreateViews = useAnyWorkspacePermission('workspace:view:create')
+  const createViewHere = !!wsHere && canCreateViewHere
+  const canInviteHere = usePermission('workspace:members:add', wsHere)
+  const requestsOn = useFeature(WORKSPACE_REQUESTS_FEATURE)
+  const canCreateWorkspace = useCanAnswerWorkspaceRequests()
+  const openRequestWizard = useRequestWorkspaceWizard((s) => s.openWizard)
+  const playgroundAllowed = useNavPermission(useSidebarSpec('playground'))
+  const playground = usePlayground().data
+  const playgroundOpen = playgroundAllowed && !!playground?.enabled && !!playground.exists
+
   // Workspaces (for the zero-search "Switch Workspace" group)
   const workspaces = useWorkspacesStore((s) => s.workspaces)
   const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
@@ -192,6 +219,8 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
       return
     }
     switch (action) {
+      case 'create-view': viewEditor?.openViewEditor(undefined, createViewHere && wsHere ? { workspaceId: wsHere } : undefined); break
+      case 'request-workspace': openRequestWizard(); break
       case 'toggle-persona': toggleMode(); break
       case 'theme-light': setTheme('light'); break
       case 'theme-dark': setTheme('dark'); break
@@ -199,7 +228,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
       case 'toggle-sidebar': toggleSidebar(); break
     }
     onClose()
-  }, [toggleMode, setTheme, toggleSidebar, navigate, wsSetActive, onClose])
+  }, [toggleMode, setTheme, toggleSidebar, navigate, wsSetActive, onClose, viewEditor, createViewHere, wsHere, openRequestWizard])
 
   return (
     <>
@@ -401,6 +430,40 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   shortcut="mod+/"
                   onSelect={() => handleAction('toggle-persona')}
                 />
+                {viewEditor && (createViewHere || canCreateViews) && (
+                  <CommandItem
+                    icon={Plus}
+                    label="Create a view"
+                    description={createViewHere
+                      ? 'A map, a hierarchy or a table — in this workspace'
+                      : 'A map, a hierarchy or a table of your data'}
+                    onSelect={() => handleAction('create-view')}
+                  />
+                )}
+                {wsHere && canInviteHere && (
+                  <CommandItem
+                    icon={UserPlus}
+                    label="Invite people to this workspace"
+                    description="Add teammates as viewers or editors"
+                    onSelect={() => handleAction(`navigate:/workspaces/${wsHere}?tab=members`)}
+                  />
+                )}
+                {requestsOn && !canCreateWorkspace && (
+                  <CommandItem
+                    icon={Building2}
+                    label="Request a workspace"
+                    description="Ask the platform team for a workspace of your own"
+                    onSelect={() => handleAction('request-workspace')}
+                  />
+                )}
+                {playgroundOpen && (
+                  <CommandItem
+                    icon={FlaskConical}
+                    label="Open the Playground"
+                    description="Build graphs and try ideas, apart from production"
+                    onSelect={() => handleAction('navigate:/playground')}
+                  />
+                )}
                 {templatesOn && (
                   <>
                     <CommandItem

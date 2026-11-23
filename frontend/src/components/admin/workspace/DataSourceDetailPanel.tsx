@@ -1,7 +1,7 @@
 /**
  * DataSourceDetailPanel — slide-in drawer for data source details.
  * Renders as a right-side panel via portal (same pattern as ExplorerPreviewDrawer).
- * Tabs: Insights · Aggregation · Views
+ * Tabs: Insights · Aggregation · Views (· Questions · Activity · Versioning, by switch)
  */
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -11,10 +11,11 @@ import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
-    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart,
+    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart, MessageCircleQuestion, History,
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
+import { viewTypeLabel } from '@/lib/viewUtils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import type { DataSourceResponse } from '@/services/workspaceService'
@@ -23,13 +24,14 @@ import type { View } from '@/services/viewApiService'
 
 /** Tab ids, in the order they appear. Hoisted so the URL parser and the
  *  buttons cannot drift apart. */
-const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'versioning'] as const
+const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'questions', 'activity', 'versioning'] as const
 type DataSourceTab = (typeof DATA_SOURCE_TABS)[number]
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
+import { usePersonaMode } from '@/store/persona'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
@@ -38,6 +40,15 @@ import { DataSourceActionMenu } from './DataSourceActionMenu'
 import { DataSourceLifecycle, MovedFromChip } from '@/features/data-source-transfer/DataSourceLifecycle'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
+import { DataContactsCard } from './DataContactsCard'
+import { AboutDataSourceCard } from './AboutDataSourceCard'
+import { DataSourceActivity } from './DataSourceActivity'
+import { TrustBadges } from '@/components/dataSource/TrustBadges'
+import { DATA_SOURCE_METADATA_FEATURE } from '@/services/dataSourceMetadataService'
+import { DiscussionPanel } from '@/features/discussions/DiscussionPanel'
+import { ThreadView } from '@/features/discussions/ThreadView'
+import { WatchButton } from '@/features/discussions/DiscussionsDrawer'
+import { useSubjectSummary } from '@/features/discussions/useDiscussions'
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -91,6 +102,10 @@ interface DataSourceDetailPanelProps {
         original: AggregationConfigSnapshot,
     ) => Promise<void>
     onClose: () => void
+    /** Tags already used in this workspace, most used first — offered when tagging this one. */
+    tagSuggestions?: string[]
+    /** Shows the workspace's data requests (where the one this source came from is listed). */
+    onShowDataRequests?: () => void
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -156,6 +171,8 @@ export function DataSourceDetailPanel({
     onPurge,
     onSaveAggregationConfig,
     onClose,
+    tagSuggestions,
+    onShowDataRequests,
 }: DataSourceDetailPanelProps) {
     /**
      * Tab state lives in the URL, not in `useState`.
@@ -167,8 +184,11 @@ export function DataSourceDetailPanel({
      * a page whose back button could then only ever guess where you came from.
      */
     const [searchParams, setSearchParams] = useSearchParams()
+    const conversations = useFeature('conversationsEnabled')
+    const details = useFeature(DATA_SOURCE_METADATA_FEATURE)
     const rawTab = searchParams.get('dstab')
     const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab)
+        && (rawTab !== 'questions' || conversations) && (rawTab !== 'activity' || details)
         ? (rawTab as DataSourceTab)
         : 'insights'
     const setActiveTab = (next: DataSourceTab) => {
@@ -177,6 +197,20 @@ export function DataSourceDetailPanel({
         // stays clean and a stale param cannot outlive the drawer.
         if (next === 'insights') merged.delete('dstab')
         else merged.set('dstab', next)
+        // The open question belongs to the Questions tab (a notification links to it there).
+        if (next !== 'questions') { merged.delete('discussion'); merged.delete('message') }
+        setSearchParams(merged, { replace: true })
+    }
+    // Questions about this data: a thread opens in the tab itself, kept in the URL.
+    const dsSubject = ds ? { type: 'data_source' as const, id: ds.id, name: ds.label || ds.graphName || ds.catalogItemId } : null
+    const questions = useSubjectSummary(conversations ? dsSubject : null).data
+    const openThreadId = activeTab === 'questions' ? searchParams.get('discussion') : null
+    const [askOpen, setAskOpen] = useState(false)
+    const showThread = (id: string | null) => {
+        const merged = new URLSearchParams(searchParams)
+        merged.set('dstab', 'questions')
+        if (id) merged.set('discussion', id); else merged.delete('discussion')
+        merged.delete('message')
         setSearchParams(merged, { replace: true })
     }
     const versioningEnabled = useFeature('versioningEnabled')
@@ -208,6 +242,8 @@ export function DataSourceDetailPanel({
     const canManageDs = usePermission(
         'workspace:datasource:manage', wsId,
     )
+    const canEditModel = usePermission('workspace:ontology:manage', wsId)
+    const technical = usePersonaMode() === 'technical'
 
     // ── Aggregation tab: pending edits live entirely in local state until the
     //    user clicks Save. This avoids per-keystroke API calls and full-page
@@ -350,6 +386,7 @@ export function DataSourceDetailPanel({
                                     <span className={cn("w-2 h-2 rounded-full", ds.isActive ? 'bg-emerald-500' : 'bg-gray-400')} />
                                     {ds.isActive ? 'Active' : 'Inactive'}
                                 </span>
+                                {details && <TrustBadges trustStatus={ds.trustStatus} classification={ds.classification} size="md" />}
                                 {ontologyName && (
                                     <Link
                                         to={ontologyId ? `/schema/${ontologyId}` : '/schema'}
@@ -360,27 +397,32 @@ export function DataSourceDetailPanel({
                                 )}
                                 {liveLastAggregatedAt && (
                                     <span className="flex items-center gap-1 text-[10px] text-ink-muted">
-                                        <Clock className="w-3 h-3" /> Aggregated {new Date(liveLastAggregatedAt).toLocaleDateString()}
+                                        <Clock className="w-3 h-3" /> Connections refreshed {new Date(liveLastAggregatedAt).toLocaleDateString()}
                                     </span>
                                 )}
-                                <NodeIdentityBadge value={ds.identityProperty} />
+                                {technical && <NodeIdentityBadge value={ds.identityProperty} />}
                                 <MovedFromChip wsId={wsId} dataSourceId={ds.id} />
                             </div>
 
                             {/* Quick action buttons */}
                             <div className="flex items-center gap-2">
-                                <Link
-                                    to={`/schema?workspaceId=${wsId}&dataSourceId=${ds.id}`}
-                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors"
-                                >
-                                    <ExternalLink className="w-3 h-3" /> Schema Editor
-                                </Link>
+                                {/* What a source is for is its views — that is the way in. Editing its
+                                    data model is for the people who manage the model. */}
                                 <Link
                                     to={`/explorer?workspace=${wsId}&dataSource=${ds.id}`}
-                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors"
                                 >
-                                    <Compass className="w-3 h-3" /> Explorer
+                                    <Compass className="w-3 h-3" /> Explore views
                                 </Link>
+                                {canEditModel && (
+                                    <Link
+                                        to={`/schema?workspaceId=${wsId}&dataSourceId=${ds.id}`}
+                                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-[11px] font-semibold text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                                    >
+                                        <ExternalLink className="w-3 h-3" /> Edit data model
+                                    </Link>
+                                )}
+                                {conversations && dsSubject && <WatchButton subject={dsSubject} />}
                                 <DataSourceActions
                                     wsId={wsId}
                                     onEdit={startEditing}
@@ -405,9 +447,15 @@ export function DataSourceDetailPanel({
                         {!editing && (
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
-                            <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
-                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Profiling" onClick={() => setActiveTab('profiling')} />
+                            <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Processing" onClick={() => setActiveTab('aggregation')} />
+                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Trends" onClick={() => setActiveTab('profiling')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
+                            {conversations && (
+                                <TabBtn active={activeTab === 'questions'} icon={MessageCircleQuestion} label="Questions" count={questions?.open} onClick={() => setActiveTab('questions')} />
+                            )}
+                            {details && (
+                                <TabBtn active={activeTab === 'activity'} icon={History} label="Activity" onClick={() => setActiveTab('activity')} />
+                            )}
                             {versioningEnabled && (
                                 <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
                             )}
@@ -450,8 +498,10 @@ export function DataSourceDetailPanel({
                             </div>
                             ) : (<>
                             {/* ─── Insights Tab ─────────────────────────── */}
-                            {activeTab === 'insights' && (
-                                ds.catalogItemId ? (
+                            {activeTab === 'insights' && (<div className="space-y-5">
+                                <AboutDataSourceCard key={ds.id} wsId={wsId} dsId={ds.id} tagSuggestions={tagSuggestions} onShowRequests={onShowDataRequests} />
+                                <DataContactsCard wsId={wsId} dsId={ds.id} onAsk={() => { setAskOpen(true); showThread(null) }} />
+                                {ds.catalogItemId ? (
                                     <DataSourceProfile
                                         catalogId={ds.catalogItemId}
                                         context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName, identityProperty: ds.identityProperty, nameProperty: ds.nameProperty } satisfies DataSourceProfileContext}
@@ -460,8 +510,22 @@ export function DataSourceDetailPanel({
                                     />
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
+                                )}
+                            </div>)}
+
+                            {/* ─── Questions Tab ────────────────────────── */}
+                            {activeTab === 'questions' && dsSubject && (
+                                openThreadId ? (
+                                    <ThreadView key={openThreadId} threadId={openThreadId} focusMessageId={searchParams.get('message')}
+                                        onBack={() => showThread(null)} onDeleted={() => showThread(null)} className="-mx-6 -my-5" />
+                                ) : (
+                                    <DiscussionPanel subject={dsSubject} onOpenThread={showThread}
+                                        compose={askOpen} onComposeChange={setAskOpen} />
                                 )
                             )}
+
+                            {/* ─── Activity Tab ─────────────────────────── */}
+                            {activeTab === 'activity' && <DataSourceActivity wsId={wsId} dsId={ds.id} />}
 
                             {/* ─── Profiling Tab ────────────────────────── */}
                             {activeTab === 'profiling' && (
@@ -476,7 +540,7 @@ export function DataSourceDetailPanel({
                                 <div className="space-y-3">
                                     <div className="flex items-center justify-between">
                                         <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">
-                                            Projection Mode
+                                            Where connections are kept
                                         </h6>
                                         {isDirty && (
                                             <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
@@ -491,11 +555,11 @@ export function DataSourceDetailPanel({
                                         pendingMode === '' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === ''}
-                                            onChange={handleSelectInherit} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectInherit} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
                                         <div>
-                                            <span className="text-sm font-medium text-ink">Inherit from Provider</span>
+                                            <span className="text-sm font-medium text-ink">The usual place</span>
                                             <span className="inline-flex items-center gap-1 ml-2 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/10 text-emerald-500">DEFAULT</span>
-                                            <p className="text-xs text-ink-muted mt-0.5">Uses the provider's default projection mode</p>
+                                            <p className="text-xs text-ink-muted mt-0.5">Whatever this source’s provider does by default · inherit</p>
                                         </div>
                                     </label>
 
@@ -504,10 +568,10 @@ export function DataSourceDetailPanel({
                                         pendingMode === 'in_source' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'in_source'}
-                                            onChange={handleSelectInSource} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectInSource} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
                                         <div>
-                                            <span className="text-sm font-medium text-ink">In Source</span>
-                                            <p className="text-xs text-ink-muted mt-0.5">Store aggregated edges in the same graph</p>
+                                            <span className="text-sm font-medium text-ink">With the data</span>
+                                            <p className="text-xs text-ink-muted mt-0.5">Kept in the same graph as the data · in source</p>
                                         </div>
                                     </label>
 
@@ -516,13 +580,13 @@ export function DataSourceDetailPanel({
                                         pendingMode === 'dedicated' ? "border-indigo-500/40 bg-indigo-500/[0.04]" : "border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     )}>
                                         <input type="radio" name={`proj-${ds.id}`} checked={pendingMode === 'dedicated'}
-                                            onChange={handleSelectDedicated} className="mt-1 accent-indigo-500" />
+                                            onChange={handleSelectDedicated} disabled={!canManageDs} className="mt-1 accent-indigo-500" />
                                         <div className="flex-1">
-                                            <span className="text-sm font-medium text-ink">Dedicated Graph</span>
-                                            <p className="text-xs text-ink-muted mt-0.5">Store in a separate projection graph for isolation</p>
+                                            <span className="text-sm font-medium text-ink">In a graph of their own</span>
+                                            <p className="text-xs text-ink-muted mt-0.5">A separate graph, kept apart from the data · dedicated</p>
                                             {pendingMode === 'dedicated' && (
                                                 <div className="mt-3 animate-in slide-in-from-top-2 fade-in duration-200">
-                                                    <label className="block text-[11px] font-medium text-ink-secondary mb-1">Dedicated Graph Name</label>
+                                                    <label className="block text-[11px] font-medium text-ink-secondary mb-1">Name of that graph</label>
                                                     <input type="text" value={pendingDedicatedName}
                                                         onChange={e => setPendingDedicatedName(e.target.value)}
                                                         placeholder={`e.g. ${ds.label || ds.catalogItemId}_aggregated`}
@@ -653,7 +717,7 @@ export function DataSourceDetailPanel({
                                                         </div>
                                                     </div>
                                                     <div className="flex items-center gap-2 shrink-0">
-                                                        {view.layoutType && <span className="px-1.5 py-0.5 text-[9px] font-medium rounded bg-black/5 dark:bg-white/5 text-ink-muted">{view.layoutType}</span>}
+                                                        {view.layoutType && <span className="px-1.5 py-0.5 text-[9px] font-medium rounded bg-black/5 dark:bg-white/5 text-ink-muted">{viewTypeLabel(view.layoutType)}</span>}
                                                         <ExternalLink className="w-3 h-3 text-ink-muted opacity-0 group-hover/view:opacity-100 transition-opacity" />
                                                     </div>
                                                 </Link>

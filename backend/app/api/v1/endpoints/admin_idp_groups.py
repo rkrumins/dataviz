@@ -29,6 +29,7 @@ from backend.app.db.repositories.idp_group_mapping_repo import (
     ForbiddenSsoRoleError,
     MappingValidationError,
 )
+from backend.app.services import idp_links
 from backend.auth_service.interface import User
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,8 @@ async def create_group_membership_mapping(
                  "target_group_id": row.target_group_id,
                  "provider_id": row.provider_id, "actor_id": admin.id},
     )
+    # A workspace waiting for exactly this link has it now.
+    await idp_links.settle_pending(session, row, admin.id)
     return _to_dto(row)
 
 
