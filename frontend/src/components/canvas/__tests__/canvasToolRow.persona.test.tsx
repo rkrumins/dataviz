@@ -297,9 +297,11 @@ describe('HierarchyCanvas toolbar — Business view', () => {
     expect(button('Select')).toBeNull()
   }, 20000)
 
-  it('names Expand all and Collapse all, which were icons with no name', async () => {
+  it('names Expand and Collapse all, which were icons with no name', async () => {
     await mountHierarchy()
-    expect(button('Expand all')).toBeInTheDocument()
+    // Nothing here holds anything, so Expand has nothing to open.
+    expect(button('Expand next level')).toBeDisabled()
+    expect(within(toolbar()).getByRole('switch', { name: 'All levels' })).toBeInTheDocument()
     expect(button('Collapse all')).toBeInTheDocument()
   }, 20000)
 
