@@ -6,13 +6,20 @@
  * - Left-to-right flow across hierarchy levels
  * - Search to find and expand to any node
  * - Roll-up counts (e.g., "15 tables, 247 columns")
- * - Progressive expansion from root to leaf
+ * - Progressive expansion from root to leaf, a level at a time (useExpandBelow)
+ *
+ * The rows are ONE flat, virtualized list (the open tree, walked in the order it is drawn), not
+ * cards nested inside cards: a warehouse opened a level at a time holds tens of thousands of
+ * rows, and only the ones on screen are mounted.
  */
 
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { memo, useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { MOTION } from '@/lib/motion'
+import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { formatShortcut, isApplePlatform } from '@/lib/platform'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
@@ -34,6 +41,10 @@ import { QuestionRowMark } from '@/features/discussions/QuestionRowMark'
 import { compareSelectionAction, menuSelection } from './selectionMenu'
 import { SelectionBar } from './context-view/SelectionBar'
 import { StagedChangesPanel } from './context-view/StagedChangesPanel'
+import { LoadMoreItem } from './context-view/LoadMoreItem'
+import { sameRow } from './context-view/rowEquality'
+import { shouldAutoLoadFirstPage } from './context-view/autoLoadFirstPage'
+import { nextLevel, outermost, useExpandBelow, type ExpandTree } from './context-view/useExpandBelow'
 import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
 import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
@@ -79,6 +90,24 @@ interface HierarchyCanvasProps {
   className?: string
 }
 
+/** Each level's indent, px; its guide rail runs down the middle of it. */
+const INDENT = 24
+/** A row before it is measured — the card and the gap under it — near its real height, so that
+ *  measuring a row scrolled to moves nothing below it. Technical rows add the ID line. */
+const ROW_ESTIMATE = 74
+const TECHNICAL_LINE = 17
+/** New rows that slide in. A level opened at once mounts none of that: it simply appears. */
+const ANIMATE_NEW_MAX = 20
+
+const NO_IDS: ReadonlySet<string> = new Set()
+
+/** A row of the flat list: an entity, or the paging row under an open container's children.
+ *  `guides` are the colours of the levels above it; `posInSet` / `setSize` place an entity among the
+ *  siblings drawn with it — a virtualized tree has to say so itself (aria-posinset / setsize). */
+type TreeRow =
+  | { kind: 'node'; node: HierarchyNode; depth: number; guides: readonly string[]; posInSet: number; setSize: number }
+  | { kind: 'more'; parent: HierarchyNode; depth: number; guides: readonly string[]; remaining: number }
+
 // Recursive count of all descendants
 function countDescendants(node: HierarchyNode): { total: number; byType: Record<string, number> } {
   const byType: Record<string, number> = {}
@@ -111,8 +140,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, loadMoreFeeds, isLoading: isLoadingChildren } = useGraphHydration()
-  useLoadingNotification('hier-children', isLoadingChildren, 'Expanding hierarchy')
+  const {
+    loadChildren, cancelChildLoad, loadingNodes, failedNodes, exhaustedParents, loadMoreFeeds, isLoading: isLoadingChildren,
+  } = useGraphHydration()
   // Legacy inline quick-filter (substring over visible nodes) — left
   // in place as a complementary quick-filter alongside the new
   // server-side SearchMapPanel. Full removal is tracked separately
@@ -122,6 +152,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
   const pendingLoadRef = useRef<Set<string>>(new Set())
+  // Containers whose first page has been asked for (by a click, a level run or the effect that
+  // furnishes rows opened any other way) — never asked for again by that effect.
+  const autoLoadedFirstPageRef = useRef<Set<string>>(new Set())
   // Advanced search (Map + Builder + Power tools + Ask) — same surface
   // mounted on ContextView and Graph canvases.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
@@ -137,7 +170,16 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   useViewLibrary(activeView?.id ?? null, libraryBranchId)
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
+  // A row to bring on screen once the list holds it: the list is virtualized, so a row opened
+  // just now is not in the DOM to scroll to. It expires, so a row that never shows (a filter
+  // hides it) cannot pull the list to it seconds later.
+  const [scrollTarget, setScrollTarget] = useState<{ id: string; until: number } | null>(null)
+  const scrollToRow = useCallback((id: string) => setScrollTarget({ id, until: Date.now() + 2000 }), [])
+  const revealSearchHit = useRevealSearchHit({
+    setExpandedNodes, provider, scrollIntoView: scrollToRow,
+    // A level the reveal furnished itself is not fetched again by the first-page effect below.
+    markFirstPageHandled: (id) => { autoLoadedFirstPageRef.current.add(id) },
+  })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
   // 400px rail from the wider Build Mode panel — only one mounts at a time.
@@ -267,9 +309,17 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Build hierarchy tree from the shared containment maps. Names follow the
   // persona, as on the other canvases, so the rows sort and search by the
   // names they show.
+  //
+  // A node that comes out of a rebuild as it went in is the SAME object as before: a page landing
+  // rebuilds the tree, and only the rows it changed (its container, and the containers above) then
+  // re-render — not every row on screen.
   const personaMode = usePersonaMode()
+  const builtNodesRef = useRef(new Map<string, HierarchyNode>())
   const hierarchyTree = useMemo(() => {
     if (!nodes.length) return []
+    const before = builtNodesRef.current
+    const built = new Map<string, HierarchyNode>()
+    builtNodesRef.current = built
 
     const buildTree = (nodeId: string, depth: number): HierarchyNode | null => {
       const node = nodeMap.get(nodeId)
@@ -280,7 +330,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         .filter((n): n is HierarchyNode => n !== null)
         .sort((a, b) => a.name.localeCompare(b.name))
 
-      return {
+      const fresh: HierarchyNode = {
         id: node.id,
         typeId: node.data.type as string,
         name: resolveEntityName(node.data, personaMode, node.id),
@@ -291,6 +341,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         entityTypeOption: (node.data.type as string) ?? '',
         tags: (node.data.classifications as string[]) ?? [],
       }
+      const prior = before.get(node.id)
+      const kept = prior && sameRow(prior, fresh) ? prior : fresh
+      built.set(node.id, kept)
+      return kept
     }
 
     return hierarchyRoots
@@ -345,13 +399,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       paths.forEach((path) => path?.forEach((id) => next.add(id)))
       return next
     })
-    setTimeout(() => {
-      const element = document.getElementById(`hierarchy-node-${first}`)
-      element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      useCanvasStore.getState().pulseNode(first)
-    }, 100)
+    scrollToRow(first)
     return true
-  }, [flatIndex])
+  }, [flatIndex, scrollToRow])
   const revealRow = useCallback((nodeId: string) => { revealRows([nodeId]) }, [revealRows])
   const locateRows = useCallback((nodeIds: string[]) => { revealRows(nodeIds) }, [revealRows])
 
@@ -362,16 +412,54 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // "Show on canvas" from a question opens the path the same way.
   useCanvasReveal(expandToNode)
 
-  // The rows on screen, in the order they are drawn: a collapsed subtree contributes nothing.
-  const visibleRowIds = useMemo(() => {
-    const ids: string[] = []
-    const walk = (n: HierarchyNode) => {
-      ids.push(n.id)
-      if (expandedNodes.has(n.id)) n.children.forEach(walk)
+  // The canvas filter (Isolate / Hide) drops rows here, from the list itself — not row by row as
+  // they render — so the virtualizer's count and offsets close up around them. A selected row is
+  // never dropped (useSearchHighlight's rule).
+  const matchUrnSet = useSearchStore((s) => s.matchUrnSet)
+  const ancestorMatchCounts = useSearchStore((s) => s.ancestorMatchCounts)
+  const canvasFilterMode = useSearchStore((s) => s.canvasFilterMode)
+  const filtering = matchUrnSet.size > 0 && canvasFilterMode !== 'highlight'
+  const typeColors = useMemo(
+    () => new Map((schema?.entityTypes ?? []).map((et) => [et.id, et.visual?.color ?? '#6b7280'])),
+    [schema],
+  )
+
+  // The rows, in the order they are drawn: a collapsed subtree contributes nothing. Under an open
+  // container's children, one paging row while more of it remain — its first page included, so the
+  // row says it is loading. Not built from what is loading: a page starting or settling would
+  // otherwise walk every row again. Each row carries the colours of the levels above it, for its
+  // guide rails.
+  const keptBySelection = filtering ? selectedIdSet : NO_IDS
+  const rows = useMemo(() => {
+    const out: TreeRow[] = []
+    const hidden = (n: HierarchyNode) => {
+      if (!filtering || keptBySelection.has(n.id)) return false
+      const key = n.urn ?? n.id
+      const isMatch = matchUrnSet.has(key)
+      return canvasFilterMode === 'isolate' ? !isMatch && (ancestorMatchCounts.get(key) ?? 0) === 0 : isMatch
     }
-    hierarchyTree.forEach(walk)
-    return ids
-  }, [hierarchyTree, expandedNodes])
+    const level = (siblings: readonly HierarchyNode[], depth: number, guides: readonly string[]) => {
+      const shown = siblings.filter((n) => !hidden(n))
+      shown.forEach((n, i) => {
+        out.push({ kind: 'node', node: n, depth, guides, posInSet: i + 1, setSize: shown.length })
+        if (!expandedNodes.has(n.id)) return
+        const inner = [...guides, typeColors.get(n.typeId) ?? '#6b7280']
+        level(n.children, depth + 1, inner)
+        const childCount = Number(n.data.childCount ?? 0) || 0
+        const remaining = Math.max(0, childCount - n.children.length)
+        const more = remaining > 0 && exhaustedParents.get(n.id) !== childCount
+        if (more) out.push({ kind: 'more', parent: n, depth: depth + 1, guides: inner, remaining })
+      })
+    }
+    level(hierarchyTree, 0, [])
+    return out
+  }, [hierarchyTree, expandedNodes, exhaustedParents, typeColors,
+    filtering, canvasFilterMode, matchUrnSet, ancestorMatchCounts, keptBySelection])
+  // The entity rows alone — what a Shift-range, ⌘A and the arrow keys walk.
+  const visibleRowIds = useMemo(
+    () => rows.flatMap((r) => (r.kind === 'node' ? [r.node.id] : [])),
+    [rows],
+  )
   const rowIndex = useMemo(() => new Map(visibleRowIds.map((id, i) => [id, i])), [visibleRowIds])
 
   // Row click → selection, as on the Context View's columns. Cmd/Ctrl toggles the row; Shift ADDS
@@ -428,10 +516,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     // so a slow response doesn't repopulate a collapsed subtree.
     if (isCurrentlyExpanded) {
       cancelChildLoad(nodeId)
+      // A first page cut off here is asked for again when the row next opens, however it opens.
+      autoLoadedFirstPageRef.current.delete(nodeId)
       return
     }
 
-    // 2. Load Children using Generic Hook
+    // 2. Load Children using Generic Hook — the first page is in hand, for the effect below.
+    autoLoadedFirstPageRef.current.add(nodeId)
     pendingLoadRef.current.add(nodeId)
     try {
       await loadChildren(nodeId)
@@ -440,15 +531,163 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     }
   }, [loadChildren, cancelChildLoad, expandedNodes])
 
-  // Expand/collapse all
-  const expandAll = useCallback(() => {
-    const allIds = flatNodes.map((n) => n.id)
-    setExpandedNodes(new Set(allIds))
-  }, [flatNodes])
+  // A container opened any other way — a whole level at once, a search's path, a trace — with
+  // nothing of it loaded gets its FIRST page here (the Context View's rule,
+  // shouldAutoLoadFirstPage); otherwise it opens onto nothing. Once per container, so one whose
+  // page brings nothing is not asked again and this can never pump. Later pages are the paging
+  // row's.
+  useEffect(() => {
+    for (const nodeId of expandedNodes) {
+      if (loadingNodes.has(nodeId) || failedNodes.has(nodeId)) continue
+      if (!shouldAutoLoadFirstPage({
+        nodeId, displayMap: flatIndex, childMap, autoLoaded: autoLoadedFirstPageRef.current,
+      })) continue
+      autoLoadedFirstPageRef.current.add(nodeId)
+      void loadChildren(nodeId)
+    }
+  }, [expandedNodes, flatIndex, childMap, loadingNodes, failedNodes, loadChildren])
 
-  const collapseAll = useCallback(() => {
-    setExpandedNodes(new Set())
-  }, [])
+  // ── OPEN WHAT IS INSIDE, a level at a time (useExpandBelow) ──────────────
+  // The toolbar's Expand (the whole tree), a row's menu, the selection bar, and ⇧→ / ⇧← on a
+  // row: as on the Context View. One expansion update per level, each container's first page
+  // through the loader the chevron uses (its bounded queue); every level only when the reader
+  // switches All levels on, pausing every 2,000 entities loaded.
+  const expandDepthMode = usePreferencesStore((s) => s.expandDepthMode) ?? 'level'
+  const setExpandDepthMode = usePreferencesStore((s) => s.setExpandDepthMode)
+  const expandTree = useMemo<ExpandTree>(() => ({
+    expanded: expandedNodes,
+    childrenOf: (id) => flatIndex.get(id)?.children.map((c) => c.id) ?? [],
+    isContainer: (id) => {
+      const n = flatIndex.get(id)
+      return !!n && (n.children.length > 0 || Number(n.data.childCount ?? 0) > 0)
+    },
+  }), [expandedNodes, flatIndex])
+  const { expand: runExpand, cancel: cancelExpand, running: expanding } = useExpandBelow({
+    ...expandTree,
+    parentOf: (id) => parentMap.get(id),
+    open: (ids) => setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.add(id)
+      return next
+    }),
+    // The run asks for these first pages itself: the effect above is told they are in hand.
+    loadFirstPage: (id) => {
+      autoLoadedFirstPageRef.current.add(id)
+      return loadChildren(id)
+    },
+    cancelLoad: cancelChildLoad,
+    loading: loadingNodes,
+    loadedCount: () => useCanvasStore.getState().nodes.length,
+    firstPageSize: (id) => Math.min(Number(flatIndex.get(id)?.data.childCount ?? 0), CHILDREN_PAGE_SIZE),
+    labelOf: (id) => flatIndex.get(id)?.name || id,
+  })
+  // A run says what it is doing in its own keyed toast; the generic one would say it twice.
+  useLoadingNotification('hier-children', isLoadingChildren && !expanding, 'Expanding hierarchy')
+  const expandRows = useCallback((ids: readonly string[]) => {
+    runExpand(ids, expandDepthMode === 'all')
+  }, [runExpand, expandDepthMode])
+  const rootIds = useMemo(() => hierarchyTree.map((n) => n.id), [hierarchyTree])
+  const expandAll = useCallback(() => expandRows(rootIds), [expandRows, rootIds])
+  // With every container open, the toolbar's Expand has nothing left to do and says so. Not asked
+  // while a run goes: the control is Stop then, and each page landing would walk the tree again.
+  const canExpandAll = useMemo(
+    () => !expanding && nextLevel(rootIds, expandTree).ids.length > 0,
+    [expanding, rootIds, expandTree],
+  )
+
+  // What Collapse closes for these rows. COLLAPSE EVERYTHING INSIDE: the rows stay open on their
+  // first level and every row beneath them closes. With nothing open beneath — straight after one
+  // "Expand next level" — it closes the rows themselves ("Collapse"), so the way back from the
+  // last step is always offered.
+  const collapseTargets = useCallback((ids: readonly string[]) => {
+    const roots = outermost(ids, (id) => parentMap.get(id))
+    const below: string[] = []
+    const stack = roots.flatMap((id) => expandTree.childrenOf(id))
+    while (stack.length > 0) {
+      const id = stack.pop()!
+      if (!expandTree.expanded.has(id)) continue
+      below.push(id)
+      stack.push(...expandTree.childrenOf(id))
+    }
+    if (below.length > 0) return { close: below, self: false }
+    const open = roots.filter((id) => expandTree.expanded.has(id))
+    return { close: open, self: open.length > 0 }
+  }, [parentMap, expandTree])
+  // Closing also stops what is still loading or queued for them (a no-op for the rest). Nothing
+  // loaded is let go: a single collapse here keeps its rows too, and the next open shows them
+  // without a fetch.
+  const closeRows = useCallback((ids: readonly string[]) => {
+    if (expanding) cancelExpand()
+    for (const id of ids) {
+      cancelChildLoad(id)
+      autoLoadedFirstPageRef.current.delete(id)
+    }
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+  }, [expanding, cancelExpand, cancelChildLoad])
+  const collapseInside = useCallback((ids: readonly string[]) => {
+    const { close } = collapseTargets(ids)
+    if (close.length > 0) closeRows(close)
+  }, [collapseTargets, closeRows])
+  const collapseAll = useCallback(() => closeRows([...expandedNodes]), [closeRows, expandedNodes])
+  /** What Expand and Collapse would do for these rows, for the menu and the bar. */
+  const expandChoices = useCallback((ids: readonly string[]) => {
+    const roots = outermost(ids, (id) => parentMap.get(id))
+    const collapse = collapseTargets(roots)
+    return {
+      canExpand: nextLevel(roots, expandTree).ids.length > 0,
+      canCollapse: collapse.close.length > 0,
+      collapseLabel: collapse.self ? 'Collapse' : 'Collapse everything inside',
+    }
+  }, [parentMap, expandTree, collapseTargets])
+  // The menu's rows, for the entity right-clicked or the selection it is part of: Expand (with
+  // its All levels switch), Collapse — or, while a run is going, the way to stop it.
+  const expandMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const { target, isOpen } = interactions.state.contextMenu
+    // Only while the menu is open: its target outlives it, and this walks the open tree beneath.
+    if (!isOpen || !target || target.type !== 'node') return []
+    if (expanding) return [{ id: 'expand-stop', label: 'Stop opening', icon: 'CircleStop', onClick: cancelExpand }]
+    const ids = menuSelection(target.id, selectedNodeIds)
+    const { canExpand, canCollapse, collapseLabel } = expandChoices(ids)
+    const all = expandDepthMode === 'all'
+    return [
+      ...(canExpand ? [{
+        id: 'expand-below',
+        label: all ? 'Expand all levels' : 'Expand next level',
+        icon: all ? 'ChevronsDown' as const : 'ChevronDown' as const,
+        shortcut: '⇧→',
+        toggle: { label: 'All levels', checked: all, onChange: (on: boolean) => setExpandDepthMode(on ? 'all' : 'level') },
+        onClick: () => expandRows(ids),
+      }] : []),
+      ...(canCollapse ? [{
+        id: 'collapse-inside',
+        label: collapseLabel,
+        icon: 'ChevronsUp' as const,
+        shortcut: '⇧←',
+        onClick: () => collapseInside(ids),
+      }] : []),
+    ]
+  }, [interactions.state.contextMenu, selectedNodeIds, expanding, cancelExpand, expandChoices,
+    expandDepthMode, setExpandDepthMode, expandRows, collapseInside])
+  // The selection bar's: the same, for every entity held.
+  const selectionExpand = useMemo(() => {
+    const held = selectedNodeIds.filter(isSelectableNode)
+    if (held.length < 2) return undefined
+    const { canExpand, canCollapse, collapseLabel } = expandChoices(held)
+    if (!canExpand && !canCollapse && !expanding) return undefined
+    return {
+      collapseLabel,
+      allLevels: expandDepthMode === 'all',
+      onToggleAllLevels: () => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all'),
+      onExpand: canExpand ? () => expandRows(held) : undefined,
+      onCollapse: canCollapse ? () => collapseInside(held) : undefined,
+      running: expanding,
+      onCancel: cancelExpand,
+    }
+  }, [selectedNodeIds, expandChoices, expanding, expandDepthMode, setExpandDepthMode, expandRows, collapseInside, cancelExpand])
 
   // Keyboard shortcut for search
   useEffect(() => {
@@ -467,6 +706,40 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
+  // ── THE LIST (HierarchyList, below): what its rows and keys call ──
+  // Read through a ref, so the list — and each row — re-renders for what it shows, not for every
+  // render of the canvas around it.
+  const listActions: HierarchyListActions = {
+    select: handleRowSelect,
+    toggle: (id) => { void toggleNode(id) },
+    openContextMenu: (e, id) => interactions.openContextMenu(e, { type: 'node', id, data: flatIndex.get(id)?.data || {} }),
+    startInlineEdit: (id) => {
+      const node = flatIndex.get(id)
+      const element = document.getElementById(`hierarchy-node-${id}`)
+      if (!element || !node) return
+      const rect = element.getBoundingClientRect()
+      interactions.startInlineEdit(
+        id,
+        node.name,
+        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+        (node.data.businessLabel as string | undefined)?.trim() ? 'businessLabel' : 'label',
+      )
+    },
+    expandRows,
+    collapseInside,
+    loadMore: (id) => { void loadChildren(id) },
+    selectNode,
+    parentOf: (id) => parentMap.get(id),
+    isContainer: expandTree.isContainer,
+  }
+  const listActionsRef = useRef(listActions)
+  useEffect(() => { listActionsRef.current = listActions })
+  const clearScrollTarget = useCallback(() => setScrollTarget(null), [])
+  const searchResultSet = useMemo(() => new Set(searchResults), [searchResults])
+  // The paging row's one-page-ahead fetch, as on the Context View — off while a filter drops
+  // rows (the row would stay in view and drain its container).
+  const pageAhead = !filtering
+
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
       {/* Roots/orphans beyond the first page — reachable, and said so. */}
@@ -476,11 +749,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <CanvasToolRow
         lead={
           <div className="flex items-center gap-1">
-            <HoverTip className="inline-flex" label="Open every row" detail="Shows everything inside each entity">
-              <button type="button" onClick={expandAll} aria-label="Expand all" className="btn btn-ghost btn-sm">
-                <LucideIcons.ChevronsDownUp className="w-4 h-4 rotate-180" />
-              </button>
-            </HoverTip>
+            <TreeExpandControl
+              allLevels={expandDepthMode === 'all'}
+              onToggleAllLevels={() => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all')}
+              onExpand={canExpandAll ? expandAll : undefined}
+              running={expanding}
+              onStop={cancelExpand}
+            />
             <HoverTip className="inline-flex" label="Close every row" detail="Back to the top-level entities">
               <button type="button" onClick={collapseAll} aria-label="Collapse all" className="btn btn-ghost btn-sm">
                 <LucideIcons.ChevronsDownUp className="w-4 h-4" />
@@ -561,49 +836,33 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <div className="flex-1 min-h-0 flex">
         {/* Hierarchy Content — the selection bar floats over it, outside the scroll. */}
         <div className="relative flex-1 min-w-0">
-        <div className={cn('relative h-full overflow-auto p-6 custom-scrollbar', selectedNodeIds.length > 1 && 'pb-24')}>
-          {hierarchyTree.length === 0 ? (
-            !isHydratingInitial && <BuilderEmptyState />
-          ) : (
-            <div className="space-y-3">
-              {hierarchyTree.map((rootNode) => (
-                <HierarchyContainer
-                  key={rootNode.id}
-                  node={rootNode}
-                  schema={schema}
-                  selectedIds={selectedIdSet}
-                  expandedNodes={expandedNodes}
-                  searchResults={searchResults}
-                  onSelect={handleRowSelect}
-                  onToggle={toggleNode}
-                  onContextMenu={(e, nodeId) => {
-                    interactions.openContextMenu(e, {
-                      type: 'node',
-                      id: nodeId,
-                      data: flatNodes.find(n => n.id === nodeId)?.data || {}
-                    })
-                  }}
-                  onDoubleClick={!editModeEnabled ? undefined : (nodeId, e) => {
-                    const node = flatNodes.find(n => n.id === nodeId)
-                    const element = document.getElementById(`hierarchy-node-${nodeId}`)
-                    if (element && node) {
-                      const rect = element.getBoundingClientRect()
-                      interactions.startInlineEdit(
-                        nodeId,
-                        node.name,
-                        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-                        (node.data.businessLabel as string | undefined)?.trim() ? 'businessLabel' : 'label',
-                      )
-                    }
-                  }}
-                  isTraceActive={trace.isTracing}
-                  traceContextSet={traceContextSet}
-                  traceFocusId={trace.focusId}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        {hierarchyTree.length === 0 ? (
+          <div className="h-full overflow-auto p-6 custom-scrollbar">
+            {!isHydratingInitial && <BuilderEmptyState />}
+          </div>
+        ) : (
+          <HierarchyList
+            rows={rows}
+            visibleRowIds={visibleRowIds}
+            rowIndex={rowIndex}
+            schema={schema}
+            selectedIds={selectedIdSet}
+            expandedNodes={expandedNodes}
+            loadingNodes={loadingNodes}
+            failedNodes={failedNodes}
+            searchResults={searchResultSet}
+            isTraceActive={trace.isTracing}
+            traceContextSet={traceContextSet}
+            traceFocusId={trace.focusId}
+            expanding={expanding}
+            editable={editModeEnabled}
+            selectionBarRoom={selectedNodeIds.length > 1}
+            pageAhead={pageAhead}
+            scrollTarget={scrollTarget}
+            onScrollTargetDone={clearScrollTarget}
+            actionsRef={listActionsRef}
+          />
+        )}
         <SelectionBar
           nodeIds={selectedNodeIds}
           labelFor={(id) => flatIndex.get(id)?.name || id}
@@ -611,6 +870,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           onClear={clearSelection}
           onOpenShared={() => useCanvasStore.getState().openNodesDrawer(selectedNodeIds)}
           sharedEditable={canvasWritable}
+          expand={selectionExpand}
           placementClassName="left-4 right-4 bottom-16"
         />
         </div>
@@ -739,6 +999,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCreateNode={editModeEnabled ? () => useHierarchyBuilderStore.getState().open() : undefined}
         onSelectAll={interactions.selectAll}
         customActions={selectionMenuActions}
+        expandActions={expandMenuActions}
       />
 
       {/* Review & Save — opened from the header's controls, a drawer's "Review & Save", or a
@@ -779,47 +1040,330 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   )
 }
 
-interface HierarchyContainerProps {
-  node: HierarchyNode
-  schema: ReturnType<typeof useSchemaStore.getState>['schema']
-  selectedIds: ReadonlySet<string>
-  expandedNodes: Set<string>
-  searchResults: string[]
-  onSelect: (id: string, event: React.MouseEvent) => void
-  onToggle: (id: string) => void
-  onContextMenu?: (e: React.MouseEvent, nodeId: string) => void
-  onDoubleClick?: (nodeId: string, event: React.MouseEvent) => void
-  depth?: number
-  // Trace highlighting props
-  isTraceActive?: boolean
-  traceContextSet?: Set<string>
-  traceFocusId?: string | null
+/** What the list's rows and keys call — the canvas's, read through a ref. */
+interface HierarchyListActions {
+  select: (id: string, e: React.MouseEvent) => void
+  toggle: (id: string) => void
+  openContextMenu: (e: React.MouseEvent, id: string) => void
+  startInlineEdit: (id: string) => void
+  expandRows: (ids: readonly string[]) => void
+  collapseInside: (ids: readonly string[]) => void
+  loadMore: (id: string) => void
+  selectNode: (id: string, additive?: boolean) => void
+  parentOf: (id: string) => string | undefined
+  isContainer: (id: string) => boolean
 }
 
-function HierarchyContainer({
+interface HierarchyListProps {
+  rows: readonly TreeRow[]
+  /** The entity rows alone, in order, and where each sits among them. */
+  visibleRowIds: readonly string[]
+  rowIndex: ReadonlyMap<string, number>
+  schema: ReturnType<typeof useSchemaStore.getState>['schema']
+  selectedIds: ReadonlySet<string>
+  expandedNodes: ReadonlySet<string>
+  loadingNodes: ReadonlySet<string>
+  failedNodes: ReadonlySet<string>
+  searchResults: ReadonlySet<string>
+  isTraceActive: boolean
+  traceContextSet: ReadonlySet<string>
+  traceFocusId: string | null
+  /** A level run is opening rows: they appear, they do not slide in. */
+  expanding: boolean
+  /** Double-click renames. */
+  editable: boolean
+  /** Room at the foot for the selection bar floating over it. */
+  selectionBarRoom: boolean
+  /** The paging row's one-page-ahead fetch. */
+  pageAhead: boolean
+  /** A row to bring on screen and pulse once the list holds it — until it expires. */
+  scrollTarget: { id: string; until: number } | null
+  onScrollTargetDone: () => void
+  actionsRef: React.RefObject<HierarchyListActions>
+}
+
+/** The rows: ONE flat, virtualized list, as the Context View's columns are (LayerColumn), and the
+ *  keys that walk it. Its own component, so a scroll re-renders the rows on screen — not the
+ *  canvas, its toolbar and its drawers. */
+const HierarchyList = memo(function HierarchyList({
+  rows, visibleRowIds, rowIndex, schema, selectedIds, expandedNodes, loadingNodes, failedNodes, searchResults,
+  isTraceActive, traceContextSet, traceFocusId, expanding, editable, selectionBarRoom, pageAhead,
+  scrollTarget, onScrollTargetDone, actionsRef,
+}: HierarchyListProps) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Where each entity sits in the list, for the virtualizer.
+  const rowPos = useMemo(() => {
+    const pos = new Map<string, number>()
+    rows.forEach((r, i) => { if (r.kind === 'node') pos.set(r.node.id, i) })
+    return pos
+  }, [rows])
+  // One identity per list: a new one would have the virtualizer re-measure every row on each render.
+  const getItemKey = useCallback((index: number) => {
+    const row = rows[index]!
+    return row.kind === 'node' ? row.node.id : `more:${row.parent.id}`
+  }, [rows])
+  const personaMode = usePersonaMode()
+  const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
+  const showTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
+  const rowEstimate = ROW_ESTIMATE + (personaMode === 'technical' && showEntityIds ? TECHNICAL_LINE : 0)
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => rowEstimate,
+    overscan: 8,
+    paddingStart: 24,
+    paddingEnd: selectionBarRoom ? 96 : 24,
+    getItemKey,
+  })
+  // The persona or Display settings change every row's height: measured sizes held for rows off
+  // screen are let go, or the list keeps their old heights (as LayerColumn does).
+  useEffect(() => { virtualizer.measure() }, [personaMode, showEntityIds, showTypeBadge, virtualizer])
+
+  // Rows that appeared since the list last changed slide in — the first few, where the reader
+  // opened one container. A level opened at once (a run) and the first paint simply appear.
+  const seenRowsRef = useRef<ReadonlySet<string> | null>(null)
+  const newRows = useMemo(() => {
+    const seen = seenRowsRef.current
+    if (!seen || expanding) return NO_IDS
+    const fresh = new Set<string>()
+    for (const id of visibleRowIds) {
+      if (fresh.size >= ANIMATE_NEW_MAX) break
+      if (!seen.has(id)) fresh.add(id)
+    }
+    return fresh
+  }, [visibleRowIds, expanding])
+  useEffect(() => { seenRowsRef.current = new Set(visibleRowIds) }, [visibleRowIds])
+
+  // A row asked for (a reveal, a search hit, the drawer's locate) is brought on screen once the
+  // list holds it, and pulses.
+  useEffect(() => {
+    if (!scrollTarget) return
+    if (Date.now() > scrollTarget.until) { onScrollTargetDone(); return }
+    const index = rowPos.get(scrollTarget.id)
+    if (index === undefined) return
+    onScrollTargetDone()
+    virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' })
+    useCanvasStore.getState().pulseNode(scrollTarget.id)
+  }, [scrollTarget, onScrollTargetDone, rowPos, virtualizer])
+
+  // ── KEYBOARD: the tree is one tab stop and the arrows walk its rows (the WAI-ARIA tree) ──
+  // ↑ ↓ Home End move; → opens a row (or steps into it), ← closes it (or steps out); ⇧→ / ⇧←
+  // expand the next level / collapse inside, as on the Context View; Space adds the row to the
+  // selection, Enter selects it. The ring shows only while the keys are driving.
+  const [focusedId, setFocusedId] = useState<string | null>(null)
+  const [keyNav, setKeyNav] = useState(false)
+  const focusRow = useCallback((id: string | undefined) => {
+    if (!id) return
+    setFocusedId(id)
+    setKeyNav(true)
+    const index = rowPos.get(id)
+    if (index !== undefined) virtualizer.scrollToIndex(index, { align: 'auto' })
+  }, [rowPos, virtualizer])
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (visibleRowIds.length === 0) return
+    const actions = actionsRef.current
+    const at = focusedId !== null ? rowIndex.get(focusedId) : undefined
+    const last = visibleRowIds.length - 1
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); focusRow(visibleRowIds[at === undefined ? 0 : Math.min(at + 1, last)]); return
+      case 'ArrowUp': e.preventDefault(); focusRow(visibleRowIds[at === undefined ? 0 : Math.max(at - 1, 0)]); return
+      case 'Home': e.preventDefault(); focusRow(visibleRowIds[0]); return
+      case 'End': e.preventDefault(); focusRow(visibleRowIds[last]); return
+    }
+    const id = at !== undefined ? visibleRowIds[at] : undefined
+    if (!id) return
+    // Typed on a control inside a row, Space and Enter are the control's.
+    const onTree = e.target === e.currentTarget
+    switch (e.key) {
+      case 'ArrowRight': {
+        e.preventDefault()
+        const below = visibleRowIds[at! + 1]
+        if (e.shiftKey) actions.expandRows([id])
+        else if (!expandedNodes.has(id)) { if (actions.isContainer(id)) actions.toggle(id) }
+        else if (below && actions.parentOf(below) === id) focusRow(below)
+        return
+      }
+      case 'ArrowLeft':
+        e.preventDefault()
+        if (e.shiftKey) actions.collapseInside([id])
+        else if (expandedNodes.has(id)) actions.toggle(id)
+        else focusRow(actions.parentOf(id))
+        return
+      case ' ':
+        if (!onTree) return
+        e.preventDefault()
+        actions.selectNode(id, true)
+        return
+      case 'Enter': {
+        if (!onTree || e.metaKey || e.ctrlKey) return
+        // Enter on the row already selected is the canvas's "Enter — Edit Selected": let it
+        // through. Selecting, it stops here, or the canvas would also edit what WAS selected.
+        if (selectedIds.size === 1 && selectedIds.has(id)) return
+        e.stopPropagation()
+        actions.selectNode(id)
+        return
+      }
+    }
+  }, [visibleRowIds, focusedId, rowIndex, focusRow, expandedNodes, selectedIds, actionsRef])
+
+  // The rows' handlers keep one identity, so a row re-renders for what it shows.
+  const onRowSelect = useCallback((id: string, e: React.MouseEvent) => {
+    setFocusedId(id)
+    actionsRef.current.select(id, e)
+  }, [actionsRef])
+  const onRowToggle = useCallback((id: string) => actionsRef.current.toggle(id), [actionsRef])
+  const onRowContextMenu = useCallback((e: React.MouseEvent, id: string) => actionsRef.current.openContextMenu(e, id), [actionsRef])
+  const onRowDoubleClick = useCallback((id: string) => actionsRef.current.startInlineEdit(id), [actionsRef])
+
+  return (
+    <div
+      ref={scrollRef}
+      role="tree"
+      aria-label="Hierarchy"
+      aria-multiselectable
+      aria-activedescendant={keyNav && focusedId && rowIndex.has(focusedId) ? `hierarchy-node-${focusedId}` : undefined}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onFocus={(e) => {
+        // Tabbed in (not clicked): the ring shows at once, on the row the keys start from — the
+        // one they left, the row selected, or the first on screen — brought into view.
+        if (e.target !== e.currentTarget || !isFocusVisible(e.currentTarget)) return
+        const onScreen = virtualizer.getVirtualItems().map((v) => rows[v.index]).find((r) => r?.kind === 'node')
+        focusRow(focusedId && rowIndex.has(focusedId)
+          ? focusedId
+          : [...selectedIds].find((id) => rowIndex.has(id)) ?? (onScreen?.kind === 'node' ? onScreen.node.id : undefined))
+      }}
+      onBlur={() => setKeyNav(false)}
+      onPointerDown={() => setKeyNav(false)}
+      className="relative h-full overflow-auto custom-scrollbar outline-none"
+    >
+      <div className="relative mx-6" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const row = rows[item.index]!
+          return (
+            <div
+              key={item.key}
+              data-index={item.index}
+              ref={virtualizer.measureElement}
+              className={cn('absolute left-0 top-0 w-full pb-2', row.kind === 'node' && row.depth === 0 && item.index > 0 && 'pt-1')}
+              style={{ transform: `translateY(${item.start}px)` }}
+            >
+              {/* Guide rails, one per level above, in that level's colour: what a nested
+                  card's border used to say — "inside this" — in a list that is flat. */}
+              {row.guides.map((color, i) => (
+                <span
+                  key={i}
+                  aria-hidden
+                  className="absolute top-0 bottom-0 w-px pointer-events-none"
+                  style={{ left: i * INDENT + INDENT / 2, background: `color-mix(in srgb, ${color} 40%, transparent)` }}
+                />
+              ))}
+              {row.kind === 'node' ? (
+                <HierarchyRow
+                  node={row.node}
+                  depth={row.depth}
+                  posInSet={row.posInSet}
+                  setSize={row.setSize}
+                  schema={schema}
+                  isSelected={selectedIds.has(row.node.id)}
+                  isExpanded={expandedNodes.has(row.node.id)}
+                  isLoading={loadingNodes.has(row.node.id)}
+                  isSearchResult={searchResults.has(row.node.id)}
+                  isFocused={keyNav && focusedId === row.node.id}
+                  animateIn={newRows.has(row.node.id)}
+                  onSelect={onRowSelect}
+                  onToggle={onRowToggle}
+                  onContextMenu={onRowContextMenu}
+                  onDoubleClick={editable ? onRowDoubleClick : undefined}
+                  isTraceActive={isTraceActive}
+                  isHighlighted={isTraceActive && traceContextSet.has(row.node.id)}
+                  isFocusNode={traceFocusId === row.node.id}
+                />
+              ) : (
+                <div role="none" style={{ marginLeft: row.depth * INDENT }}>
+                  <LoadMoreItem
+                    parentId={row.parent.id}
+                    depth={0}
+                    parentIsLast={[]}
+                    count={row.remaining}
+                    // Nothing of it here yet: its first page is loading, or queued.
+                    isLoading={loadingNodes.has(row.parent.id)
+                      || (row.parent.children.length === 0 && !failedNodes.has(row.parent.id))}
+                    failed={failedNodes.has(row.parent.id) && !loadingNodes.has(row.parent.id)}
+                    onLoadMore={() => actionsRef.current.loadMore(row.parent.id)}
+                    // Re-armed only once the list has grown, so it pages as the reader
+                    // scrolls to it — never a container drained unattended. Not for a
+                    // level a search's path opened: the reader was carried there.
+                    autoLoad={pageAhead && !holdsOnlyRevealedChildren(row.parent)}
+                    rearmKey={visibleRowIds.length}
+                  />
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+})
+
+interface HierarchyRowProps {
+  node: HierarchyNode
+  /** Its level: 0 for a root. */
+  depth: number
+  /** Its place among the siblings drawn with it, and how many there are. */
+  posInSet: number
+  setSize: number
+  schema: ReturnType<typeof useSchemaStore.getState>['schema']
+  isSelected: boolean
+  isExpanded: boolean
+  /** A page of its children is on its way. */
+  isLoading: boolean
+  isSearchResult: boolean
+  /** The keys are on this row. */
+  isFocused: boolean
+  /** Newly shown, and few enough to slide in. */
+  animateIn: boolean
+  onSelect: (id: string, event: React.MouseEvent) => void
+  onToggle: (id: string) => void
+  onContextMenu: (e: React.MouseEvent, nodeId: string) => void
+  onDoubleClick?: (nodeId: string, event: React.MouseEvent) => void
+  // Trace highlighting props
+  isTraceActive: boolean
+  /** In the trace, or an ancestor keeping one in view. */
+  isHighlighted: boolean
+  isFocusNode: boolean
+}
+
+/** One row of the list: an entity's card, indented to its level. Its children are rows of their own. */
+const HierarchyRow = memo(function HierarchyRow({
   node,
+  depth,
+  posInSet,
+  setSize,
   schema,
-  selectedIds,
-  expandedNodes,
-  searchResults,
+  isSelected,
+  isExpanded,
+  isLoading,
+  isSearchResult,
+  isFocused,
+  animateIn,
   onSelect,
   onToggle,
   onContextMenu,
   onDoubleClick,
-  depth = 0,
-  isTraceActive = false,
-  traceContextSet = new Set(),
-  traceFocusId = null,
-}: HierarchyContainerProps) {
+  isTraceActive,
+  isHighlighted,
+  isFocusNode,
+}: HierarchyRowProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const childCount = (node.data.childCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
-  const isExpanded = expandedNodes.has(node.id)
-  const isSelected = selectedIds.has(node.id)
-  const isSearchResult = searchResults.includes(node.id)
   // Where a click doesn't open an entity's details, its row offers them.
   const offerDetails = !useOpensDetailsOnSelect()
+  // The jump-to-row pulse (a reveal, a locate).
+  const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(node.id))
 
   // W2.1 — advanced-search match decoration. Lights up the row when
   // the URN is a direct match, surfaces an N-level subtree count
@@ -831,7 +1375,6 @@ function HierarchyContainer({
     ancestorMatchCount,
     ancestorBreakdown,
     isSpotlightDim,
-    isHidden: isHiddenByCanvasFilter,
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityDecoration(node.urn ?? node.id)
@@ -846,9 +1389,6 @@ function HierarchyContainer({
     ? technicalIdentity(node.data, personaMode, { identityProperty, urn: node.urn, name: node.name })
     : undefined
 
-  // Trace highlighting
-  const isHighlighted = isTraceActive && traceContextSet.has(node.id)
-  const isFocusNode = traceFocusId === node.id
   // The view's display rules: a tint and a frame for this card. A focus, a
   // trace highlight or a change decoration paints the same card, and wins.
   const ruleLook = useDisplayRuleLook(changeDeco || isFocusNode || isHighlighted ? undefined : (node.urn ?? node.id))
@@ -877,33 +1417,29 @@ function HierarchyContainer({
     return parts.join(', ')
   }, [rollUpCounts, schema])
 
-  // Canvas filter Isolate / Hide modes drop this row entirely — after every
-  // hook, so a row that is hidden and shown again runs the same hooks.
-  if (isHiddenByCanvasFilter) return null
-
-  // Indentation based on depth
-  const indent = depth * 24
-
   return (
-    <div
+    <motion.div
       id={`hierarchy-node-${node.id}`}
-      style={{ marginLeft: indent }}
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-posinset={posInSet}
+      aria-setsize={setSize}
+      aria-expanded={hasChildren ? isExpanded : undefined}
+      aria-selected={isSelected}
+      initial={animateIn ? { opacity: 0, x: -8 } : false}
+      animate={{ opacity: 1, x: 0 }}
+      transition={MOTION.fadeIn}
+      style={{ marginLeft: depth * INDENT }}
       className="relative"
     >
-      {/* Connector line */}
-      {depth > 0 && (
-        <div
-          className="absolute left-0 top-0 bottom-0 w-px bg-glass-border"
-          style={{ left: -12 }}
-        />
-      )}
-
       {/* Node Container */}
-      <motion.div
-        layout
+      <div
         className={cn(
           "relative rounded-xl border-2 overflow-hidden transition-all duration-200",
           "bg-canvas-elevated",
+          isPulsing && "lineage-pulse",
+          // Where the keys are — the selection's ring keeps its own colour.
+          isFocused && "outline outline-2 outline-offset-2 outline-accent-lineage/60",
           isSelected && !isFocusNode && "ring-2 ring-offset-2",
           isSearchResult && !isSelected && "ring-2 ring-amber-400/50 ring-offset-1",
           // W2.1 — advanced-search direct-match glow (reuses the
@@ -950,6 +1486,9 @@ function HierarchyContainer({
           {/* Expand/Collapse Button */}
           {hasChildren && (
             <button
+              // The tree's arrow keys open and close rows; one tab stop per row would be thousands.
+              tabIndex={-1}
+              aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${node.name}`}
               onClick={(e) => {
                 e.stopPropagation()
                 onToggle(node.id)
@@ -961,10 +1500,12 @@ function HierarchyContainer({
               style={{ color: visual?.color ?? '#6b7280' }}
             >
               <motion.div
-                animate={{ rotate: isExpanded ? 90 : 0 }}
+                animate={{ rotate: isExpanded && !isLoading ? 90 : 0 }}
                 transition={{ duration: 0.15 }}
               >
-                <LucideIcons.ChevronRight className="w-4 h-4" />
+                {isLoading
+                  ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+                  : <LucideIcons.ChevronRight className="w-4 h-4" />}
               </motion.div>
             </button>
           )}
@@ -985,8 +1526,9 @@ function HierarchyContainer({
                 </span>
               )}
               {hasChildren && (
+                // What it holds, loaded or not — "0" on a container never opened read as empty.
                 <span className="px-1.5 py-0.5 rounded text-2xs font-medium bg-black/5 dark:bg-white/10 text-ink-muted">
-                  {node.children.length}
+                  {Math.max(node.children.length, childCount).toLocaleString()}
                 </span>
               )}
             </div>
@@ -1065,8 +1607,8 @@ function HierarchyContainer({
             </button>
           )}
 
-          {/* Add child — hover-visible; direct store import so the recursive
-              render never threads an onAddChild prop down every level. */}
+          {/* Add child — hover-visible; direct store import so the list never threads an
+              onAddChild prop to every row. */}
           {(entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
             <HoverTip label={`Add inside ${node.name}`} detail="Opens the builder with this as the parent" className="inline-flex">
               <button
@@ -1089,42 +1631,98 @@ function HierarchyContainer({
             </div>
           )}
         </div>
+      </div>
+    </motion.div>
+  )
+})
 
-        {/* Children (collapsible) */}
-        <AnimatePresence>
-          {hasChildren && isExpanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="overflow-hidden"
-            >
-              <div className="px-4 pb-4 pt-1 space-y-2 border-t border-glass-border/50">
-                {node.children.map((child) => (
-                  <HierarchyContainer
-                    key={child.id}
-                    node={child}
-                    schema={schema}
-                    selectedIds={selectedIds}
-                    expandedNodes={expandedNodes}
-                    searchResults={searchResults}
-                    onSelect={onSelect}
-                    onToggle={onToggle}
-                    onContextMenu={onContextMenu}
-                    onDoubleClick={onDoubleClick}
-                    depth={depth + 1}
-                    isTraceActive={isTraceActive}
-                    traceContextSet={traceContextSet}
-                    traceFocusId={traceFocusId}
-                  />
-                ))}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.div>
-    </div>
+/** Focus that came from the keys, not a click — where the browser can tell. */
+function isFocusVisible(el: HTMLElement): boolean {
+  try { return el.matches(':focus-visible') } catch { return true }
+}
+
+/** Every child of `node` on the canvas came with a search's path, none with a page of its own. */
+function holdsOnlyRevealedChildren(node: HierarchyNode): boolean {
+  return node.children.length > 0
+    && node.children.every((child) => (child.data as { viaReveal?: boolean } | undefined)?.viaReveal === true)
+}
+
+/** The toolbar's Expand, for the whole tree: the next level at each press — or, with All levels
+ *  on (the remembered preference the Context View's Expand shares), every level, pausing every
+ *  2,000 entities loaded. While a run goes, the way to stop it. */
+function TreeExpandControl({ allLevels, onToggleAllLevels, onExpand, running, onStop }: {
+  allLevels: boolean
+  onToggleAllLevels: () => void
+  /** Absent with nothing to open. */
+  onExpand?: () => void
+  running: boolean
+  onStop: () => void
+}) {
+  const segment = cn(
+    'flex items-center gap-1.5 h-8 text-xs font-medium whitespace-nowrap transition-colors duration-150',
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
+  )
+  if (running) {
+    return (
+      <HoverTip className="inline-flex" label="Stop opening" detail="What has loaded stays open">
+        <button
+          type="button"
+          onClick={onStop}
+          className={cn(segment, 'px-2.5 rounded-lg border border-accent-lineage/30 bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/15')}
+        >
+          <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+          Stop opening
+        </button>
+      </HoverTip>
+    )
+  }
+  return (
+    <span
+      role="group"
+      aria-label="Expand the hierarchy"
+      className="flex items-center rounded-lg border border-glass-border bg-black/[0.03] dark:bg-white/[0.04] overflow-hidden"
+    >
+      <HoverTip
+        className="inline-flex"
+        label={!onExpand ? 'Everything is open' : allLevels ? 'Open every level' : 'Open the next level'}
+        detail={!onExpand
+          ? 'Collapse all to start again from the top'
+          : allLevels
+            ? 'A level at a time, loading what is inside — pausing every 2,000 entities to ask'
+            : 'Each press opens one level deeper, loading what is inside'}
+      >
+        <button
+          type="button"
+          onClick={onExpand}
+          disabled={!onExpand}
+          aria-label={allLevels ? 'Expand all levels' : 'Expand next level'}
+          className={cn(segment, 'px-2 text-ink hover:text-accent-lineage hover:bg-black/[0.04] dark:hover:bg-white/[0.06] disabled:opacity-40 disabled:pointer-events-none')}
+        >
+          {allLevels
+            ? <LucideIcons.ChevronsDown className="w-4 h-4" aria-hidden />
+            : <LucideIcons.ChevronDown className="w-4 h-4" aria-hidden />}
+        </button>
+      </HoverTip>
+      <HoverTip
+        className="inline-flex"
+        label={allLevels ? 'All levels at once' : 'One level at a time'}
+        detail={allLevels ? 'Switch off to open one level per press' : 'Switch on to open every level, with checkpoints'}
+      >
+        <button
+          type="button"
+          role="switch"
+          aria-checked={allLevels}
+          aria-label="All levels"
+          onClick={onToggleAllLevels}
+          className={cn(segment, 'gap-1.5 pl-2 pr-2.5 text-[11px] text-ink-muted hover:text-ink border-l border-glass-border')}
+        >
+          All levels
+          <span className={cn('relative inline-flex h-3.5 w-6 rounded-full transition-colors', allLevels ? 'bg-accent-lineage' : 'bg-black/15 dark:bg-white/20')}>
+            <span className={cn('absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-transform', allLevels ? 'translate-x-3' : 'translate-x-0.5')} />
+          </span>
+        </button>
+      </HoverTip>
+    </span>
   )
 }
 
