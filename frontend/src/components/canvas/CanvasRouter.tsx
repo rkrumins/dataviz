@@ -262,7 +262,8 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           </div>
         )}
 
-        {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
+        {/* Not over the Hierarchy: its own toolbar starts here, with Expand. */}
+        {activeView && CanvasComponent !== HierarchyCanvas && layoutType !== 'graph' && layoutType !== 'reference' && (
           <div className="absolute top-4 left-4 z-10 pointer-events-none">
             <ViewBadge
               name={activeView.name}
