@@ -78,9 +78,9 @@ async def _view(client: AsyncClient, ws_id: str, name="Finance lineage", visibil
     return vid
 
 
-async def _export(client: AsyncClient, *refs, message=None):
+async def _export(client: AsyncClient, *refs, message=None, **options):
     return await client.post("/api/v1/views/transfer/export",
-                             json={"views": [dict(r) for r in refs], "message": message})
+                             json={"views": [dict(r) for r in refs], "message": message, **options})
 
 
 async def test_export_writes_a_verified_file_for_the_current_version(test_client, db_session, fake_graph):
@@ -218,13 +218,15 @@ class _PlacingEngine(_FakeEngine):
         self.chains = chains
 
     async def get_ancestor_chains(self, urns):
+        self.chain_reads = getattr(self, "chain_reads", 0) + 1
         return {u: self.chains[u] for u in urns if u in self.chains}
 
 
 async def test_the_manifest_says_where_each_entity_sat(test_client, db_session, monkeypatch):
-    """Each entity the source found carries its parent and path there, its containers named by
-    one more lookup — a trace view's seeds too. Not where the source can't say, and without
-    changing what the view's hash covers."""
+    """Asked for (``withPath``), each entity the source found carries its parent and path there,
+    its containers named by one more lookup — a trace view's seeds too. Not where the source can't
+    say, and without changing what the view's hash covers. Not asked for, as by default, the
+    manifest names its entities only, and no chain is read."""
     provider = _FakeProvider({
         "urn:a": {"type": "dataset", "name": "revenue", "qualifiedName": "fin.revenue"},
         "urn:anchor": {"type": "domain", "name": "Finance", "qualifiedName": None},
@@ -232,9 +234,11 @@ async def test_the_manifest_says_where_each_entity_sat(test_client, db_session, 
         "urn:db": {"type": "database", "name": "Warehouse", "qualifiedName": None},
     })
 
+    engine = _PlacingEngine(provider, {"urn:a": ["urn:anchor", "urn:db"], "urn:anchor": ["urn:db"],
+                                       "urn:seed": ["urn:db"]})
+
     async def _engine_for(session, workspace_id, data_source_id):
-        return _PlacingEngine(provider, {"urn:a": ["urn:anchor", "urn:db"], "urn:anchor": ["urn:db"],
-                                         "urn:seed": ["urn:db"]})
+        return engine
 
     monkeypatch.setattr("backend.app.services.view_transfer.export.engine_for", _engine_for)
     ws = await _workspace(test_client)
@@ -244,7 +248,11 @@ async def test_the_manifest_says_where_each_entity_sat(test_client, db_session, 
     row.config = json.dumps({**json.loads(row.config), "membership": {
         "v": 1, "sources": [{"spec": {"seeds": {"urns": ["urn:seed"]}}}]}})
     await db_session.flush()
-    view = (await _export(test_client, {"viewId": vid})).json()["views"][0]
+    plain = (await _export(test_client, {"viewId": vid})).json()["views"][0]
+    assert plain["manifest"]["entities"]["urn:a"] == {
+        "name": "revenue", "type": "dataset", "qualifiedName": "fin.revenue"}
+    assert not hasattr(engine, "chain_reads"), "not asked for: no chain is read"
+    view = (await _export(test_client, {"viewId": vid}, withPath=True)).json()["views"][0]
     entities = view["manifest"]["entities"]
     assert entities["urn:a"] == {
         "name": "revenue", "type": "dataset", "qualifiedName": "fin.revenue",

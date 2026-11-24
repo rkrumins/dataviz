@@ -135,7 +135,7 @@ connector written against it keeps working.
 | `properties_json` | Properties too nested for a column, as a JSON object |
 | `baseVersion` | The version an export wrote the row at. An exported row edited offline is merged with what changed since ([§4](#4-full-snapshots-and-deltas)) |
 | `_op` | Blank (or `upsert`) creates or updates; `delete` deletes |
-| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | **Informational, ignored on import.** Where a node sat in the graph it was exported from (an export asked `withPath=true`, the Export dialog's default): its direct container, then every container from the top of the graph down to it, by name and by urn. Lists in NDJSON and JSON; `A / B` and `a; b` in a text cell. The schema names them, so a file you exported validates; they never become properties. To place a node, send its containment edge |
+| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | **Informational, ignored on import.** Where a node sat in the graph it was exported from, in an export asked `withPath=true` only (off by default, as in the Export dialog until someone turns it on): its direct container, then every container from the top of the graph down to it, by name and by urn. Lists in NDJSON and JSON; `A / B` and `a; b` in a text cell. The schema names them, so a file you exported validates; they never become properties. To place a node, send its containment edge |
 
 **What a row says, and what it leaves alone:**
 

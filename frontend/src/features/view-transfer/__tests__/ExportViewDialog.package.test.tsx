@@ -52,6 +52,7 @@ import { cancelExport, getExport, triggerBrowserDownload } from '@/services/impo
 import { startViewPackage } from '@/services/viewTransferApiService'
 import { listViewVersions } from '@/services/viewVersionsApiService'
 import { dismissExport, trackExport, useBackgroundExports } from '@/features/import-export/backgroundExports'
+import { usePreferencesStore } from '@/store/preferences'
 import { ExportViewDialog } from '../ExportViewDialog'
 
 const STARTED: PackageStarted = {
@@ -97,6 +98,7 @@ async function chooseData() {
 describe('ExportViewDialog — a view with its data', () => {
   beforeEach(() => {
     localStorage.clear()
+    usePreferencesStore.setState({ exportWithPath: false })
     vi.mocked(startViewPackage).mockReset().mockResolvedValue(STARTED)
     vi.mocked(getExport).mockReset()
     vi.mocked(cancelExport).mockReset()
@@ -127,7 +129,7 @@ describe('ExportViewDialog — a view with its data', () => {
     await waitFor(() => expect(startViewPackage).toHaveBeenCalledTimes(1))
     expect(vi.mocked(startViewPackage).mock.calls[0]).toEqual([
       [{ viewId: 'view_1', version: null }],
-      { scope: 'source', dataVersion: 'draft', message: undefined, requestId: expect.any(String) },
+      { scope: 'source', dataVersion: 'draft', message: undefined, withPath: false, requestId: expect.any(String) },
     ])
     expect(getExport).toHaveBeenCalledWith('ws1', 'g1', 'exp_1')
     expect(await screen.findByText('Packaged')).toBeInTheDocument()
@@ -186,6 +188,18 @@ describe('ExportViewDialog — a view with its data', () => {
     expect(cancelExport).toHaveBeenCalledWith('ws1', 'g1', 'exp_1')
     expect(await screen.findByText('Export cancelled')).toBeInTheDocument()
     expect(triggerBrowserDownload).not.toHaveBeenCalled()
+  })
+
+  it('packages where each entity sits when the switch is on', async () => {
+    usePreferencesStore.setState({ exportWithPath: true })
+    building({ phase: 'bundle' })
+    renderDialog()
+    await chooseData()
+    expect(screen.getByRole('switch', { name: /Include where each entity sits/ })).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(screen.getByRole('button', { name: /Download/ }))
+
+    await waitFor(() => expect(startViewPackage).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(startViewPackage).mock.calls[0][1]).toMatchObject({ withPath: true })
   })
 
   it('asks again under the same request id when the answer to starting it was lost', async () => {

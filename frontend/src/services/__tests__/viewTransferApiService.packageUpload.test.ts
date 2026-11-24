@@ -169,4 +169,14 @@ describe('exporting a view package', () => {
       views: [{ viewId: 'view_1' }], scope: 'view', dataVersion: 'published', message: null, requestId: 'req-1',
     })
   })
+
+  it('asks for where each entity sits only when wanted', async () => {
+    serve({ 'POST /api/v1/views/transfer/packages': () => json(STARTED, 202) })
+
+    await startViewPackage([{ viewId: 'view_1' }], { scope: 'view', dataVersion: 'published', withPath: true })
+    await startViewPackage([{ viewId: 'view_1' }], { scope: 'view', dataVersion: 'published', withPath: false })
+    const [placed, plain] = vi.mocked(fetchWithTimeout).mock.calls.map((c) => JSON.parse(String(c[1]?.body)))
+    expect(placed.withPath).toBe(true)
+    expect(plain).not.toHaveProperty('withPath')
+  })
 })

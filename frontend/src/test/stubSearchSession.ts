@@ -81,6 +81,7 @@ export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSe
         // must opt IN to "this result answers the box", so a fixture that
         // forgets to say so fails loudly rather than drawing stale hits.
         resultMatchesQuick: false,
+        resultFromBox: false,
         inputRef: createRef<HTMLInputElement>(),
         resolveLayer: vi.fn(() => null),
         layers: [],

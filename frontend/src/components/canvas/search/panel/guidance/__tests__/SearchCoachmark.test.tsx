@@ -52,11 +52,11 @@ describe('SearchCoachmark', () => {
         expect(localStorage.getItem(SEARCH_INTRO_KEY)).toBe('1')
     })
 
-    it("waits while a search is lit on the canvas, whose chip it would cover", () => {
+    // A search on the canvas is said in the header's search box now, which
+    // the tip, opening under the panel's header, does not reach.
+    it('shows while a search is lit on the canvas', () => {
         useSearchStore.setState({ matchUrnSet: new Set(['urn:a']) })
         render(<SearchCoachmark anchor={control()} />, { wrapper: MemoryRouter })
-        expect(screen.queryByRole('status')).not.toBeInTheDocument()
-        act(() => useSearchStore.setState({ matchUrnSet: new Set() }))
         expect(screen.getByRole('status')).toHaveTextContent(/New — Search Studio\./)
     })
 

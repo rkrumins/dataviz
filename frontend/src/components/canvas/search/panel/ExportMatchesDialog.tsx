@@ -9,9 +9,11 @@
  * Choose the format and which properties become columns — the view's own
  * properties, from its exact catalog, each with how many entities carry it
  * — then watch the rows being written. The file downloads when it is ready,
- * and again from here for as long as the dialog is open. Each match also says
- * where it sits, its parent and path (``lib/ancestryColumns``), unless that is
- * switched off: informational columns, which importing the file back skips.
+ * and again from here for as long as the dialog is open. Each match can also
+ * say where it sits, its parent and path (``lib/ancestryColumns``):
+ * informational columns, which importing the file back skips. Off until the
+ * person turns it on; their choice is remembered, the one every data and view
+ * export shares (``exportWithPath``).
  *
  * A Connections search exports its edges instead: each edge's fixed columns
  * — the edge, each end and each end's parent, its properties as JSON — and
@@ -32,6 +34,7 @@ import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { ANCESTRY_COLUMNS } from '@/lib/ancestryColumns'
 import { cn } from '@/lib/utils'
 import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { httpStatusOf } from '@/services/graphRequestFailure'
@@ -97,9 +100,10 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose, onWith
     const [format, setFormat] = useState<Format>('csv')
     const [withDescription, setWithDescription] = useState(true)
     const [withTags, setWithTags] = useState(true)
-    // Where each match sits, as the canvas nests it: on unless asked otherwise. A connection's
-    // ends name their parents already.
-    const [withPath, setWithPath] = useState(true)
+    // Where each match sits, as the canvas nests it: the person's own remembered choice, off at
+    // first. A connection's ends name their parents already.
+    const withPath = usePreferencesStore((s) => s.exportWithPath)
+    const setWithPath = usePreferencesStore((s) => s.setExportWithPath)
     const technical = usePersonaMode() === 'technical'
     const [chosen, setChosen] = useState<string[]>([])
     const [filter, setFilter] = useState('')

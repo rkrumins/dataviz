@@ -212,7 +212,7 @@ class TestPackageScope:
         view = await _seed_view(db_session, ws, config=current_config)
         asked = []
 
-        async def export_views(session, requests, *, actor=None, message=None):
+        async def export_views(session, requests, *, actor=None, message=None, with_path=False):
             asked.append([(row.id, number, may_seal) for row, number, may_seal in requests])
             return {"bundleHash": "sha256:b"}, [SimpleNamespace(definition=sealed_definition)]
 

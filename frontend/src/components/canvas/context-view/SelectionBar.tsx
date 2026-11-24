@@ -33,6 +33,7 @@ import { MOTION } from '@/lib/motion'
 import { Kbd } from '@/components/ui/Kbd'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useBandReservation } from './useBandReservation'
+import { RESUME_LABELS, type PausedRun } from './useExpandBelow'
 
 /** Entities named in full before the rest are summarised. Four fits the bar
  *  at a narrow canvas width without wrapping; beyond that the count carries
@@ -472,17 +473,44 @@ interface ExpandControlProps {
   collapseLabel?: string
   /** A run is going: the control is the way to stop it. */
   running: boolean
+  /** The run these started is paused at a checkpoint: the control is its choices — load more,
+   *  load everything, or stop (`onCancel`). */
+  paused?: Pick<PausedRun, 'message' | 'detail'> & { onResume: (how: 'more' | 'all') => void }
   onCancel: () => void
 }
 
 /** Expand — next level or all levels, the switch on the control itself — and
- *  Collapse everything inside; while a run goes, Stop. */
-function ExpandControl({ allLevels, onToggleAllLevels, onExpand, onCollapse, collapseLabel = 'Collapse everything inside', running, onCancel }: ExpandControlProps) {
+ *  Collapse everything inside; while a run goes, Stop; paused, its choices. */
+function ExpandControl({ allLevels, onToggleAllLevels, onExpand, onCollapse, collapseLabel = 'Collapse everything inside', running, paused, onCancel }: ExpandControlProps) {
   const segment = cn(
     'flex items-center gap-1.5 py-1.5 text-[12.5px] font-medium whitespace-nowrap transition-colors duration-150',
     'text-ink hover:text-accent-lineage',
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
   )
+  if (paused) {
+    return (
+      <span role="group" aria-label={paused.message} className="flex items-center rounded-xl border border-glass-border bg-black/[0.04] dark:bg-white/[0.06] overflow-hidden">
+        <HoverTip className="inline-flex" label={paused.message} detail={paused.detail}>
+          <button type="button" onClick={() => paused.onResume('more')} className={cn(segment, 'pl-3 pr-2.5 rounded-l-xl')}>
+            <LucideIcons.ChevronsDown className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {RESUME_LABELS.more}
+          </button>
+        </HoverTip>
+        <HoverTip className="inline-flex" label="Open everything still closed" detail="Without pausing again">
+          <button type="button" onClick={() => paused.onResume('all')} className={cn(segment, 'px-2.5 border-l border-glass-border')}>
+            <LucideIcons.ArrowDownToLine className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {RESUME_LABELS.all}
+          </button>
+        </HoverTip>
+        <HoverTip className="inline-flex" label={RESUME_LABELS.stop} detail="What has loaded stays open">
+          <button type="button" onClick={onCancel} className={cn(segment, 'pl-2.5 pr-3 rounded-r-xl border-l border-glass-border')}>
+            <LucideIcons.CircleStop className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {RESUME_LABELS.stop}
+          </button>
+        </HoverTip>
+      </span>
+    )
+  }
   if (running) {
     return (
       <button

@@ -9,7 +9,8 @@
  * Notification types:
  *   - success / error / warning / info  — auto-dismiss after 4.5s, or after the
  *                                         caller's own `durationMs`
- *   - loading                           — persists until explicitly dismissed via hideLoading(key)
+ *   - loading                           — persists until explicitly dismissed via hideLoading(key);
+ *                                         `paused`, it waits on the reader and may be closed
  *
  * Usage:
  *   const { notify, showLoading, hideLoading } = useAppNotifications()
@@ -21,7 +22,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { create } from 'zustand'
 import { AnimatePresence, motion } from 'framer-motion'
-import { CheckCircle2, AlertCircle, AlertTriangle, Info, Loader2, X } from 'lucide-react'
+import { CheckCircle2, AlertCircle, AlertTriangle, CirclePause, Info, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -34,11 +35,19 @@ export interface AppNotification {
   id: number
   type: NotificationType
   message: string
+  /** A quieter line under the message: what the choices below rest on. */
+  detail?: string
   /** Stable key for loading notifications — used by hideLoading() to dismiss. */
   key?: string
   action?: NotificationAction
   /** A second way on, beside `action` (a sample just made: its tour, or its example review). */
   secondaryAction?: NotificationAction
+  /** A third, beside those two (a run paused at a checkpoint: more, everything, or stop). */
+  tertiaryAction?: NotificationAction
+  /** A loading notification for work paused on the reader's say-so. It is not busy, so no
+   *  spinner and no busy bar; and it may be closed — what it is about stays paused, for its
+   *  caller to offer again where it was started. */
+  paused?: boolean
   /** How long this one lives, in ms. Defaults to DURATION. An `action` a reader
    * has to notice, read and reach for needs longer than a remark they only
    * read — an Undo that expires first is worse than no Undo at all. */
@@ -253,6 +262,7 @@ export const iconComponents: Record<NotificationType, React.ComponentType<{ clas
 function NotificationCard({ notification }: { notification: AppNotification }) {
   const remove = useNotificationStore(s => s.remove)
   const isLoading = notification.type === 'loading'
+  const isBusy = isLoading && !notification.paused
   const id = notification.id
   const createdAt = notification.createdAt
   const duration = notification.durationMs ?? DURATION
@@ -298,7 +308,9 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
 
   const onDismiss = useCallback(() => remove(id), [remove, id])
 
-  const Icon = iconComponents[notification.type]
+  const Icon = notification.paused ? CirclePause : iconComponents[notification.type]
+  const actions = [notification.action, notification.secondaryAction, notification.tertiaryAction]
+    .filter((a): a is NotificationAction => !!a)
 
   return (
     <motion.div
@@ -320,7 +332,9 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
       // Only the controls below opt back in, so the message can still be
       // dismissed or actioned, and everything else passes straight through.
       className={cn(
-        'w-80 max-w-sm rounded-xl overflow-hidden pointer-events-none',
+        // Three ways on need the room to sit on one line under the message.
+        actions.length > 2 ? 'w-96' : 'w-80',
+        'max-w-sm rounded-xl overflow-hidden pointer-events-none',
         'bg-white dark:bg-slate-800',
         'border border-slate-200 dark:border-slate-700 shadow-lg shadow-black/15 dark:shadow-black/40',
       )}
@@ -329,10 +343,14 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
         <Icon className={cn(
           'w-4.5 h-4.5 flex-shrink-0',
           iconColors[notification.type],
-          isLoading && 'animate-spin',
+          isBusy && 'animate-spin',
         )} />
-        <span className="flex-1 text-sm text-ink leading-snug">{notification.message}</span>
-        {notification.action && !notification.secondaryAction && (
+        {/* A prompt is read before choosing: its lines are balanced, not left with a word over. */}
+        <span className={cn('flex-1 text-sm text-ink leading-snug', notification.paused && 'text-balance')}>
+          {notification.message}
+          {notification.detail && <span className="block mt-0.5 text-xs text-ink-muted">{notification.detail}</span>}
+        </span>
+        {notification.action && actions.length === 1 && (
           <button
             onClick={() => { notification.action!.onClick(); onDismiss() }}
             className="pointer-events-auto flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
@@ -340,7 +358,7 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
             {notification.action.label}
           </button>
         )}
-        {!isLoading && (
+        {!isBusy && (
           <button
             onClick={onDismiss}
             aria-label="Dismiss"
@@ -351,11 +369,11 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
         )}
       </div>
 
-      {/* Two ways on don't fit beside the message: they get a row of their own under it. */}
-      {notification.action && notification.secondaryAction && (
+      {/* Two ways on or more don't fit beside the message: they get a row of their own under it. */}
+      {actions.length > 1 && (
         // Each label lines up with the message above it (the button's own padding sits left of it).
         <div className="-mt-1.5 flex flex-wrap gap-1 pb-3 pl-[38px] pr-3">
-          {[notification.action, notification.secondaryAction].map(a => (
+          {actions.map(a => (
             <button
               key={a.label}
               onClick={() => { a.onClick(); onDismiss() }}
@@ -381,8 +399,8 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
         </div>
       )}
 
-      {/* Indeterminate bar for loading notifications */}
-      {isLoading && (
+      {/* Indeterminate bar for loading notifications — not for a paused one, which is not busy */}
+      {isBusy && (
         <div className="h-0.5 w-full bg-black/5 dark:bg-white/5 overflow-hidden">
           <div
             className={cn('h-full w-1/3 rounded-full', accentColors[notification.type])}

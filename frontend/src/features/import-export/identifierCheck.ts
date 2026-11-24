@@ -7,8 +7,10 @@
  * is read from a things CSV's key column (guessed from its name: `key`, `id`, `identifier`,
  * `urn`), a JSON file's `key`, or a standard file's `urn`, else its `prop.id`, else its
  * `entity_id`. A standard file whose node rows give none may take one from a column
- * (`fileRows.withIdentifierColumn`); a file the server reads is checked there as it loads.
+ * (`fileRows.withIdentifierColumn`); a file the server reads is checked there as it loads. Where an
+ * exported row sat (`lib/ancestryColumns`) is never offered as one: it names the row's container.
  */
+import { ancestryColumnsIn } from '@/lib/ancestryColumns'
 import { IDENTITY_PROPERTY, type FileRead } from './fileRows'
 
 export interface IdentifierCheck {
@@ -61,6 +63,7 @@ function standardColumns(read: FileRead): string[] {
     if (String(r.kind ?? '').trim().toLowerCase() !== 'node') continue
     for (const k of Object.keys(r)) if (!STRUCTURAL.has(k) && !/^(source|target)\./.test(k)) seen.add(k)
   }
+  for (const k of ancestryColumnsIn([...seen])) seen.delete(k)
   return [...seen].sort((a, b) => Number(b === 'qualifiedName') - Number(a === 'qualifiedName') || a.localeCompare(b))
 }
 
@@ -73,10 +76,11 @@ export function checkIdentifiers(read: FileRead, mapped: string | null = null): 
   const values = read.format === 'standard' ? (read.identifiers ?? read.things.map(t => t.key)) : read.things.map(t => t.key)
   const { blank, duplicates } = tally(values)
   const csv = read.keyedBy
+  const placed = new Set(csv ? ancestryColumnsIn(csv.table.headers) : [])
   return {
     from: csv ? 'column' : read.format === 'standard' ? 'standard' : 'key',
     column: csv ? csv.columns.key : mapped,
-    columns: csv ? csv.table.headers.filter(h => h && h !== csv.columns.type) : standardColumns(read),
+    columns: csv ? csv.table.headers.filter(h => h && h !== csv.columns.type && !placed.has(h)) : standardColumns(read),
     total: values.length, blank, duplicates,
     sample: values.filter(Boolean).slice(0, SAMPLE),
     ok: blank === 0 && duplicates.length === 0,

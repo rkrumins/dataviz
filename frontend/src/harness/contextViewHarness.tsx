@@ -9,7 +9,7 @@
  *   open http://localhost:5199/context-view-harness.html?fixture=top&theme=dark
  *
  *   fixture   `top`    every notice the top of the canvas can show at once
- *                      (`searchMode=isolate|hide` for the search chip's others)
+ *                      (`searchMode=isolate|hide` for the header search token's others)
  *             `trace`  a trace walking (its capsule), with the provider pill
  *             `scale`  a warehouse of `containers` schemas × `children` tables
  *                      (default 500 × 200), to expand a level at a time
@@ -17,6 +17,9 @@
  *   persona   `business` (default `technical`)
  *   latency   ms each child page waits (default 0; `scale` defaults to 120)
  *   batch     `0` for a provider without `getChildrenBatch` (an older server)
+ *   typed     a search typed in the header box is answered, by name, over the
+ *             warehouse's schemas and tables and the dashboards (the search
+ *             panel asks the API for more than that, so leave it shut)
  *
  * `window.__harness` reports the child-page requests the canvas made (single
  * pages, and batches of first pages) and the most it ever had in flight at
@@ -37,6 +40,7 @@ import { specFor, visibilityOf } from '../features/narrow/model'
 import { useNarrowStore } from '../features/narrow/narrowStore'
 import { toCanvasNode } from '../lib/canvasNodeMapper'
 import { ProviderOverride } from '../providers/GraphProviderContext'
+import { RemoteGraphProvider } from '../providers/RemoteGraphProvider'
 import { useBranchStore } from '../store/branchStore'
 import { useCanvasStore, type LineageEdge } from '../store/canvas'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
@@ -170,6 +174,36 @@ const provider = {
     stats: { totalNodes: ROOTS.length, assignedNodes: ROOTS.length, computeTimeMs: 0 },
   }),
 } as unknown as GraphDataProvider
+
+// `typed`: the header box's own search, answered by name. The session asks
+// only the live API, so for this fixture the in-memory provider passes for it.
+if (params.has('typed')) {
+  const searchable = [...ROOTS, ...childrenOf('wh'), ...childrenOf('wh').flatMap((s) => childrenOf(s.urn))]
+  const ancestry = (urn: string) => {
+    const path = []
+    for (let p = parentOf(urn); p; p = parentOf(p)) {
+      const n = lookup(p)!
+      path.unshift({ urn: n.urn, displayName: n.displayName, entityType: n.entityType })
+    }
+    return path
+  }
+  Object.assign(provider, {
+    searchAdvanced: async (query: { predicate: unknown }) => {
+      const text = (JSON.stringify(query.predicate).match(/"value":"([^"]*)"/)?.[1] ?? '').toLowerCase()
+      const hits = searchable
+        .filter((n) => text && n.displayName.toLowerCase().includes(text))
+        .map((n) => ({ node: n, ancestorPath: ancestry(n.urn), highlights: [] }))
+      return {
+        hits, aggregates: [], truncated: false, candidateCount: hits.length, totalCount: hits.length,
+        deadlineExceeded: false, elapsedMs: 4, cacheHit: false,
+      }
+    },
+  })
+  const plain = Function.prototype[Symbol.hasInstance]
+  Object.defineProperty(RemoteGraphProvider, Symbol.hasInstance, {
+    value: (o: unknown) => o === provider || plain.call(RemoteGraphProvider, o),
+  })
+}
 
 const realFetch = globalThis.fetch
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -3,7 +3,8 @@
  *   - a file that says where its rows sat (parent, path) is told, quietly, that those columns are
  *     skipped, counted as the file names them: a CSV's header in any case, an NDJSON's keys;
  *   - in plain words for the Business persona, the column names for the Technical one;
- *   - a file without them, and a workbook (which the server reads), say nothing.
+ *   - a file without them, and a workbook (which the server reads), say nothing: in every format,
+ *     the same file with them and without differs by the note alone.
  */
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
@@ -22,6 +23,23 @@ describe('informationalColumnsOf', () => {
       .toEqual(['parentType', 'path'])
     expect(await informationalColumnsOf(file('t.csv', 'urn,name,owner\n'))).toEqual([])
     expect(await informationalColumnsOf(file('t.xlsx', 'PK not really a workbook'))).toEqual([])
+  })
+})
+
+describe('informationalColumnsOf: an export with them, and the same export without', () => {
+  const placed = { kind: 'node', urn: 'u', parentUrn: 'p', parentName: 'P', parentType: 'Database', path: ['P'], pathUrns: ['p'] }
+  const plain = { kind: 'node', urn: 'u' }
+  const as = (format: string, row: Record<string, unknown>) => {
+    if (format === 'ndjson') return `${JSON.stringify(row)}\n`
+    if (format === 'json') return JSON.stringify([row])
+    const sep = format === 'tsv' ? '\t' : ','
+    return `${Object.keys(row).join(sep)}\n${Object.values(row).map((v) => (Array.isArray(v) ? v.join(' / ') : v)).join(sep)}\n`
+  }
+
+  it.each(['csv', 'tsv', 'ndjson', 'json'])('%s', async (format) => {
+    expect(await informationalColumnsOf(file(`placed.${format}`, as(format, placed))))
+      .toEqual(['parentUrn', 'parentName', 'parentType', 'path', 'pathUrns'])
+    expect(await informationalColumnsOf(file(`plain.${format}`, as(format, plain)))).toEqual([])
   })
 })
 

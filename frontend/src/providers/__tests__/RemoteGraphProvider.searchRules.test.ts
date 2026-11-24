@@ -153,4 +153,14 @@ describe('RemoteGraphProvider display-rule reads', () => {
     expect(url.searchParams.get('token')).toBe('a.b+c')
     expect(url.searchParams.get('dataSourceId')).toBe('ds_1')
   })
+
+  it('memberSetDownloadUrl leaves where each member sits to the server unless asked without it', () => {
+    const provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
+
+    const placed = new URL(provider.memberSetDownloadUrl('ms_1', 't', 'csv'), 'http://x')
+    const plain = new URL(provider.memberSetDownloadUrl('ms_1', 't', 'csv', 'nodes', [], false), 'http://x')
+
+    expect(placed.searchParams.has('withPath')).toBe(false)
+    expect(plain.searchParams.get('withPath')).toBe('false')
+  })
 })

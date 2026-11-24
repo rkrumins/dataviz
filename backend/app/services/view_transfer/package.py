@@ -188,7 +188,9 @@ async def build_bundle(session, options: Dict[str, Any], workspace_id: Optional[
         if row is None:
             raise LookupError("A view in this package was deleted before it could be packaged.")
         requests.append((row, ref["version"], False))
-    bundle, sealed = await export_views(session, requests, actor=options.get("actor"))
+    # A package asked for before the option existed was asked with them.
+    bundle, sealed = await export_views(session, requests, actor=options.get("actor"),
+                                        with_path=options.get("withPath", True))
     scope = None
     if options.get("scope") == "view":
         containment = await _live_containment_types(session, workspace_id, data_source_id)

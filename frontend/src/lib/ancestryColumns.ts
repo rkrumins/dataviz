@@ -1,8 +1,9 @@
 /**
- * ancestryColumns — where an entity sits, as the five columns every file of entities carries.
+ * ancestryColumns — where an entity sits, as the five columns any file of entities can carry.
  *
- * The trace's file wrote them first; the server's exports (a data export in every format, a view
- * file's manifest, a member set, a search's matches) write the same five, meaning the same thing
+ * The trace's file wrote them first, and a member set's download writes them unless asked not to;
+ * the server's other exports (a data export in every format, a view file's manifest, a search's
+ * matches) write the same five when asked (`withPath`), meaning the same thing
  * (`backend/common/ancestry_columns.py`): `parentUrn`, `parentName`, `parentType` (its direct
  * container, empty at the top of the graph), `path` (every container's name, from the top down to
  * its parent) and `pathUrns` (the same chain by URN).

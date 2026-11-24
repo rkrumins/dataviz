@@ -44,7 +44,9 @@ import { StagedChangesPanel } from './context-view/StagedChangesPanel'
 import { LoadMoreItem } from './context-view/LoadMoreItem'
 import { sameRow } from './context-view/rowEquality'
 import { shouldAutoLoadFirstPage } from './context-view/autoLoadFirstPage'
-import { nextLevel, outermost, useExpandBelow, type ExpandTree } from './context-view/useExpandBelow'
+import {
+  RESUME_LABELS, isPausedOn, nextLevel, outermost, pausedMenuActions, useExpandBelow, type ExpandTree, type PausedRun,
+} from './context-view/useExpandBelow'
 import { remapIdSet, useCanvasEditGate, useDraftSave, useStagedUndoShortcuts } from '@/features/versioning/canvas/useDraftSave'
 import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPropertyJobs'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
@@ -553,7 +555,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // The toolbar's Expand (the whole tree), a row's menu, the selection bar, and ⇧→ / ⇧← on a
   // row: as on the Context View. One expansion update per level, each container's first page
   // through the loader the chevron uses (its bounded queue); every level only when the reader
-  // switches All levels on, pausing every 2,000 entities loaded.
+  // switches All levels on, pausing every 2,000 entities loaded — the toolbar, and the menu and the
+  // selection bar on the rows a paused run started from, then offer its choices.
   const expandDepthMode = usePreferencesStore((s) => s.expandDepthMode) ?? 'level'
   const setExpandDepthMode = usePreferencesStore((s) => s.setExpandDepthMode)
   const expandTree = useMemo<ExpandTree>(() => ({
@@ -564,7 +567,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return !!n && (n.children.length > 0 || Number(n.data.childCount ?? 0) > 0)
     },
   }), [expandedNodes, flatIndex])
-  const { expand: runExpand, cancel: cancelExpand, running: expanding } = useExpandBelow({
+  const { expand: runExpand, cancel: cancelExpand, resume: resumeExpand, running: expanding, paused: expandPaused } = useExpandBelow({
     ...expandTree,
     parentOf: (id) => parentMap.get(id),
     open: (ids) => setExpandedNodes((prev) => {
@@ -643,17 +646,21 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       canExpand: nextLevel(roots, expandTree).ids.length > 0,
       canCollapse: collapse.close.length > 0,
       collapseLabel: collapse.self ? 'Collapse' : 'Collapse everything inside',
+      // The run paused at a checkpoint is the one these rows started.
+      paused: isPausedOn(expandPaused, roots) ? expandPaused : null,
     }
-  }, [parentMap, expandTree, collapseTargets])
+  }, [parentMap, expandTree, collapseTargets, expandPaused])
   // The menu's rows, for the entity right-clicked or the selection it is part of: Expand (with
-  // its All levels switch), Collapse — or, while a run is going, the way to stop it.
+  // its All levels switch), Collapse — or, while a run is going, the way to stop it; paused, on
+  // the rows it started from, its choices (elsewhere an Expand replaces it).
   const expandMenuActions = useMemo<ContextMenuAction[]>(() => {
     const { target, isOpen } = interactions.state.contextMenu
     // Only while the menu is open: its target outlives it, and this walks the open tree beneath.
     if (!isOpen || !target || target.type !== 'node') return []
-    if (expanding) return [{ id: 'expand-stop', label: 'Stop opening', icon: 'CircleStop', onClick: cancelExpand }]
+    if (expanding && !expandPaused) return [{ id: 'expand-stop', label: 'Stop opening', icon: 'CircleStop', onClick: cancelExpand }]
     const ids = menuSelection(target.id, selectedNodeIds)
-    const { canExpand, canCollapse, collapseLabel } = expandChoices(ids)
+    const { canExpand, canCollapse, collapseLabel, paused } = expandChoices(ids)
+    if (paused) return pausedMenuActions(paused, resumeExpand, cancelExpand)
     const all = expandDepthMode === 'all'
     return [
       ...(canExpand ? [{
@@ -672,24 +679,27 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onClick: () => collapseInside(ids),
       }] : []),
     ]
-  }, [interactions.state.contextMenu, selectedNodeIds, expanding, cancelExpand, expandChoices,
+  }, [interactions.state.contextMenu, selectedNodeIds, expanding, expandPaused, cancelExpand, resumeExpand, expandChoices,
     expandDepthMode, setExpandDepthMode, expandRows, collapseInside])
   // The selection bar's: the same, for every entity held.
   const selectionExpand = useMemo(() => {
     const held = selectedNodeIds.filter(isSelectableNode)
     if (held.length < 2) return undefined
-    const { canExpand, canCollapse, collapseLabel } = expandChoices(held)
-    if (!canExpand && !canCollapse && !expanding) return undefined
+    const { canExpand, canCollapse, collapseLabel, paused } = expandChoices(held)
+    const going = expanding && !expandPaused
+    if (!canExpand && !canCollapse && !going && !paused) return undefined
     return {
       collapseLabel,
       allLevels: expandDepthMode === 'all',
       onToggleAllLevels: () => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all'),
       onExpand: canExpand ? () => expandRows(held) : undefined,
       onCollapse: canCollapse ? () => collapseInside(held) : undefined,
-      running: expanding,
+      running: going,
+      paused: paused ? { ...paused, onResume: resumeExpand } : undefined,
       onCancel: cancelExpand,
     }
-  }, [selectedNodeIds, expandChoices, expanding, expandDepthMode, setExpandDepthMode, expandRows, collapseInside, cancelExpand])
+  }, [selectedNodeIds, expandChoices, expanding, expandPaused, expandDepthMode, setExpandDepthMode, expandRows, collapseInside,
+    cancelExpand, resumeExpand])
 
   // Keyboard shortcut for search
   useEffect(() => {
@@ -756,6 +766,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               onToggleAllLevels={() => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all')}
               onExpand={canExpandAll ? expandAll : undefined}
               running={expanding}
+              paused={expandPaused}
+              onResume={resumeExpand}
               onStop={cancelExpand}
             />
             <HoverTip className="inline-flex" label="Close every row" detail="Back to the top-level entities">
@@ -1654,19 +1666,51 @@ function holdsOnlyRevealedChildren(node: HierarchyNode): boolean {
 
 /** The toolbar's Expand, for the whole tree: the next level at each press — or, with All levels
  *  on (the remembered preference the Context View's Expand shares), every level, pausing every
- *  2,000 entities loaded. While a run goes, the way to stop it. */
-function TreeExpandControl({ allLevels, onToggleAllLevels, onExpand, running, onStop }: {
+ *  2,000 entities loaded. While a run goes, the way to stop it; paused — whichever rows it was
+ *  started from — its choices, so closing its prompt never strands it. */
+function TreeExpandControl({ allLevels, onToggleAllLevels, onExpand, running, paused, onResume, onStop }: {
   allLevels: boolean
   onToggleAllLevels: () => void
   /** Absent with nothing to open. */
   onExpand?: () => void
   running: boolean
+  paused: PausedRun | null
+  onResume: (how: 'more' | 'all') => void
   onStop: () => void
 }) {
   const segment = cn(
     'flex items-center gap-1.5 h-8 text-xs font-medium whitespace-nowrap transition-colors duration-150',
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
   )
+  if (paused) {
+    const choice = cn(segment, 'px-2.5 hover:bg-accent-lineage/15')
+    return (
+      <span
+        role="group"
+        aria-label={paused.message}
+        className="flex items-center rounded-lg border border-accent-lineage/30 bg-accent-lineage/10 text-accent-lineage overflow-hidden"
+      >
+        <HoverTip className="inline-flex" label={paused.message} detail={paused.detail}>
+          <button type="button" onClick={() => onResume('more')} className={choice}>
+            <LucideIcons.ChevronsDown className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {RESUME_LABELS.more}
+          </button>
+        </HoverTip>
+        <HoverTip className="inline-flex" label="Open everything still closed" detail="Without pausing again">
+          <button type="button" onClick={() => onResume('all')} className={cn(choice, 'border-l border-accent-lineage/30')}>
+            <LucideIcons.ArrowDownToLine className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {RESUME_LABELS.all}
+          </button>
+        </HoverTip>
+        <HoverTip className="inline-flex" label={RESUME_LABELS.stop} detail="What has loaded stays open">
+          <button type="button" onClick={onStop} className={cn(choice, 'border-l border-accent-lineage/30')}>
+            <LucideIcons.CircleStop className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
+            {RESUME_LABELS.stop}
+          </button>
+        </HoverTip>
+      </span>
+    )
+  }
   if (running) {
     return (
       <HoverTip className="inline-flex" label="Stop opening" detail="What has loaded stays open">

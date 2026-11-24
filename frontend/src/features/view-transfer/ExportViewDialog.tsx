@@ -17,6 +17,10 @@
  * export tray (`backgroundExports`); opened again on the same views, it shows it once more. It can
  * be cancelled while it is built.
  *
+ * Either can say where each entity sits there (its parent and path: the file's manifest, and the
+ * package's data), with the same switch, and the same remembered choice, as the data export
+ * (`PathOption`, `exportWithPath`): off until the person turns it on.
+ *
  * Two columns, like the graph ExportDialog: what travels (and what doesn't) on the left, the
  * version choice and a preview of the file on the right.
  */
@@ -24,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, Check, CheckCircle2, Copy, Database, Download, EyeOff, FileJson2, Fingerprint,
+  AlertTriangle, Check, CheckCircle2, Copy, Database, Download, EyeOff, FileJson2, Fingerprint, FolderTree,
   GitPullRequestDraft, History, Info, Layers, Loader2, Package, RefreshCw, Tag, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -43,9 +47,12 @@ import {
 } from '@/features/import-export/backgroundExports'
 import { CancelExport } from '@/features/import-export/CancelExport'
 import { ExportProgressPanel } from '@/features/import-export/ExportProgress'
+import { PathOption } from '@/features/import-export/PathOption'
 import { recordEvent } from '@/services/telemetryService'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
+import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { VERSION_SOURCE_LABEL, fileSize, pluralize, shortHash, viewFileName, viewPackageName } from './format'
@@ -126,6 +133,10 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
   const [content, setContent] = useState<'view' | 'data'>(earlier ? 'data' : initialContent)
   const [scope, setScope] = useState<PackageScope>(single ? 'view' : 'source')
   const [dataVersion, setDataVersion] = useState<PackageDataVersion>('published')
+  // Where each entity sits: the one remembered choice every export of data and views shares.
+  const withPath = usePreferencesStore((s) => s.exportWithPath)
+  const setWithPath = usePreferencesStore((s) => s.setExportWithPath)
+  const technical = usePersonaMode() === 'technical'
   // The package the server builds, followed app-wide: it carries on, and downloads, once this closes.
   const [jobId, setJobId] = useState<string | null>(earlier?.jobId ?? null)
   const packaging = useBackgroundExport(phase === 'package' ? jobId : null)
@@ -171,6 +182,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
       if (withData) {
         const options = {
           scope: single ? scope : 'source', dataVersion: single ? dataVersion : 'published', message: note.trim() || undefined,
+          withPath,
         } as const
         const key = JSON.stringify([refs, options])
         if (attempt.current?.key !== key) attempt.current = { key, requestId: newRequestId() }
@@ -190,7 +202,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
         setPhase('package')
         return
       }
-      const file = await exportViews(refs, note.trim() || undefined)
+      const file = await exportViews(refs, note.trim() || undefined, { withPath })
       setResult(file)
       setPhase('done')
       // Exporting unsaved changes saved them as a version: the history and header chip moved.
@@ -242,7 +254,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
           <div className="flex-1 overflow-y-auto">
             {view === 'choose' && (
               <div className="grid md:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
-                <WhatTravels withData={withData} />
+                <WhatTravels withData={withData} withPath={withPath} technical={technical} />
                 <div className="px-8 py-6 space-y-5">
                   <ContentChoice content={withData ? 'data' : 'view'} onChange={setContent} reason={packageOption.reason} />
                   {withData && (
@@ -253,6 +265,7 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
                     ? <SingleViewChoice view={views[0]} preview={preview.data?.views[0]} pick={pick} setPick={setPick}
                       note={note} setNote={setNote} withData={withData} />
                     : <ManyViewsChoice views={views} preview={preview} note={note} setNote={setNote} withData={withData} />}
+                  <PathOption on={withPath} onChange={setWithPath} technical={technical} />
                 </div>
               </div>
             )}
@@ -339,7 +352,11 @@ export function ExportViewDialog({ views, initialVersion, initialContent = 'view
 
 // ── Left column ──────────────────────────────────────────────────────────────
 
-function WhatTravels({ withData = false }: { withData?: boolean }) {
+function WhatTravels({ withData = false, withPath = false, technical = false }: {
+  withData?: boolean
+  withPath?: boolean
+  technical?: boolean
+}) {
   return (
     <div className="px-8 py-6 border-b md:border-b-0 md:border-r border-glass-border bg-gradient-to-br from-indigo-50/40 to-transparent dark:from-indigo-950/15 space-y-5">
       <div>
@@ -366,6 +383,11 @@ function WhatTravels({ withData = false }: { withData?: boolean }) {
           body="So importing a newer file later updates the view there instead of making a second one." />
         <Feature icon={<Fingerprint className="w-4 h-4" />} title="A fingerprint"
           body="The import checks it, and says so if the file was edited after it left." />
+        {withPath && (
+          <Feature icon={<FolderTree className="w-4 h-4" />} title="Where each entity sits" body={technical
+            ? 'Its parent and path, by name and by URN, as the canvas nests it. Informational: an import skips them.'
+            : 'Its parent and every container above it, as you see them on the canvas. Skipped when you import the file back.'} />
+        )}
       </ul>
       <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.04] px-3.5 py-3 flex items-start gap-2.5">
         <EyeOff className="w-4 h-4 text-ink-muted flex-shrink-0 mt-0.5" />

@@ -171,6 +171,11 @@ const tree = () => document.querySelector<HTMLElement>('[role="tree"]')!
 const toolbar = () => document.querySelector<HTMLElement>('[data-canvas-toolbar]')!
 const expandButton = () => within(toolbar()).getByRole('button', { name: /^Expand (next level|all levels)$/ })
 const messages = () => useNotificationStore.getState().notifications.map((n) => n.message)
+/** The run's prompt at a checkpoint, while it is up. */
+const prompt = () => useNotificationStore.getState().notifications.find((n) => n.paused)
+const selectionBar = () => document.querySelector<HTMLElement>('[role="region"][aria-label="Selected entities"]')
+const menuLabels = () => [...document.querySelectorAll<HTMLElement>('[data-canvas-context-menu] button span.block')]
+  .map((el) => el.textContent?.trim())
 const selected = () => useCanvasStore.getState().selectedNodeIds
 const inStore = (id: string) => useCanvasStore.getState().nodes.some((n) => n.id === id)
 const menuItem = (label: RegExp) => [...document.querySelectorAll<HTMLButtonElement>('[data-canvas-context-menu] button')]
@@ -215,7 +220,7 @@ describe('HierarchyCanvas — the toolbar opens a level at a time', () => {
     expect(row('wh')!.getAttribute('aria-expanded')).toBe('true')
   }, 30000)
 
-  it('All levels — the remembered switch — opens every level, pausing every 2,000 entities loaded', async () => {
+  it('All levels — the remembered switch — opens every level, pausing every 2,000 entities loaded to ask', async () => {
     Object.assign(size, { schemas: 30, tables: 100, columns: 0 })
     await mount()
     const allLevels = within(toolbar()).getByRole('switch', { name: 'All levels' })
@@ -225,21 +230,91 @@ describe('HierarchyCanvas — the toolbar opens a level at a time', () => {
 
     await click(expandButton())
     // The roots' pages (32), then as many schemas as fit before the checkpoint (20 × 100).
-    await waitFor(() => expect(messages()).toContain('Paused opening 2 entities · 2,032 loaded so far. Keep going?'), { timeout: 10000 })
+    await waitFor(() => expect(prompt()?.message).toBe('Paused opening 2 entities\u00a0· 2,032 loaded so far'), { timeout: 10000 })
+    expect(prompt()!.detail).toBe('10 containers still to open at level 2')
+    expect([prompt()!.action?.label, prompt()!.secondaryAction?.label, prompt()!.tertiaryAction?.label])
+      .toEqual(['Load 2,000 more', 'Load everything', 'Stop here'])
     expect(fetched.filter((u) => u.startsWith('s'))).toHaveLength(20)
-    // The toolbar's Expand is the way to stop meanwhile.
-    expect(within(toolbar()).getByRole('button', { name: /Stop opening/ })).toBeInTheDocument()
     // Two thousand rows open; the list mounts what is on screen.
     expect(mounted().length).toBeGreaterThan(5)
     expect(mounted().length).toBeLessThan(40)
 
-    const paused = useNotificationStore.getState().notifications.find((n) => n.action?.label === 'Continue')!
-    expect(paused.secondaryAction?.label).toBe('Stop')
-    await act(async () => { paused.action!.onClick() })
+    // Closing the prompt (its ✕) leaves the run paused: the toolbar offers the same choices.
+    act(() => useNotificationStore.getState().remove(prompt()!.id))
+    await settle()
+    const paused = within(toolbar()).getByRole('group', { name: 'Paused opening 2 entities\u00a0· 2,032 loaded so far' })
+    expect(within(paused).getAllByRole('button').map((b) => b.textContent)).toEqual(['Load 2,000 more', 'Load everything', 'Stop here'])
+    await click(within(paused).getByRole('button', { name: 'Load everything' }))
     await waitFor(() => expect(messages()).toContain('Opened everything inside 2 entities · 3,032 loaded'), { timeout: 10000 })
     expect(fetched.filter((u) => u.startsWith('s'))).toHaveLength(30)
     expect(within(toolbar()).getByRole('button', { name: 'Expand all levels' })).toBeDisabled()
   }, 40000)
+
+  it('Load 2,000 more pauses again at the next checkpoint; Stop here keeps what loaded, and All levels again goes on from there', async () => {
+    Object.assign(size, { schemas: 50, tables: 100, columns: 0 })
+    usePreferencesStore.setState({ expandDepthMode: 'all' })
+    await mount()
+    await click(expandButton())
+    await waitFor(() => expect(prompt()?.message).toBe('Paused opening 2 entities\u00a0· 2,052 loaded so far'), { timeout: 10000 })
+    expect(prompt()!.detail).toBe('30 containers still to open at level 2')
+    // While the run goes again — its pages held on the wire here — the toolbar is its Stop.
+    let release!: () => void
+    gate = new Promise((resolve) => { release = resolve })
+    await act(async () => { prompt()!.action!.onClick() })
+    expect(within(toolbar()).getByRole('button', { name: /Stop opening/ })).toBeInTheDocument()
+    gate = null
+    await act(async () => { release() })
+    await waitFor(() => expect(prompt()?.message).toBe('Paused opening 2 entities\u00a0· 4,052 loaded so far'), { timeout: 10000 })
+    expect(prompt()!.detail).toBe('10 containers still to open at level 2')
+    expect(fetched.filter((u) => u.startsWith('s'))).toHaveLength(40)
+
+    await act(async () => { prompt()!.tertiaryAction!.onClick() })
+    await settle()
+    expect(messages()).toEqual(['Stopped opening 2 entities · 4,052 loaded'])
+    expect(inStore('t39_99')).toBe(true)
+    expect(row('wh')!.getAttribute('aria-expanded')).toBe('true')
+
+    // All levels again: the ten schemas still closed, and none asked for twice.
+    fetched.length = 0
+    await click(expandButton())
+    await waitFor(() => expect(messages()).toContain('Opened everything inside 2 entities · 1,000 loaded'), { timeout: 10000 })
+    expect([...fetched].sort()).toEqual(Array.from({ length: 10 }, (_, i) => `s${40 + i}`).sort())
+  }, 60000)
+
+  it('paused, the rows it started from offer its choices in their menu and the selection bar; other rows their own Expand, which replaces it', async () => {
+    Object.assign(size, { schemas: 30, tables: 100, columns: 0 })
+    usePreferencesStore.setState({ expandDepthMode: 'all' })
+    await mount()
+    // Both roots, from their menu.
+    await click(header('wh'))
+    await click(header('lake'), { ctrlKey: true })
+    await act(async () => { fireEvent.contextMenu(header('wh')) })
+    await click(menuItem(/^Expand all levels$/)!)
+    await waitFor(() => expect(prompt()).toBeDefined(), { timeout: 10000 })
+    act(() => useNotificationStore.getState().remove(prompt()!.id))
+    await settle()
+
+    // The prompt closed: the bar and the menu on those rows still offer the run's choices.
+    const bar = within(selectionBar()!).getByRole('group', { name: 'Paused opening 2 entities\u00a0· 2,032 loaded so far' })
+    expect(within(bar).getAllByRole('button').map((b) => b.textContent)).toEqual(['Load 2,000 more', 'Load everything', 'Stop here'])
+    await act(async () => { fireEvent.contextMenu(header('lake')) })
+    expect(menuLabels()).toEqual(expect.arrayContaining(['Load 2,000 more', 'Load everything', 'Stop here']))
+    expect(menuItem(/^Expand all levels$/)).toBeUndefined()
+    // A row it did not start from has its own menu: an open schema, with only itself to close.
+    await act(async () => { fireEvent.contextMenu(header('s0')) })
+    expect(menuLabels()).not.toContain('Load 2,000 more')
+    expect(menuItem(/^Collapse$/)).toBeDefined()
+    await act(async () => { fireEvent.keyDown(document, { key: 'Escape' }) })
+
+    // A different selection: its own Expand, which replaces the paused run.
+    await click(header('lake'), { ctrlKey: true })
+    await click(header('b0'), { ctrlKey: true })
+    expect(selected()).toEqual(['wh', 'b0'])
+    expect(within(selectionBar()!).queryByRole('button', { name: 'Load 2,000 more' })).toBeNull()
+    await click(within(selectionBar()!).getByRole('button', { name: 'Expand all levels' }))
+    expect(messages()[0]).toBe('Stopped opening 2 entities · 2,032 loaded')
+    await waitFor(() => expect(messages()).toContain('Opened everything inside 2 entities · 1,000 loaded'), { timeout: 10000 })
+  }, 60000)
 
   it('Collapse all closes every row — and stops a run, with nothing still on its way landing', async () => {
     await mount()

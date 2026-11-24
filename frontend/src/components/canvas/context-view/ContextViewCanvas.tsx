@@ -107,7 +107,7 @@ import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
 } from '@/hooks/useRevealSearchHit'
-import { useIsSearchSpotlightActive, useMatchUrnSet, useSearchStore, type MatchedEdge } from '@/store/searchStore'
+import { useMatchUrnSet, useSearchStore, type MatchedEdge } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { renderedAggregationTargets, unparentedRows } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
@@ -170,9 +170,8 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { CanvasStatusStack } from './CanvasStatusStack'
 import { selectableIdsInLayer } from './layerSelection'
-import { nextLevel, outermost, useExpandBelow, type ExpandTree } from './useExpandBelow'
+import { isPausedOn, nextLevel, outermost, pausedMenuActions, useExpandBelow, type ExpandTree } from './useExpandBelow'
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
-import { SearchActiveChip, type SearchChipUnit } from '../search/SearchActiveChip'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
@@ -5850,7 +5849,9 @@ export function ContextViewCanvas({
   }), [overlay.traceExpansion, traceTree])
   const expandTree = overlay.active ? traceExpandTree : browseTree
   const rowLabel = useCallback((id: string) => renderMap.get(id)?.name || id, [renderMap])
-  const { expand: runExpand, cancel: cancelExpand, running: expanding, isRunning: isExpandRunning } = useExpandBelow(overlay.active ? {
+  const {
+    expand: runExpand, cancel: cancelExpand, resume: resumeExpand, running: expanding, paused: expandPaused, isRunning: isExpandRunning,
+  } = useExpandBelow(overlay.active ? {
     ...traceExpandTree,
     parentOf: (id) => traceTree.parents.get(id),
     open: (ids) => { overlayRef.current?.expandPath(ids); recordTraceExpansionSoon() },
@@ -5892,6 +5893,15 @@ export function ContextViewCanvas({
   // the columns still show browse, and opening it would write the store.
   const expandOffered = !traceActive || overlay.active
   useEffect(() => { expandRunningRef.current = isExpandRunning }, [isExpandRunning])
+  // A run walks the tree it began on. Starting a trace, its cards arriving, or leaving it ends
+  // one — a run paused over browse rows has nothing to go on with over a trace's cards.
+  const expandTreeKind = !traceActive ? 'browse' : overlay.active ? 'trace' : 'walk'
+  const expandTreeKindRef = useRef(expandTreeKind)
+  useEffect(() => {
+    if (expandTreeKindRef.current === expandTreeKind) return
+    expandTreeKindRef.current = expandTreeKind
+    cancelExpand()
+  }, [expandTreeKind, cancelExpand])
   const expandRows = useCallback((ids: readonly string[]) => {
     if (expandOffered) runExpand(ids, expandDepthMode === 'all')
   }, [expandOffered, runExpand, expandDepthMode])
@@ -5955,8 +5965,10 @@ export function ContextViewCanvas({
       canExpand: nextLevel(roots, expandTree).ids.length > 0,
       canCollapse: collapse.below.length > 0,
       collapseLabel: collapse.self ? 'Collapse' : 'Collapse everything inside',
+      // The run paused at a checkpoint is the one these rows started.
+      paused: isPausedOn(expandPaused, roots) ? expandPaused : null,
     }
-  }, [overlay.active, traceTree, parentMap, expandTree, collapseTargets])
+  }, [overlay.active, traceTree, parentMap, expandTree, collapseTargets, expandPaused])
   // ⇧→ / ⇧← on a focused row. One identity for LayerColumn's memo.
   const expandRowsRef = useRef(expandRows)
   const collapseInsideRef = useRef(collapseInside)
@@ -5968,17 +5980,20 @@ export function ContextViewCanvas({
   const collapseRowInside = useCallback((id: string) => collapseInsideRef.current([id]), [])
   // The menu's rows, for the entity right-clicked or the selection it is part
   // of: Expand (with its All levels switch), Collapse everything inside — or,
-  // while a run is going, the way to stop it.
+  // while a run is going, the way to stop it; paused, on the rows it started
+  // from, its choices. Elsewhere a paused run leaves the menu as it was: the
+  // canvas is not busy, and an Expand there replaces it.
   const expandMenuActions = useMemo<ContextMenuAction[]>(() => {
     const { target, isOpen } = interactions.state.contextMenu
     // Only while the menu is open: its target outlives it, and this walks the
     // open tree beneath — on every page that lands during a run, otherwise.
     if (!isOpen || !expandOffered || !target || target.type !== 'node') return []
     const ids = menuSelection(target.id, selectedNodeIds)
-    if (expanding) {
+    if (expanding && !expandPaused) {
       return [{ id: 'expand-stop', label: 'Stop opening', icon: 'CircleStop', onClick: cancelExpand }]
     }
-    const { canExpand, canCollapse, collapseLabel } = expandChoices(ids)
+    const { canExpand, canCollapse, collapseLabel, paused } = expandChoices(ids)
+    if (paused) return pausedMenuActions(paused, resumeExpand, cancelExpand)
     const all = expandDepthMode === 'all'
     return [
       ...(canExpand ? [{
@@ -5997,23 +6012,26 @@ export function ContextViewCanvas({
         onClick: () => collapseInside(ids),
       }] : []),
     ]
-  }, [interactions.state.contextMenu, expandOffered, selectedNodeIds, expanding, cancelExpand, expandChoices,
-    expandDepthMode, setExpandDepthMode, expandRows, collapseInside])
+  }, [interactions.state.contextMenu, expandOffered, selectedNodeIds, expanding, expandPaused, cancelExpand, resumeExpand,
+    expandChoices, expandDepthMode, setExpandDepthMode, expandRows, collapseInside])
   // The selection bar's: the same, for every entity held.
   const selectionExpand = useMemo(() => {
     if (!expandOffered || bulkSelection.length === 0) return undefined
-    const { canExpand, canCollapse, collapseLabel } = expandChoices(bulkSelection)
-    if (!canExpand && !canCollapse && !expanding) return undefined
+    const { canExpand, canCollapse, collapseLabel, paused } = expandChoices(bulkSelection)
+    const going = expanding && !expandPaused
+    if (!canExpand && !canCollapse && !going && !paused) return undefined
     return {
       collapseLabel,
       allLevels: expandDepthMode === 'all',
       onToggleAllLevels: () => setExpandDepthMode(expandDepthMode === 'all' ? 'level' : 'all'),
       onExpand: canExpand ? () => expandRows(bulkSelection) : undefined,
       onCollapse: canCollapse ? () => collapseInside(bulkSelection) : undefined,
-      running: expanding,
+      running: going,
+      paused: paused ? { ...paused, onResume: resumeExpand } : undefined,
       onCancel: cancelExpand,
     }
-  }, [expandOffered, bulkSelection, expandChoices, expanding, expandDepthMode, setExpandDepthMode, expandRows, collapseInside, cancelExpand])
+  }, [expandOffered, bulkSelection, expandChoices, expanding, expandPaused, expandDepthMode, setExpandDepthMode, expandRows,
+    collapseInside, cancelExpand, resumeExpand])
 
   // `traceContextSet` now comes directly from useTraceFilteredHierarchy above
   // (single source of truth for both filtering and edge projection).
@@ -6553,36 +6571,6 @@ export function ContextViewCanvas({
     () => new Map(sortedLayers.map(layer => [layer.id, layer.name])),
     [sortedLayers],
   )
-
-  // A search still shaping the canvas once its panel is closed says so
-  // (SearchActiveChip): how many it found, of what, and in which layers — as
-  // far as the page of hits in hand says.
-  const searchOnCanvas = useIsSearchSpotlightActive()
-  const searchView = search.advanced.view
-  const { resolveLayer: resolveSearchLayer } = search
-  const searchChip = useMemo(() => {
-    const result = searchView.kind === 'results' ? searchView.result : null
-    const unit: SearchChipUnit = result?.paths ? 'path' : result?.edges ? 'connection' : 'match'
-    const layers = new Set<string>()
-    for (const hit of result?.hits ?? []) {
-      const layerId = resolveSearchLayer(hit)
-      if (layerId) layers.add(layerId)
-    }
-    return {
-      count: result?.totalCount ?? advancedMatchUrns.size,
-      unit,
-      layerNames: sortedLayers.filter((l) => layers.has(l.id)).map((l) => l.name),
-    }
-  }, [searchView, resolveSearchLayer, advancedMatchUrns, sortedLayers])
-  // The chip's stepper moves the search's focus; with the panel closed there is
-  // nothing else to show it, so the chip shows it on the canvas.
-  const revealFocusedSearchMatch = useCallback(() => {
-    const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
-    const urn = focusedMatchIndex === null ? undefined : orderedMatchUrns[focusedMatchIndex]
-    if (!urn) return
-    const hit = searchView.kind === 'results' ? searchView.result.hits?.find((h) => h.node.urn === urn) : undefined
-    void revealSearchHit(urn, hit?.ancestorPath ?? [])
-  }, [searchView, revealSearchHit])
 
   // Selecting a card draws its lines, and a line needs a row at its far end.
   // A partner that is a row of an anchored column past its loaded page — or,
@@ -7709,21 +7697,6 @@ export function ContextViewCanvas({
                 onSaveAsView={canSaveAsView
                   ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
                   : undefined}
-              />
-            )}
-
-            {/* A search still shaping the canvas, its panel closed: what it is
-                highlighting or hiding, and the way to step, reopen or clear it.
-                With the panel open, the panel says all of this itself. */}
-            {searchOnCanvas && !search.panelOpen && activeView && (
-              <SearchActiveChip
-                count={searchChip.count}
-                unit={searchChip.unit}
-                layerNames={searchChip.layerNames}
-                viewId={activeView.id}
-                onReveal={revealFocusedSearchMatch}
-                onOpen={search.openPanel}
-                onClear={search.clearQuery}
               />
             )}
           </>}

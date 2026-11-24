@@ -230,6 +230,15 @@ export interface ViewSearchSession {
      * The header only ever reports a count, so it can live with the first.
      */
     resultMatchesQuick: boolean
+    /**
+     * Whether the search on the canvas is one the box ran — typed, or a
+     * recent picked — rather than one run from the panel, a recipe or a
+     * right-click. Not `resultMatchesQuick`: that turns false on the first
+     * keystroke of the NEXT query, while the canvas still shows the box's
+     * last one. The box shows its own search as the words it holds, and
+     * anyone else's as a token in their place.
+     */
+    resultFromBox: boolean
 
     /** Which layer column a hit badges under, for this view's layout. */
     resolveLayer: (hit: SearchHit) => string | null
@@ -279,6 +288,9 @@ export function useViewSearchSessionController(
     const [quick, setQuickState] = useState<QuickQuery>(DEFAULT_QUICK)
     const [panelOpen, setPanelOpen] = useState(false)
     const [refineOpen, setRefineOpen] = useState(false)
+    // The hash of the run the box itself last sent, set in the same tick as
+    // the pipeline's run state so the two are never seen apart.
+    const [boxRun, setBoxRun] = useState<string | null>(null)
     const inputRef = useRef<HTMLInputElement>(null)
 
     // Read the pipeline through a ref so `dispatch` can stay
@@ -302,6 +314,7 @@ export function useViewSearchSessionController(
         // away when the person cleared it.
         useSearchStore.getState().clear({ undoable })
         setQuickState(DEFAULT_QUICK)
+        setBoxRun(null)
         // Same rule `openPanel` applies, applied to the state this just
         // produced: there are no results any more, so a panel still open
         // has nothing to report on and the builder is its only content.
@@ -315,6 +328,7 @@ export function useViewSearchSessionController(
     const clearQuery = useCallback(() => teardown(true), [teardown])
 
     const dispatch = useCallback((runnable: { predicate: Predicate; hash: string }) => {
+        setBoxRun(runnable.hash)
         useSearchStore.getState().commitDraft(runnable.predicate, 'header')
         void advancedRef.current.runPredicate(runnable.predicate, SEARCH_OPTIONS)
     }, [])
@@ -363,6 +377,21 @@ export function useViewSearchSessionController(
         // consumer a standing result for a query that does not exist.
         return runnable !== null && runStateHash === runnable.hash
     }, [quick, runStateHash])
+
+    const resultFromBox = runStateHash != null && runStateHash === boxRun
+    // A search run from anywhere else — the panel, a recipe, a right-click —
+    // replaces the box's, and the words left in the box no longer describe
+    // the canvas: beside the token that now stands for that search they read
+    // as part of it. They go; where it looks and how it matches stay.
+    // Adjusted during render, as the run lands, rather than in an effect a
+    // frame later: that frame would show the stale words beside the token.
+    const [seenRun, setSeenRun] = useState(runStateHash)
+    if (seenRun !== runStateHash) {
+        setSeenRun(runStateHash)
+        if (runStateHash != null && runStateHash !== boxRun && quick.text) {
+            setQuickState({ ...quick, text: '' })
+        }
+    }
 
     // Opening decides what the panel opens ON, once, here — rather than
     // the panel deriving it from "are there results right now?". That
@@ -437,7 +466,7 @@ export function useViewSearchSessionController(
         quick, setQuick, runNow, clearQuery, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, closeRefine,
-        resultMatchesQuick,
+        resultMatchesQuick, resultFromBox,
         inputRef, resolveLayer, layers,
         revealHit, prefetchHit,
         advanced, rowSearch,
@@ -445,7 +474,7 @@ export function useViewSearchSessionController(
         viewId,
         quick, setQuick, runNow, clearQuery, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
-        refineOpen, refine, closeRefine, resultMatchesQuick,
+        refineOpen, refine, closeRefine, resultMatchesQuick, resultFromBox,
         resolveLayer, layers, revealHit, prefetchHit, advanced, rowSearch,
     ])
 }
