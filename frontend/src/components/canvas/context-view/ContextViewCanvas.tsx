@@ -4212,7 +4212,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryEdges, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
+  const { loadChildren, loadChildrenBatch, cancelChildLoad, loadingNodes, failedNodes, retryEdges, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -4230,6 +4230,15 @@ export function ContextViewCanvas({
     (parentId: string) => loadChildren(parentId, { sortDirection: layerSortDirectionFor(parentId) }),
     [loadChildren, layerSortDirectionFor],
   )
+  // The same for many parents at once: one batch per direction.
+  const loadChildrenBatchSorted = useCallback((parentIds: readonly string[]) => {
+    const desc = parentIds.filter(id => layerSortDirectionFor(id) === 'desc')
+    const asc = parentIds.filter(id => layerSortDirectionFor(id) !== 'desc')
+    return Promise.all([
+      asc.length > 0 ? loadChildrenBatch(asc, { sortDirection: 'asc' }) : undefined,
+      desc.length > 0 ? loadChildrenBatch(desc, { sortDirection: 'desc' }) : undefined,
+    ])
+  }, [loadChildrenBatch, layerSortDirectionFor])
 
   /**
    * The same load, but it says what it did — "Snowflake · 5 datasets", named
@@ -4381,6 +4390,9 @@ export function ContextViewCanvas({
     searchRef.current = search
   })
 
+  // Whether "Expand next level" / "All levels" is running (useExpandBelow, below).
+  const expandRunningRef = useRef<() => boolean>(() => false)
+
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
   // for them, so including both ends would double-count the same TRANSFORMS edges
@@ -4416,9 +4428,14 @@ export function ContextViewCanvas({
   // view, and the rows' lineage into them draws nothing else. On a draft or
   // a branch too: an answer cut short there costs only the holders' own
   // request, which asks again on its own clock, never the rows' lines.
+  //
+  // While a level (or every level) is opening, it waits for the level to land
+  // with no ceiling: the ceiling is for a slow page or a column paging as the
+  // reader scrolls, and mid-level it asked for rows a moment from changing.
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
     if (traceActive) return
+    if (expandRunningRef.current() && loadingNodes.size > 0) return
     // Wait for the tree to settle (re-runs when loadingNodes empties), but
     // not past the ceiling.
     const now = Date.now()
@@ -5833,7 +5850,7 @@ export function ContextViewCanvas({
   }), [overlay.traceExpansion, traceTree])
   const expandTree = overlay.active ? traceExpandTree : browseTree
   const rowLabel = useCallback((id: string) => renderMap.get(id)?.name || id, [renderMap])
-  const { expand: runExpand, cancel: cancelExpand, running: expanding } = useExpandBelow(overlay.active ? {
+  const { expand: runExpand, cancel: cancelExpand, running: expanding, isRunning: isExpandRunning } = useExpandBelow(overlay.active ? {
     ...traceExpandTree,
     parentOf: (id) => traceTree.parents.get(id),
     open: (ids) => { overlayRef.current?.expandPath(ids); recordTraceExpansionSoon() },
@@ -5854,6 +5871,17 @@ export function ContextViewCanvas({
       markFirstPageHandled(id)
       return loadChildrenSorted(id)
     },
+    // A level's small containers (their whole first page fits one page) come
+    // in batches, one request and one canvas update for up to 50 of them; a
+    // larger one pages on its own, as its column's Load more does.
+    loadFirstPages: (ids) => {
+      for (const id of ids) markFirstPageHandled(id)
+      const small = new Set(ids.filter(id => Number(displayMap.get(id)?.data?.childCount ?? Infinity) <= CHILDREN_PAGE_SIZE))
+      return Promise.allSettled([
+        loadChildrenBatchSorted([...small]),
+        ...ids.filter(id => !small.has(id)).map(id => loadChildrenSorted(id)),
+      ])
+    },
     cancelLoad: cancelChildLoad,
     loading: loadingNodes,
     loadedCount: () => useCanvasStore.getState().nodes.length,
@@ -5863,6 +5891,7 @@ export function ContextViewCanvas({
   // While the walk runs and nothing is drawn yet, there is nothing to open:
   // the columns still show browse, and opening it would write the store.
   const expandOffered = !traceActive || overlay.active
+  useEffect(() => { expandRunningRef.current = isExpandRunning }, [isExpandRunning])
   const expandRows = useCallback((ids: readonly string[]) => {
     if (expandOffered) runExpand(ids, expandDepthMode === 'all')
   }, [expandOffered, runExpand, expandDepthMode])

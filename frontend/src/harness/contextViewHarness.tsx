@@ -16,10 +16,12 @@
  *   theme     `dark` for the dark palette
  *   persona   `business` (default `technical`)
  *   latency   ms each child page waits (default 0; `scale` defaults to 120)
+ *   batch     `0` for a provider without `getChildrenBatch` (an older server)
  *
- * `window.__harness` reports the child-page requests the canvas made and the
- * most it ever had in flight at once — the expansion's bound, read off the
- * real queue rather than asserted about it.
+ * `window.__harness` reports the child-page requests the canvas made (single
+ * pages, and batches of first pages) and the most it ever had in flight at
+ * once — the expansion's bound, read off the real queue rather than asserted
+ * about it.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MotionGlobalConfig } from 'framer-motion'
@@ -52,6 +54,7 @@ const persona = params.get('persona') === 'business' ? 'business' : 'technical'
 const CONTAINERS = Number(params.get('containers') ?? (fixture === 'scale' ? 500 : 12))
 const CHILDREN = Number(params.get('children') ?? (fixture === 'scale' ? 200 : 8))
 const LATENCY = Number(params.get('latency') ?? (fixture === 'scale' ? 120 : 0))
+const BATCH = params.get('batch') !== '0'
 
 MotionGlobalConfig.skipAnimations = true
 document.documentElement.classList.toggle('dark', dark)
@@ -102,36 +105,47 @@ const ASSIGNMENTS: Record<string, { layerId: string }> = {
 }
 
 // ── The network ───────────────────────────────────────────────────────────
-const report = { childPages: 0, inFlight: 0, maxInFlight: 0 }
+const report = { childPages: 0, batches: 0, inFlight: 0, maxInFlight: 0 }
 ;(window as unknown as { __harness: typeof report }).__harness = report
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+async function request<T>(read: () => T): Promise<T> {
+  report.inFlight += 1
+  report.maxInFlight = Math.max(report.maxInFlight, report.inFlight)
+  try {
+    if (LATENCY) await wait(LATENCY)
+    return read()
+  } finally {
+    report.inFlight -= 1
+  }
+}
+function pageOf(urn: string, offset = 0, limit = 100) {
+  const all = childrenOf(urn)
+  const page = all.slice(offset, offset + limit)
+  const next = offset + page.length
+  return {
+    children: page,
+    containmentEdges: page.map((c) => ({ id: `c:${urn}>${c.urn}`, sourceUrn: urn, targetUrn: c.urn, edgeType: 'CONTAINS' })),
+    lineageEdges: [],
+    totalChildren: all.length,
+    hasMore: next < all.length,
+    nextOffset: next < all.length ? next : null,
+    nextCursor: null,
+  }
+}
 
 const provider = {
   scopeKey: 'harness',
   getChildren: async (urn: string) => childrenOf(urn),
   getChildrenWithEdges: async (urn: string, opts?: { offset?: number; limit?: number }) => {
     report.childPages += 1
-    report.inFlight += 1
-    report.maxInFlight = Math.max(report.maxInFlight, report.inFlight)
-    try {
-      if (LATENCY) await wait(LATENCY)
-      const all = childrenOf(urn)
-      const offset = opts?.offset ?? 0
-      const page = all.slice(offset, offset + (opts?.limit ?? 100))
-      const next = offset + page.length
-      return {
-        children: page,
-        containmentEdges: page.map((c) => ({ id: `c:${urn}>${c.urn}`, sourceUrn: urn, targetUrn: c.urn, edgeType: 'CONTAINS' })),
-        lineageEdges: [],
-        totalChildren: all.length,
-        hasMore: next < all.length,
-        nextOffset: next < all.length ? next : null,
-        nextCursor: null,
-      }
-    } finally {
-      report.inFlight -= 1
-    }
+    return request(() => pageOf(urn, opts?.offset, opts?.limit))
   },
+  ...(BATCH ? {
+    getChildrenBatch: async (parents: Array<{ urn: string; offset?: number }>, opts?: { limit?: number }) => {
+      report.batches += 1
+      return request(() => Object.fromEntries(parents.map((p) => [p.urn, pageOf(p.urn, p.offset, opts?.limit)])))
+    },
+  } : {}),
   getParent: async (urn: string) => { const p = parentOf(urn); return p ? lookup(p) ?? null : null },
   getNodes: async (q?: { urns?: string[] }) => (q?.urns ?? []).map(lookup).filter((n): n is GraphNode => !!n),
   getEdges: async () => [],

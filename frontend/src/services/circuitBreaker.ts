@@ -112,7 +112,7 @@ export function classifyEndpoint(url: string): EndpointClass {
   if (url.includes('/trace') || url.includes('/graph/members')) return 'trace'
   if (url.includes('/canvas/')) return 'canvas'
   if (url.includes('/edges/aggregated')) return 'aggregated'
-  if (url.includes('/children-with-edges') || url.includes('/edges/between')) return 'children'
+  if (url.includes('/children-with-edges') || url.includes('/children-batch') || url.includes('/edges/between')) return 'children'
   return 'default'
 }
 
