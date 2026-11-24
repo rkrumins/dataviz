@@ -6452,12 +6452,11 @@ export function ContextViewCanvas({
       onDelete: () => deleteLayerWithUndo(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
       onOpenSettings: () => takeRail(() => setLayerSettingsFor(layer.id)),
-      // The Business view's header keeps to the essentials; its own actions are here.
-      ...(personaMode !== 'technical' && {
-        onAddEntity: canEditGraph && !serverPlaced ? () => openBuilderForLayer(layer.id) : undefined,
-        onNewGroup: isDraft && !traceActive && !serverPlaced ? () => requestNewGroup(layer.id) : undefined,
-        onBuild: canEditGraph && !serverPlaced ? () => openBuildForLayer(layer.id) : undefined,
-      }),
+      // The header's own actions, in both views: the Business header keeps to the essentials,
+      // and a column too narrow for its tray of icons folds them into this menu (its ⋯).
+      onAddEntity: canEditGraph && !serverPlaced ? () => openBuilderForLayer(layer.id) : undefined,
+      onNewGroup: isDraft && !traceActive && !serverPlaced ? () => requestNewGroup(layer.id) : undefined,
+      onBuild: canEditGraph && !serverPlaced ? () => openBuildForLayer(layer.id) : undefined,
       // Everything the view places in this layer, found as search's Layer filter finds it.
       onNarrow: narrowEnabled
         ? () => openNarrow({
@@ -6474,7 +6473,7 @@ export function ContextViewCanvas({
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
-    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
+    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, canEditGraph, subsetView,
     openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable,
     selectableInLayer, setSelection])
 
@@ -8644,6 +8643,7 @@ export function ContextViewCanvas({
                 onReorderLayer={isDraft && !subsetFollows ? reorderLayer : undefined}
                 // The layer menu (right-click the header), and inserting a layer right here.
                 onHeaderContextMenu={openLayerMenu}
+                layerMenuOpen={interactions.state.contextMenu.isOpen && menuLayerId === layer.id}
                 onInsertLayerBefore={layerEditsAllowed && !subsetFollows ? insertLayerBefore : undefined}
                 renameNonce={renameRequest?.layerId === layer.id ? renameRequest.nonce : 0}
                 newGroupNonce={newGroupRequest?.layerId === layer.id ? newGroupRequest.nonce : 0}

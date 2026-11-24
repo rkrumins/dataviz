@@ -16,6 +16,7 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { ArrowDownAZ, ArrowUpZA, Check, Eraser, GitFork, Layers, ListOrdered, Shapes } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 
@@ -35,6 +36,8 @@ export interface LayerSortMenuProps {
   onApplyToView: () => void
   /** Presence shows "Reset custom order" (the layer has a manual arrangement). */
   onResetCustomOrder?: () => void
+  /** The menu opened or closed — the header's actions tray stays out while it is open. */
+  onOpenChange?: (open: boolean) => void
 }
 
 export const SORT_MODE_ICONS: Record<LayerNodeSortMode, typeof ArrowDownAZ> = {
@@ -66,6 +69,7 @@ export function LayerSortMenu({
   onSelectMode,
   onApplyToView,
   onResetCustomOrder,
+  onOpenChange,
 }: LayerSortMenuProps) {
   const TriggerIcon = SORT_MODE_ICONS[mode]
   // Radio value: 'default' when the column follows the view default; else the
@@ -106,31 +110,33 @@ export function LayerSortMenu({
   // live 2026-08-19 as "drawer buttons need 3-4 clicks"). Pinned by
   // LayerSortMenu.test.tsx.
   return (
-    <DropdownMenu.Root modal={false}>
-      <DropdownMenu.Trigger asChild>
-        <button
-          onClick={(e) => e.stopPropagation()}
-          aria-label={`Sort ${layerName}: ${SORT_MODE_LABELS[mode]}${isOverride ? '' : ' (view default)'}`}
-          className={cn(
-            'relative p-1.5 rounded-lg text-ink-muted hover:text-ink transition-all duration-200',
-            'hover:bg-black/[0.06] dark:hover:bg-white/[0.1]',
-            // Sorting is a primary control: keep it faintly present at rest and
-            // fully visible on column hover / focus (never fully hidden).
-            isOverride
-              ? 'opacity-100'
-              : 'opacity-60 group-hover/column:opacity-100 focus-visible:opacity-100',
-          )}
-          title={`Sort ${layerName}: ${SORT_MODE_LABELS[mode]}${isOverride ? '' : ' (view default)'}`}
-        >
-          <TriggerIcon className="w-3.5 h-3.5" />
-          {isOverride && (
-            <span
-              className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full"
-              style={{ backgroundColor: layerColor ?? 'var(--accent-lineage, #6366f1)' }}
-            />
-          )}
-        </button>
-      </DropdownMenu.Trigger>
+    <DropdownMenu.Root modal={false} onOpenChange={onOpenChange}>
+      {/* Lives in the header's actions tray, which decides when it shows; a
+          sort of the layer's own is marked under the name at rest. */}
+      <HoverTip
+        label={`Sort ${layerName}`}
+        detail={`${SORT_MODE_LABELS[mode]} — ${isOverride ? 'this layer’s own order' : 'the view default'}`}
+      >
+        <DropdownMenu.Trigger asChild>
+          <button
+            onClick={(e) => e.stopPropagation()}
+            aria-label={`Sort ${layerName}: ${SORT_MODE_LABELS[mode]}${isOverride ? '' : ' (view default)'}`}
+            className={cn(
+              'relative p-1.5 rounded-lg text-ink-muted hover:text-ink transition-all duration-200',
+              'hover:bg-black/[0.06] dark:hover:bg-white/[0.1]',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+            )}
+          >
+            <TriggerIcon className="w-3.5 h-3.5" />
+            {isOverride && (
+              <span
+                className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full"
+                style={{ backgroundColor: layerColor ?? 'var(--accent-lineage, #6366f1)' }}
+              />
+            )}
+          </button>
+        </DropdownMenu.Trigger>
+      </HoverTip>
 
       <DropdownMenu.Portal>
         <DropdownMenu.Content
