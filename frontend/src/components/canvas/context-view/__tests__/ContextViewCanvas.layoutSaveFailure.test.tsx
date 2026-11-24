@@ -25,7 +25,7 @@ vi.mock('@/services/viewApiService', async (importOriginal) => ({
   updateViewLayout: (...args: unknown[]) => updateViewLayoutMock(...args),
 }))
 
-import { act, cleanup, fireEvent, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
@@ -47,7 +47,7 @@ async function openCanvas() {
 
 /** Make a durable layout edit — rename the first column; the canvas arms its debounced save on it. */
 function editLayout(name = 'Renamed column') {
-  act(() => { fireEvent.click(screen.getAllByTitle('Rename layer')[0]) })
+  act(() => { fireEvent.click(within(screen.getAllByRole('group', { name: /: actions$/ })[0]).getByRole('button', { name: /^Rename / })) })
   const input = document.activeElement as HTMLInputElement
   expect(input.tagName).toBe('INPUT')
   act(() => {
