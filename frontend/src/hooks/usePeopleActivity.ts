@@ -33,6 +33,35 @@ export const PEOPLE_KEYS = {
         ['analytics', 'people', 'day', id, day, ws ?? null] as const,
     feed: (id: string, ws: string | null | undefined, kinds: FeedKind[]) =>
         ['analytics', 'people', 'feed', id, ws ?? null, kinds.join(',')] as const,
+    lines: (ids: string[], range: AnalyticsRangeSelection, ws?: string | null) =>
+        ['analytics', 'people', 'lines', [...ids].sort().join(','), rangeKey(range), ws ?? null] as const,
+    scopeDay: (day: string, ws?: string | null) =>
+        ['analytics', 'people', 'scope-day', day, ws ?? null] as const,
+}
+
+/** A few people's activity lines on one axis — the compare chart. */
+export function usePeopleLines(ids: string[], range: AnalyticsRangeSelection, workspaceId?: string | null) {
+    return useQuery({
+        queryKey: PEOPLE_KEYS.lines(ids, range, workspaceId),
+        queryFn: () => peopleActivityService.lines(ids, range, workspaceId),
+        enabled: ids.length > 0,
+        staleTime: STALE_MS,
+        placeholderData: keepPreviousData,
+        retry,
+        refetchOnWindowFocus: false,
+    })
+}
+
+/** Everyone active on one day — the day panel. */
+export function useScopeDay(day: string | null, workspaceId?: string | null) {
+    return useQuery({
+        queryKey: PEOPLE_KEYS.scopeDay(day ?? '', workspaceId),
+        queryFn: () => peopleActivityService.scopeDay(day as string, workspaceId),
+        enabled: !!day,
+        staleTime: STALE_MS,
+        retry,
+        refetchOnWindowFocus: false,
+    })
 }
 
 export function usePeopleRoster(range: AnalyticsRangeSelection, query: PeopleQuery, enabled = true) {

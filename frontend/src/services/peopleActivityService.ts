@@ -39,15 +39,18 @@ export interface PeopleWindow {
     buckets: string[]
 }
 
+/** How far the daily rollup every roster figure comes from reaches. */
 export interface IndexCoverage {
-    attributedThrough: string | null
-    activityThrough: string | null
-    joinsThrough: string | null
+    /** When today was last computed. */
+    freshAt: string | null
+    /** The oldest day from which every day to today is computed: a window from here is exact. */
+    completeFrom: string | null
+    /** The first day anything was recorded. */
     historyFrom: string | null
-    /** The indexer is still working through history. */
-    backfilling: boolean
-    /** The indexer has ever run on this deployment. */
+    /** The indexer has computed today recently — it is keeping the figures current. */
     running: boolean
+    /** History is still being indexed, newest first. */
+    backfilling: boolean
     progress: number | null
 }
 
@@ -55,7 +58,6 @@ export interface PeopleCoverage {
     /** The newest activity-ledger row; `null` when the ledger is empty here. */
     ledgerThrough: string | null
     sectionsSince: string | null
-    workspaceAttributionSince: string | null
     index: IndexCoverage
 }
 
@@ -73,6 +75,7 @@ export interface SectionCount { section: string; count: number; people: number }
 export interface PersonRow {
     userId: string
     name: string
+    /** Privileged readers only. */
     email?: string | null
     deleted: boolean
     actions: number
@@ -84,10 +87,10 @@ export interface PersonRow {
     idleSignInDays: number | null
     lastActiveAt: string | null
     lastSignInAt: string | null
-    kinds: Partial<Record<ActivityKind, number>>
     topKind: ActivityKind | null
-    values: number[]
     joinedInWindow: boolean
+    /** Their activity line: actions per period of the window, in the scope. */
+    line: number[]
     joinedAt: string | null
     firstActiveAt: string | null
     lastActiveEverAt: string | null
@@ -181,7 +184,13 @@ export interface PersonDoc {
         currentStreak: number
         lastActiveAt: string | null
     }
-    series: PeopleSeries
+    series: PeopleSeries & {
+        /** Their activity line: actions per period. */
+        actions: number[]
+        /** The same over the period before, index-aligned — the ghost behind the line. */
+        previousActions: number[]
+        signIns: number[] | null
+    }
     kinds: KindCount[]
     types: TypeCount[]
     punchcard: number[][]
@@ -244,6 +253,31 @@ export interface PersonFeedPage {
     next: string | null
 }
 
+/** A few people's activity lines on one axis, to compare them. */
+export interface PeopleLines {
+    buckets: string[]
+    granularity: 'day' | 'week'
+    lines: Record<string, number[]>
+    names: Record<string, string>
+    scope: PeopleScope
+}
+
+/** Everyone active on one day in a scope — exactly, not a sample. */
+export interface ScopeDay {
+    day: string
+    scope: PeopleScope
+    active: number
+    signedIn: number | null
+    kinds: KindCount[]
+    people: {
+        userId: string
+        name: string
+        actions: number
+        signIns: number | null
+        kinds: Partial<Record<ActivityKind, number>>
+    }[]
+}
+
 export type PeopleSort = 'actions' | 'activeDays' | 'lastActiveAt' | 'name' | 'change' | 'signIns'
 
 export interface PeopleQuery {
@@ -272,6 +306,17 @@ export const peopleActivityService = {
             workspace: query.workspaceId, q: query.q, sort: query.sort, order: query.order,
             offset: query.offset, limit: query.limit,
         })}`)
+    },
+
+    lines(ids: string[], range: AnalyticsRangeSelection, workspaceId?: string | null): Promise<PeopleLines> {
+        return authFetch<PeopleLines>(`${API}/lines?${rangeQuery(range)}${qs({
+            ids: ids.join(','), workspace: workspaceId,
+        })}`)
+    },
+
+    scopeDay(day: string, workspaceId?: string | null): Promise<ScopeDay> {
+        return authFetch<ScopeDay>(
+            `${API}/days/${encodeURIComponent(day)}?${qs({ workspace: workspaceId }).slice(1)}`)
     },
 
     person(id: string, range: AnalyticsRangeSelection, workspaceId?: string | null): Promise<PersonDoc> {

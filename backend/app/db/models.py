@@ -1918,10 +1918,6 @@ class ProductEventORM(Base):
         # One person's activity, as a range scan: People analytics.
         # Alembic 20261202_1000_pev_actor_ws.
         Index("idx_product_events_actor", "actor_id", "created_at"),
-        # One workspace's usage signals. Partial: most rows carry no workspace.
-        Index("idx_product_events_ws", "workspace_id", "created_at",
-              postgresql_where=text("workspace_id IS NOT NULL"),
-              sqlite_where=text("workspace_id IS NOT NULL")),
     )
 
     def __repr__(self) -> str:
@@ -1953,6 +1949,66 @@ class PersonWorkspaceActivityORM(Base):
         # A workspace's people, most recently active first: the roster's read.
         Index("idx_pwa_workspace_last", "workspace_id", "last_active_at"),
     )
+
+
+class PersonActivityDailyORM(Base):
+    """What one person did on one UTC day, in one workspace, of one kind.
+
+    The People roster's only source: a roster costs people × days, never events. Written by
+    ``services/people_activity_indexer``, which recomputes a whole day at a time, so a row is
+    always the exact fold of that day's raw events — never an increment that could drift.
+
+    ``workspace_id`` is ``''`` for events that happened in no workspace (a sign-in, a docs
+    vote). ``kind`` is one of the activity kinds, or ``section.<name>`` for moves around the
+    app. ``n``/``first_at``/``last_at`` count every event; the ``_ws`` columns only those a
+    workspace admin may see (no auditor-only ledger rows, no admin opening a private view).
+    """
+    __tablename__ = "person_activity_daily"
+
+    day = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    workspace_id = Column(Text, primary_key=True)
+    kind = Column(Text, primary_key=True)
+    n = Column(Integer, nullable=False, default=0, server_default="0")
+    n_ws = Column(Integer, nullable=False, default=0, server_default="0")
+    first_at = Column(Text, nullable=True)
+    last_at = Column(Text, nullable=True)
+    first_ws_at = Column(Text, nullable=True)
+    last_ws_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # One workspace's days: a workspace roster.
+        Index("idx_pad_workspace_day", "workspace_id", "day"),
+        # One person's days: their activity line, calendar and page.
+        Index("idx_pad_user_day", "user_id", "day"),
+    )
+
+
+class PeopleDailyFacetORM(Base):
+    """The same days without the person: events by hour of day (``facet='hour'``) and by
+    event type (``facet='type'``) — the punchcard and "what people do", which name no one."""
+    __tablename__ = "people_daily_facets"
+
+    day = Column(Text, primary_key=True)
+    workspace_id = Column(Text, primary_key=True)
+    facet = Column(Text, primary_key=True)
+    value = Column(Text, primary_key=True)
+    n = Column(Integer, nullable=False, default=0, server_default="0")
+    n_ws = Column(Integer, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (
+        Index("idx_pdf_workspace_day", "workspace_id", "day"),
+    )
+
+
+class PeopleIndexDayORM(Base):
+    """One UTC day the people indexer has computed, and whether something about it arrived
+    late (a ledger row the relay recorded after the fact) so it must be computed again."""
+    __tablename__ = "people_index_days"
+
+    day = Column(Text, primary_key=True)
+    computed_at = Column(Text, nullable=True)
+    dirty = Column(Boolean, nullable=False, default=False, server_default="false")
 
 
 class PeopleIndexCursorORM(Base):

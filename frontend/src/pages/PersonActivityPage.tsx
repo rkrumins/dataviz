@@ -42,11 +42,13 @@ import { Leaderboard } from '@/components/analytics/Leaderboard'
 import { MetricInfo } from '@/components/analytics/MetricInfo'
 import { ViewLink, WorkspaceLink } from '@/components/analytics/EntityLink'
 import {
-    DEFAULT_RANGE_DAYS, RANGE_PRESETS, RangePicker, comparisonLabel, customRangeError, rangePhrase,
+    DEFAULT_RANGE_DAYS, RANGE_PRESETS, RangePicker, comparisonLabel, customRangeError, previousLabel,
+    rangePhrase,
 } from '@/components/analytics/RangePicker'
 import { ChartFrame } from '@/components/analytics/charts/ChartFrame'
 import { ChartTable } from '@/components/analytics/charts/ChartTable'
 import { StackedAreaChart } from '@/components/analytics/charts/StackedAreaChart'
+import { TimeSeriesChart } from '@/components/analytics/charts/TimeSeriesChart'
 import { StackedShareBar } from '@/components/analytics/charts/StackedShareBar'
 import { PunchcardGrid } from '@/components/analytics/charts/PunchcardGrid'
 import { punchcardTable } from '@/components/analytics/charts/punchcard'
@@ -146,7 +148,7 @@ export function PersonActivityPage() {
                         </div>
 
                         <div className={cn('space-y-5 transition-opacity', person.isFetching && 'opacity-60')}>
-                            <CoverageNotice coverage={data.coverage} window={data.window} lens={data.scope.lens} scoped={!!workspaceId} />
+                            <CoverageNotice coverage={data.coverage} window={data.window} lens={data.scope.lens} />
                             {tab === 'overview' ? (
                                 <Overview
                                     data={data} range={range} onRange={setRange}
@@ -331,6 +333,35 @@ function Overview({ data, range, onRange, calendar, selectedDay, onSelectDay }: 
                     <ActivityCalendar days={calendar.days} actions={calendar.actions} signIns={calendar.signIns}
                         selected={selectedDay} onSelectDay={onSelectDay} />
                 )}
+            </ChartFrame>
+
+            <ChartFrame
+                id="chart-person-line"
+                title="Activity line"
+                subtitle={`Their actions per ${data.window.granularity === 'week' ? 'week' : 'day'} in ${rangePhrase(range)}, against ${previousLabel(range).toLowerCase()}${full ? ', with sign-ins' : ''}`}
+                isEmpty={data.series.actions.every((v) => v === 0) && data.series.previousActions.every((v) => v === 0)}
+                emptyLabel="They did nothing in this range or the one before."
+                ghostLabel={previousLabel(range)}
+                series={[
+                    { key: 'actions', label: 'Actions', color: theme.series[1], shape: 'area' as const },
+                    ...(data.series.signIns ? [{ key: 'signins', label: 'Sign-ins', color: theme.series[0], shape: 'line' as const }] : []),
+                ]}
+                table={<ChartTable rowLabel="Period" rows={data.series.buckets.map((b) => shortDate(b, true))}
+                    columns={[
+                        { key: 'actions', label: 'Actions', values: data.series.actions },
+                        { key: 'previous', label: previousLabel(range), values: data.series.previousActions },
+                        ...(data.series.signIns ? [{ key: 'signins', label: 'Sign-ins', values: data.series.signIns }] : []),
+                    ]} />}
+            >
+                <TimeSeriesChart
+                    buckets={data.series.buckets}
+                    axisLabels={data.series.buckets.map((b) => shortDate(b))}
+                    series={[
+                        { key: 'actions', label: 'Actions', values: data.series.actions, slot: 1, area: true,
+                          previous: data.series.previousActions },
+                        ...(data.series.signIns ? [{ key: 'signins', label: 'Sign-ins', values: data.series.signIns, slot: 0 }] : []),
+                    ]}
+                />
             </ChartFrame>
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">

@@ -13,7 +13,7 @@ import { peopleActivityService } from '@/services/peopleActivityService'
 
 vi.mock('@/services/peopleActivityService', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/services/peopleActivityService')>()
-    return { ...actual, peopleActivityService: { roster: vi.fn(), person: vi.fn(), calendar: vi.fn(), day: vi.fn(), events: vi.fn() } }
+    return { ...actual, peopleActivityService: { roster: vi.fn(), person: vi.fn(), calendar: vi.fn(), day: vi.fn(), events: vi.fn(), lines: vi.fn(), scopeDay: vi.fn() } }
 })
 
 beforeAll(() => {
@@ -56,6 +56,12 @@ describe('PersonActivityPage', () => {
         expect(screen.getByText('Where they work, and since when')).toBeInTheDocument()
         expect(screen.getByText(/2 failed sign-in attempts/)).toBeInTheDocument()
         expect(svc.person).toHaveBeenCalledWith('usr_ada', { kind: 'preset', days: 30 }, null)
+    })
+
+    it('draws their activity line against the period before, with sign-ins', async () => {
+        renderAt('/analytics/people/usr_ada?range=30')
+        expect(await screen.findByText('Activity line')).toBeInTheDocument()
+        expect(screen.getByText(/against previous 30 days, with sign-ins/)).toBeInTheDocument()
     })
 
     it('opens a day from the calendar, in sessions', async () => {

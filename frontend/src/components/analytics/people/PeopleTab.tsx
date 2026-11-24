@@ -11,20 +11,21 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-    Activity, ArrowDownUp, CalendarDays, Clock4, LogIn, MoonStar, Search, Sparkles, UserPlus, Users, X,
+    Activity, ArrowDownUp, CalendarDays, Clock4, Grid3x3, LineChart as LineChartIcon, LogIn, MoonStar,
+    Search, Sparkles, UserPlus, Users, X,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { compact, exact, percent, shortDate, signedPercent } from '@/lib/formatMetric'
 import type { AnalyticsRangeSelection } from '@/services/analyticsService'
 import type { PeopleDoc, PeopleSort, PersonRow } from '@/services/peopleActivityService'
-import { usePeopleRoster } from '@/hooks/usePeopleActivity'
+import { usePeopleLines, usePeopleRoster, useScopeDay } from '@/hooks/usePeopleActivity'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { PersonChip } from '@/components/ui/PersonChip'
 import { DateTime } from '@/components/ui/DateTime'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { Sparkline } from '@/components/ui/Sparkline'
+import { Segmented } from '@/components/ui/Segmented'
 import { KpiCard } from '../KpiCard'
 import { Leaderboard } from '../Leaderboard'
 import { InsightStrip } from '../InsightStrip'
@@ -36,6 +37,7 @@ import { StackedAreaChart } from '../charts/StackedAreaChart'
 import { StackedShareBar } from '../charts/StackedShareBar'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { PulseMatrix } from '../charts/PulseMatrix'
+import { ActivityLine, SmallMultiples } from '../charts/SmallMultiples'
 import { PunchcardGrid } from '../charts/PunchcardGrid'
 import { punchcardTable } from '../charts/punchcard'
 import { useChartTheme } from '../charts/chartTheme'
@@ -44,7 +46,12 @@ import { KIND_META, kindLabel, kindSlot, sectionLabel } from './activityKinds'
 import { CoverageNotice } from './CoverageNotice'
 import { personActivityHref, spanToRange } from './peopleLinks'
 
-const PAGE = 25
+const PAGE = 24
+
+/** People one compare chart can hold: one palette slot each, never cycled. */
+export const COMPARE_MAX = 6
+
+type MatrixView = 'matrix' | 'lines'
 
 export interface PeopleScopeOption {
     id: string | null
@@ -68,6 +75,10 @@ export function PeopleTab({
     const [order, setOrder] = useState<'asc' | 'desc'>('desc')
     const [page, setPage] = useState(0)
     const [day, setDay] = useState<number | null>(null)
+    const [compare, setCompare] = useState<string[]>([])
+    const [view, setView] = useState<MatrixView>('matrix')
+    const toggleCompare = (id: string) => setCompare((c) =>
+        c.includes(id) ? c.filter((x) => x !== id) : c.length >= COMPARE_MAX ? c : [...c, id])
 
     const query = { workspaceId, q: q.trim() || undefined, sort, order, offset: page * PAGE, limit: PAGE }
     const roster = usePeopleRoster(range, query)
@@ -84,7 +95,7 @@ export function PeopleTab({
         <div className={cn('space-y-5', className)}>
             <ScopeBar
                 scopes={scopes} workspaceId={workspaceId}
-                onScopeChange={(ws) => { onScopeChange?.(ws); setPage(0); setDay(null) }}
+                onScopeChange={(ws) => { onScopeChange?.(ws); setPage(0); setDay(null); setCompare([]) }}
                 q={q} onQ={(v) => { setQ(v); setPage(0) }}
                 generatedAt={data?.generatedAt}
             />
@@ -108,6 +119,8 @@ export function PeopleTab({
                     sort={sort} order={order} onSort={setSortKey}
                     page={page} onPage={setPage}
                     onOpenDay={setDay}
+                    compare={compare} onToggleCompare={toggleCompare} onClearCompare={() => setCompare([])}
+                    view={view} onView={setView}
                 />
             )}
 
@@ -164,6 +177,7 @@ function ScopeBar({ scopes, workspaceId, onScopeChange, q, onQ, generatedAt }: {
 
 function PeopleBody({
     data, range, onRangeChange, isStale, workspaceId, sort, order, onSort, page, onPage, onOpenDay,
+    compare, onToggleCompare, onClearCompare, view, onView,
 }: {
     data: PeopleDoc
     range: AnalyticsRangeSelection
@@ -176,6 +190,11 @@ function PeopleBody({
     page: number
     onPage: (p: number) => void
     onOpenDay: (index: number) => void
+    compare: string[]
+    onToggleCompare: (id: string) => void
+    onClearCompare: () => void
+    view: MatrixView
+    onView: (v: MatrixView) => void
 }) {
     const theme = useChartTheme()
     const { totals, series, window: w, scope } = data
@@ -197,7 +216,7 @@ function PeopleBody({
 
     return (
         <div className={cn('space-y-5 transition-opacity', isStale && 'opacity-60')}>
-            <CoverageNotice coverage={data.coverage} window={w} lens={scope.lens} scoped={!!workspaceId} />
+            <CoverageNotice coverage={data.coverage} window={w} lens={scope.lens} />
 
             {data.insights.length > 0 && (
                 <InsightStrip insights={data.insights} rangeLabel={rangePhrase(range)} />
@@ -360,47 +379,80 @@ function PeopleBody({
 
             <ChartFrame
                 id="chart-people-matrix"
-                title="Who's active, day by day"
-                subtitle={daily
-                    ? 'Each person’s actions per day, on one scale — pick a day to see who was around'
-                    : 'Each person’s actions per week — pick a week to zoom into its days'}
+                title={view === 'lines' ? 'Everyone’s activity line' : "Who's active, day by day"}
+                subtitle={view === 'lines'
+                    ? `Each person’s actions per ${daily ? 'day' : 'week'}, on one scale — ${PAGE} at a time, in the roster’s order`
+                    : daily
+                        ? 'Each person’s actions per day, on one scale — pick a day to see who was around'
+                        : 'Each person’s actions per week — pick a week to zoom into its days'}
                 isStale={isStale}
                 isEmpty={data.people.length === 0}
                 emptyLabel={data.page.total === 0 ? 'Nobody did anything in this range.' : 'Nobody on this page.'}
-                action={<SortToggle sort={sort} order={order} onSort={onSort} />}
+                action={
+                    <div className="flex items-center gap-2">
+                        <Segmented<MatrixView>
+                            label="Show people as"
+                            value={view}
+                            onChange={onView}
+                            options={[
+                                { value: 'matrix', label: 'Matrix', icon: Grid3x3 },
+                                { value: 'lines', label: 'Lines', icon: LineChartIcon },
+                            ]}
+                        />
+                        <SortToggle sort={sort} order={order} onSort={onSort} />
+                    </div>
+                }
                 table={
                     <ChartTable
                         rowLabel="Person"
                         rows={data.people.map((p) => p.name)}
                         columns={buckets.map((b, i) => ({
-                            key: b, label: shortDate(b), values: data.people.map((p) => p.values[i] ?? 0),
+                            key: b, label: shortDate(b), values: data.people.map((p) => p.line[i] ?? 0),
                         }))}
                     />
                 }
             >
-                <PulseMatrix
-                    buckets={buckets}
-                    rowHeader="Person"
-                    unit="actions"
-                    onSelectBucket={openBucket}
-                    rows={data.people.map((p) => ({
-                        id: p.userId,
-                        title: p.name,
-                        total: p.actions,
-                        values: p.values,
-                        label: (
-                            <Link to={personActivityHref(p.userId, { workspaceId, range })}
-                                className="hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline">
-                                {p.name}
-                            </Link>
-                        ),
-                    }))}
-                />
+                {view === 'lines' ? (
+                    <SmallMultiples
+                        buckets={buckets}
+                        rows={data.people.map((p) => ({
+                            id: p.userId, name: p.name, values: p.line, total: p.actions,
+                            href: personActivityHref(p.userId, { workspaceId, range }),
+                            caption: p.topKind ? `mostly ${KIND_META[p.topKind].gerund}` : undefined,
+                        }))}
+                    />
+                ) : (
+                    <PulseMatrix
+                        buckets={buckets}
+                        rowHeader="Person"
+                        unit="actions"
+                        onSelectBucket={openBucket}
+                        rows={data.people.map((p) => ({
+                            id: p.userId,
+                            title: p.name,
+                            total: p.actions,
+                            values: p.line,
+                            label: (
+                                <Link to={personActivityHref(p.userId, { workspaceId, range })}
+                                    className="hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline">
+                                    {p.name}
+                                </Link>
+                            ),
+                        }))}
+                    />
+                )}
+                <PagerFooter page={page} total={data.page.total} onPage={onPage} />
             </ChartFrame>
+
+            {compare.length > 0 && (
+                <ComparePanel ids={compare} range={range} workspaceId={workspaceId}
+                    onRemove={onToggleCompare} onClear={onClearCompare} />
+            )}
 
             <RosterTable
                 data={data} range={range} workspaceId={workspaceId}
                 sort={sort} order={order} onSort={onSort} page={page} onPage={onPage}
+                compare={compare} onToggleCompare={onToggleCompare}
             />
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -480,7 +532,26 @@ function SortHeader({ label, k, sort, order, onSort, className }: {
     )
 }
 
-function RosterTable({ data, range, workspaceId, sort, order, onSort, page, onPage }: {
+/** Previous / next over the server-paged roster, shared by the matrix, the lines and the table. */
+function PagerFooter({ page, total, onPage }: { page: number; total: number; onPage: (p: number) => void }) {
+    const pages = Math.max(1, Math.ceil(total / PAGE))
+    if (pages <= 1) return null
+    return (
+        <div className="mt-3 flex items-center justify-between text-[11px] text-ink-muted">
+            <span>
+                {exact(page * PAGE + 1)}–{exact(Math.min(total, (page + 1) * PAGE))} of {exact(total)} people
+            </span>
+            <div className="flex gap-1.5">
+                <button type="button" disabled={page === 0} onClick={() => onPage(page - 1)}
+                    className="rounded-md border border-glass-border px-2 py-1 font-semibold text-ink-secondary disabled:opacity-40">Previous</button>
+                <button type="button" disabled={page + 1 >= pages} onClick={() => onPage(page + 1)}
+                    className="rounded-md border border-glass-border px-2 py-1 font-semibold text-ink-secondary disabled:opacity-40">Next</button>
+            </div>
+        </div>
+    )
+}
+
+function RosterTable({ data, range, workspaceId, sort, order, onSort, page, onPage, compare, onToggleCompare }: {
     data: PeopleDoc
     range: AnalyticsRangeSelection
     workspaceId: string | null
@@ -489,10 +560,13 @@ function RosterTable({ data, range, workspaceId, sort, order, onSort, page, onPa
     onSort: (k: PeopleSort) => void
     page: number
     onPage: (p: number) => void
+    compare: string[]
+    onToggleCompare: (id: string) => void
 }) {
     const full = data.scope.lens === 'full'
     const maxDays = Math.max(1, data.window.days)
-    const pages = Math.max(1, Math.ceil(data.page.total / PAGE))
+    // One scale for every line on the page, so a taller line means more activity.
+    const lineMax = Math.max(0, ...data.people.flatMap((p) => p.line))
     const head = { sort, order, onSort }
 
     return (
@@ -502,7 +576,7 @@ function RosterTable({ data, range, workspaceId, sort, order, onSort, page, onPa
                     <h2 id="people-roster" className="text-sm font-bold text-ink">Everyone, in detail</h2>
                     <p className="text-[11px] text-ink-muted">
                         {exact(data.page.total)} {data.page.total === 1 ? 'person' : 'people'} active in {rangePhrase(range)}
-                        {workspaceId ? ' in this workspace' : ''} · open a name for their whole story
+                        {workspaceId ? ' in this workspace' : ''} · tick up to {COMPARE_MAX} to compare their lines · open a name for their whole story
                     </p>
                 </div>
             </div>
@@ -510,6 +584,7 @@ function RosterTable({ data, range, workspaceId, sort, order, onSort, page, onPa
                 <table className="w-full text-xs">
                     <thead className="border-y border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-left text-[11px] text-ink-muted">
                         <tr>
+                            <th scope="col" className="w-8 px-3 py-2"><span className="sr-only">Compare</span></th>
                             <SortHeader label="Person" k="name" {...head} />
                             <th scope="col" className="px-3 py-2 font-semibold">Joined</th>
                             {full && <SortHeader label="Last signed in" k="signIns" {...head} />}
@@ -517,40 +592,45 @@ function RosterTable({ data, range, workspaceId, sort, order, onSort, page, onPa
                             <SortHeader label="Active days" k="activeDays" {...head} />
                             <SortHeader label="Actions" k="actions" {...head} className="text-right" />
                             <th scope="col" className="px-3 py-2 font-semibold">Mostly</th>
-                            <th scope="col" className="px-3 py-2 font-semibold">Trend</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">Activity line</th>
                             <SortHeader label="Change" k="change" {...head} className="text-right" />
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-glass-border">
                         {data.people.map((p) => (
-                            <RosterRow key={p.userId} p={p} full={full} maxDays={maxDays} range={range} workspaceId={workspaceId} />
+                            <RosterRow key={p.userId} p={p} full={full} maxDays={maxDays} range={range}
+                                workspaceId={workspaceId} buckets={data.series.buckets} lineMax={lineMax}
+                                compared={compare.includes(p.userId)}
+                                compareFull={compare.length >= COMPARE_MAX}
+                                onToggleCompare={onToggleCompare} />
                         ))}
                     </tbody>
                 </table>
             </div>
-            {pages > 1 && (
-                <div className="flex items-center justify-between px-5 py-3 text-[11px] text-ink-muted">
-                    <span>Page {page + 1} of {pages}</span>
-                    <div className="flex gap-1.5">
-                        <button type="button" disabled={page === 0} onClick={() => onPage(page - 1)}
-                            className="rounded-md border border-glass-border px-2 py-1 font-semibold text-ink-secondary disabled:opacity-40">Previous</button>
-                        <button type="button" disabled={page + 1 >= pages} onClick={() => onPage(page + 1)}
-                            className="rounded-md border border-glass-border px-2 py-1 font-semibold text-ink-secondary disabled:opacity-40">Next</button>
-                    </div>
-                </div>
-            )}
+            <div className="px-5 pb-3"><PagerFooter page={page} total={data.page.total} onPage={onPage} /></div>
         </section>
     )
 }
 
-function RosterRow({ p, full, maxDays, range, workspaceId }: {
+function RosterRow({
+    p, full, maxDays, range, workspaceId, buckets, lineMax, compared, compareFull, onToggleCompare,
+}: {
     p: PersonRow; full: boolean; maxDays: number; range: AnalyticsRangeSelection; workspaceId: string | null
+    buckets: string[]; lineMax: number; compared: boolean; compareFull: boolean
+    onToggleCompare: (id: string) => void
 }) {
     const theme = useChartTheme()
     const top = p.topKind ? KIND_META[p.topKind] : null
     const delta = signedPercent(p.changePct)
     return (
-        <tr className="hover:bg-black/[0.02] dark:hover:bg-white/[0.02]">
+        <tr className={cn('hover:bg-black/[0.02] dark:hover:bg-white/[0.02]', compared && 'bg-indigo-500/[0.04]')}>
+            <td className="px-3 py-2">
+                <input type="checkbox" checked={compared} disabled={!compared && compareFull}
+                    onChange={() => onToggleCompare(p.userId)}
+                    aria-label={`Compare ${p.name}`}
+                    title={!compared && compareFull ? `At most ${COMPARE_MAX} people at once` : undefined}
+                    className="h-3.5 w-3.5 rounded border-glass-border accent-indigo-600 disabled:opacity-40" />
+            </td>
             <td className="px-3 py-2">
                 <Link to={personActivityHref(p.userId, { workspaceId, range })} className="block min-w-[10rem]">
                     <PersonChip id={p.userId} size="sm" link={false}
@@ -583,7 +663,10 @@ function RosterRow({ p, full, maxDays, range, workspaceId }: {
                     </span>
                 ) : <span className="text-ink-muted">Signed in only</span>}
             </td>
-            <td className="px-3 py-2 w-24"><Sparkline points={p.values} label={`${p.name}, actions per period`} /></td>
+            <td className="px-3 py-2">
+                <ActivityLine values={p.line} max={lineMax} buckets={buckets} width={160} height={28}
+                    label={`${p.name}, actions per period`} />
+            </td>
             <td className={cn('px-3 py-2 text-right tabular-nums font-semibold',
                 p.changePct == null ? 'text-ink-muted' : p.changePct >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400')}>
                 {delta ?? '—'}
@@ -631,7 +714,68 @@ function QuietMembers({ data, range, workspaceId }: {
 }
 
 /**
- * One day, for everyone in the scope: who was around, how much each did, and what
+ * Several people's activity lines on one chart — up to six, a palette slot each, so their
+ * shapes can be compared on one axis. Fetched for exactly the people ticked.
+ */
+function ComparePanel({ ids, range, workspaceId, onRemove, onClear }: {
+    ids: string[]
+    range: AnalyticsRangeSelection
+    workspaceId: string | null
+    onRemove: (id: string) => void
+    onClear: () => void
+}) {
+    const theme = useChartTheme()
+    const q = usePeopleLines(ids, range, workspaceId)
+    const data = q.data
+    const shown = ids.filter((id) => data?.lines[id])
+    return (
+        <ChartFrame
+            id="chart-people-compare"
+            title="Compare activity lines"
+            subtitle={`Actions per ${data?.granularity === 'week' ? 'week' : 'day'} in ${rangePhrase(range)}, on one axis`}
+            isStale={q.isFetching}
+            isEmpty={!data || shown.length === 0}
+            emptyLabel={q.isLoading ? 'Loading their lines…' : 'Nothing to compare in this range.'}
+            series={shown.map((id, i) => ({
+                key: id, label: data?.names[id] ?? id, color: theme.series[i % theme.series.length], shape: 'line' as const,
+            }))}
+            action={
+                <div className="flex flex-wrap items-center gap-1.5">
+                    {shown.map((id, i) => (
+                        <button key={id} type="button" onClick={() => onRemove(id)}
+                            aria-label={`Stop comparing ${data?.names[id] ?? id}`}
+                            className="inline-flex items-center gap-1 rounded-full border border-glass-border px-2 py-0.5 text-[10px] font-semibold text-ink-secondary hover:text-ink">
+                            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: theme.series[i % theme.series.length] }} />
+                            {data?.names[id] ?? id}
+                            <X className="h-3 w-3" />
+                        </button>
+                    ))}
+                    <button type="button" onClick={onClear} className="text-[11px] font-semibold text-ink-muted hover:text-ink">Clear</button>
+                </div>
+            }
+            table={data ? (
+                <ChartTable
+                    rowLabel="Period"
+                    rows={data.buckets.map((b) => shortDate(b, true))}
+                    columns={shown.map((id) => ({ key: id, label: data.names[id] ?? id, values: data.lines[id] }))}
+                />
+            ) : undefined}
+        >
+            {data && (
+                <TimeSeriesChart
+                    buckets={data.buckets}
+                    axisLabels={data.buckets.map((b) => shortDate(b))}
+                    series={shown.map((id, i) => ({
+                        key: id, label: data.names[id] ?? id, values: data.lines[id], slot: i,
+                    }))}
+                />
+            )}
+        </ChartFrame>
+    )
+}
+
+/**
+ * One day, for everyone in the scope: exactly who was around, how much each did, and what
  * the day was made of. Opened from a column of the day-by-day matrix.
  */
 function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
@@ -644,16 +788,9 @@ function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
     const theme = useChartTheme()
     const open = index !== null && index >= 0 && index < data.series.buckets.length
     const day = open ? data.series.buckets[index!] : null
-    // The 100 most active people of the window — cached server-side with the
-    // roster, so this costs nothing — filtered to who was around that day.
-    const wide = usePeopleRoster(range, { workspaceId, sort: 'actions', order: 'desc', offset: 0, limit: 100 }, open)
-    const people = (wide.data?.people ?? [])
-        .map((p) => ({ p, n: p.values[index ?? 0] ?? 0 }))
-        .filter((x) => x.n > 0)
-        .sort((a, b) => b.n - a.n)
-    const kinds = open
-        ? data.series.byKind.map((s) => ({ key: s.kind, count: s.values[index!] ?? 0 })).filter((s) => s.count > 0)
-        : []
+    const q = useScopeDay(day, workspaceId)
+    const dayDoc = q.data && q.data.day === day ? q.data : undefined
+    const kinds = (dayDoc?.kinds ?? []).map((k) => ({ key: k.kind, count: k.count }))
 
     return (
         <>
@@ -671,8 +808,8 @@ function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
                         <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">One day</p>
                         <h2 className="text-lg font-bold text-ink">{day ? shortDate(day, true) : ''}</h2>
                         <p className="text-xs text-ink-muted">
-                            {exact(data.series.activePeople[index ?? 0] ?? 0)} active
-                            {data.series.signedIn && <> · {exact(data.series.signedIn[index ?? 0] ?? 0)} signed in</>}
+                            {exact(dayDoc?.active ?? data.series.activePeople[index ?? 0] ?? 0)} active
+                            {dayDoc?.signedIn != null && <> · {exact(dayDoc.signedIn)} signed in</>}
                         </p>
                     </div>
                     <button type="button" onClick={onClose} aria-label="Close day"
@@ -680,7 +817,7 @@ function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
                         <X className="h-4 w-4" />
                     </button>
                 </header>
-                <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+                <div className={cn('flex-1 space-y-5 overflow-y-auto px-6 py-5 transition-opacity', q.isFetching && 'opacity-60')}>
                     {kinds.length > 0 && (
                         <div>
                             <h3 className="mb-2 text-xs font-bold text-ink">What the day was made of</h3>
@@ -689,14 +826,17 @@ function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
                     )}
                     <div>
                         <h3 className="mb-2 text-xs font-bold text-ink">Who was around</h3>
-                        {wide.isLoading ? (
+                        {!dayDoc ? (
                             <p className="text-xs text-ink-muted">Loading…</p>
-                        ) : people.length === 0 ? (
+                        ) : dayDoc.people.length === 0 ? (
                             <EmptyState compact icon={Clock4} title="Nobody did anything this day" description="Sign-ins alone are not counted as activity." />
                         ) : (
                             <ul className="space-y-1.5">
-                                {people.map(({ p, n }) => {
-                                    const top = p.topKind ? KIND_META[p.topKind] : null
+                                {dayDoc.people.map((p) => {
+                                    const topEntry = Object.entries(p.kinds)
+                                        .filter(([k]) => k !== 'signin')
+                                        .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]
+                                    const top = topEntry ? KIND_META[topEntry[0] as keyof typeof KIND_META] : null
                                     return (
                                         <li key={p.userId}>
                                             <Link
@@ -704,11 +844,11 @@ function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
                                                 className="flex items-center justify-between gap-3 rounded-xl border border-glass-border px-3 py-2 hover:border-indigo-500/40 hover:bg-indigo-500/[0.04]"
                                             >
                                                 <PersonChip id={p.userId} size="sm" link={false}
-                                                    person={{ name: p.name, email: p.email, deleted: p.deleted }}
+                                                    person={{ name: p.name }}
                                                     caption={top ? `Mostly ${top.gerund}` : undefined} />
                                                 <span className="flex items-center gap-2 text-xs">
-                                                    <span className="font-semibold tabular-nums text-ink">{exact(n)}</span>
-                                                    <span className="text-ink-muted">{n === 1 ? 'action' : 'actions'}</span>
+                                                    <span className="font-semibold tabular-nums text-ink">{exact(p.actions)}</span>
+                                                    <span className="text-ink-muted">{p.actions === 1 ? 'action' : 'actions'}</span>
                                                     <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: theme.series[1] }} />
                                                 </span>
                                             </Link>
@@ -717,8 +857,10 @@ function ScopeDayPanel({ data, index, range, workspaceId, onClose }: {
                                 })}
                             </ul>
                         )}
-                        {(wide.data?.page.total ?? 0) > 100 && (
-                            <p className="mt-2 text-[11px] text-ink-muted">Showing who was around among the 100 most active people this period.</p>
+                        {dayDoc && dayDoc.active > dayDoc.people.length && (
+                            <p className="mt-2 text-[11px] text-ink-muted">
+                                The {exact(dayDoc.people.length)} most active of {exact(dayDoc.active)} people.
+                            </p>
                         )}
                     </div>
                 </div>

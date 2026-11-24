@@ -7,8 +7,8 @@
  * addresses). Plus one person's documents for the person page.
  */
 import type {
-    ActivityEventRow, ActivityKind, PeopleDoc, PersonCalendar, PersonDay, PersonDoc,
-    PersonFeedPage, PersonRow,
+    ActivityEventRow, ActivityKind, PeopleDoc, PeopleLines, PersonCalendar, PersonDay, PersonDoc,
+    PersonFeedPage, PersonRow, ScopeDay,
 } from '../services/peopleActivityService'
 
 function rng(seed: number) {
@@ -97,9 +97,8 @@ function people(lens: 'full' | 'workspace'): { rows: PersonRow[]; byKind: Record
             idleSignInDays: lens === 'full' ? idle : null,
             lastActiveAt: lastIdx != null ? `${BUCKETS[lastIdx]}T${String(9 + (i % 8)).padStart(2, '0')}:24:00+00:00` : null,
             lastSignInAt: lens === 'full' ? `${BUCKETS[29]}T08:${String(10 + i).padStart(2, '0')}:00+00:00` : null,
-            kinds,
             topKind: top,
-            values,
+            line: values,
             joinedInWindow: i === count - 2,
             joinedAt: `2026-0${1 + (i % 9)}-1${i % 9}T10:00:00+00:00`,
             firstActiveAt: `2026-0${1 + (i % 9)}-2${i % 8}T10:00:00+00:00`,
@@ -134,10 +133,9 @@ function rosterDoc(lens: 'full' | 'workspace'): PeopleDoc {
         scope: { workspaceId: full ? null : 'ws_atlas', lens },
         coverage: {
             ledgerThrough: FIXTURE_NOW, sectionsSince: '2026-11-02T09:00:00+00:00',
-            workspaceAttributionSince: '2026-11-02T09:00:00+00:00',
             index: {
-                attributedThrough: FIXTURE_NOW, activityThrough: FIXTURE_NOW, joinsThrough: FIXTURE_NOW,
-                historyFrom: '2025-10-20T08:00:00+00:00', backfilling: false, running: true, progress: 1,
+                freshAt: FIXTURE_NOW, completeFrom: '2025-10-20', historyFrom: '2025-10-20',
+                running: true, backfilling: false, progress: 1,
             },
         },
         totals: {
@@ -224,8 +222,10 @@ export function personDoc(): PersonDoc {
     const me = roster.people.find((p) => p.userId === PERSON_ID) ?? roster.people[0]
     const byKind = (['signin', 'browse', 'trace', 'search', 'build', 'operate', 'other'] as ActivityKind[]).map((k) => ({
         kind: k,
-        values: me.values.map((n, i) => (k === 'signin' ? (n > 0 ? 1 : 0) : Math.round(n * KIND_WEIGHT[k] * (1 + ((i * 7) % 5) / 10)))),
+        values: me.line.map((n, i) => (k === 'signin' ? (n > 0 ? 1 : 0) : Math.round(n * KIND_WEIGHT[k] * (1 + ((i * 7) % 5) / 10)))),
     }))
+    const actions = me.line
+    const previousActions = me.line.map((n, i) => Math.max(0, Math.round(n * 0.7 + ((i * 5) % 7) - 3)))
     return {
         generatedAt: FIXTURE_NOW,
         window: roster.window,
@@ -252,7 +252,11 @@ export function personDoc(): PersonDoc {
             currentStreak: 4,
             lastActiveAt: '2026-11-24T11:31:00+00:00',
         },
-        series: { buckets: roster.window.buckets, byKind, activePeople: me.values.map((n) => (n ? 1 : 0)), signedIn: me.values.map((n) => (n ? 1 : 0)) },
+        series: {
+            buckets: roster.window.buckets, byKind,
+            activePeople: actions.map((n) => (n ? 1 : 0)), signedIn: actions.map((n) => (n ? 1 : 0)),
+            actions, previousActions, signIns: actions.map((n) => (n ? 1 : 0)),
+        },
         kinds: byKind.map((s) => ({ kind: s.kind, count: s.values.reduce((a, b) => a + b, 0) })),
         types: roster.types.slice(0, 6).map((t) => ({ ...t, count: Math.round(t.count / 9) })),
         punchcard: punchcard(9),
@@ -328,3 +332,36 @@ export function personFeed(): PersonFeedPage {
 }
 
 export { PERSON_ID }
+
+
+/** The compare chart's lines for the given people. */
+export function peopleLines(ids: string[]): PeopleLines {
+    const roster = PEOPLE_FIXTURES.privileged
+    const byId = new Map(roster.people.map((p) => [p.userId, p]))
+    const pick = ids.filter((id) => byId.has(id))
+    return {
+        buckets: roster.window.buckets, granularity: 'day',
+        lines: Object.fromEntries(pick.map((id) => [id, byId.get(id)!.line])),
+        names: Object.fromEntries(pick.map((id) => [id, byId.get(id)!.name])),
+        scope: roster.scope,
+    }
+}
+
+/** Everyone active on one day of the fixture month. */
+export function scopeDay(dayIso: string): ScopeDay {
+    const roster = PEOPLE_FIXTURES.privileged
+    const i = Math.max(0, roster.window.buckets.indexOf(dayIso))
+    const people = roster.people
+        .map((p) => ({ p, n: p.line[i] ?? 0 }))
+        .filter((x) => x.n > 0)
+        .sort((a, b) => b.n - a.n)
+        .map(({ p, n }) => ({
+            userId: p.userId, name: p.name, actions: n, signIns: 1,
+            kinds: { [p.topKind ?? 'browse']: n } as ScopeDay['people'][number]['kinds'],
+        }))
+    return {
+        day: dayIso, scope: roster.scope, active: people.length, signedIn: people.length,
+        kinds: roster.series.byKind.map((s) => ({ kind: s.kind, count: s.values[i] ?? 0 })).filter((k) => k.count),
+        people,
+    }
+}

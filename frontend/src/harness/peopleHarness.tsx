@@ -17,7 +17,7 @@ import type { AnalyticsRangeSelection } from '../services/analyticsService'
 import { PeopleTab } from '../components/analytics/people/PeopleTab'
 import { PersonActivityPage } from '../pages/PersonActivityPage'
 import {
-    PEOPLE_FIXTURES, PERSON_ID, personCalendar, personDay, personDoc, personFeed,
+    PEOPLE_FIXTURES, PERSON_ID, peopleLines, personCalendar, personDay, personDoc, personFeed, scopeDay,
 } from './peopleFixtures'
 
 const params = new URLSearchParams(window.location.search)
@@ -25,7 +25,9 @@ const view = params.get('view') ?? 'tab'
 const dark = params.get('theme') === 'dark'
 
 peopleActivityService.roster = async (_range, q) =>
-    q.workspaceId ? PEOPLE_FIXTURES.workspaceAdmin : PEOPLE_FIXTURES.privileged
+    q?.workspaceId ? PEOPLE_FIXTURES.workspaceAdmin : PEOPLE_FIXTURES.privileged
+peopleActivityService.lines = async (ids) => peopleLines(ids)
+peopleActivityService.scopeDay = async (d) => scopeDay(d)
 peopleActivityService.person = async () => personDoc()
 peopleActivityService.calendar = async () => personCalendar()
 peopleActivityService.day = async (_id, d) => personDay(d)

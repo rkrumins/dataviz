@@ -1,11 +1,11 @@
 """The people indexer — backfills People analytics from history, then keeps it current.
 
-Each step is one bounded unit of ``people_index_repo`` work — a batch of usage signals given
-their workspace, a day of one source folded into ``person_workspace_activity``, the grants
-made since the last pass — taken under an advisory lock in its own short transaction. So a
-first run on a platform with years of history works through it a few seconds at a time
-without holding a long transaction on the tables people are writing to, and a restart
-resumes from the cursors rather than starting again.
+Each step is one bounded unit of ``people_index_repo`` work — one UTC day of all three activity
+stores folded into the daily rollup, or the grants made since the last pass — taken under an
+advisory lock in its own short transaction. So a first run on a platform with a year of history
+works through it a day at a time, newest first, without holding a long transaction on the
+tables people are writing to; and a restart resumes where it stopped, because a day is either
+computed or it is not.
 
 Runs where ``runs_scheduler()`` is true — the control plane, or a dev monolith — like the
 analytics warmer and the retention sweeps. It is the only writer of the index. Nothing on a
@@ -49,15 +49,9 @@ def interval_seconds() -> float:
 
 
 async def step(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
-    """One unit of each kind of work. Returns how much was done; 0 means caught up.
-
-    Attribution goes first, because the usage rollup will not read past it."""
-    done = await repo.attribute_batch(session, now=now)
-    done += await repo.rollup_usage_slice(session, now=now)
-    done += await repo.rollup_edits_slice(session, now=now)
-    done += await repo.rollup_ledger_slice(session, now=now)
-    done += await repo.joins_pass(session, now=now)
-    return done
+    """One unit of the most urgent work — joins, today, yesterday, a dirty day, or one day of
+    history — in its own transaction. Returns how much was done; 0 means caught up."""
+    return await repo.step(session, now=now)
 
 
 async def catch_up(session: AsyncSession, *, now: Optional[datetime] = None,

@@ -20,7 +20,8 @@ backfills them from history.
 | **New for everyone** | **Your activity** (`/me/activity`) in the user menu |
 | **New API** | 5 endpoints under `/api/v1/admin/analytics/people` |
 | **New background job** | The people indexer, on the scheduler-owner role |
-| **Needs on upgrade** | Two migrations. No configuration. |
+| **Built for** | ~10,000 people and a year of history: every roster read costs people × days, never events (see [Scale](#scale)) |
+| **Needs on upgrade** | Three migrations. No configuration. |
 
 ---
 
@@ -40,6 +41,11 @@ once per reader, person and scope every 30 minutes.
 
 ## What it shows
 
+- **An activity line for every person.** Each roster row draws the person's actions per period
+  on a scale shared by the page. Tick up to six people to overlay their lines on one chart, or
+  switch the day-by-day card to **Lines** for a grid of small line charts, 24 people a page. Each
+  person's page leads with their own line, the previous period behind it as a ghost, and their
+  sign-ins beside it.
 - **Who's active, day by day.** People by day on one scale, sortable and searchable. Pick a day
   to see who was around and what the day was made of.
 - **What people do.** Six kinds of activity, plus Other: signed in, opened views, traced
@@ -71,20 +77,43 @@ once per reader, person and scope every 30 minutes.
 
 Telemetry types that the ledger already records (`version.published`, `ontology.published`,
 `view.import`, `view.export`) are skipped. Service accounts never count. Every read is one
-table, grouped in SQL by person, hour and type, and the results are combined by id in Python,
-with no cross-domain JOINs. A test pins the roster to a fixed number of queries, however many
-people there are.
+table, and results are combined by id in Python, with no cross-domain JOINs.
+
+### Scale
+
+A roster that read raw events would cost what people *did*: thousands of people over a year is
+tens of millions of rows. So nothing that reports on everyone reads an event table. The people
+indexer folds each UTC day of all three stores into a rollup, and every roster, activity line
+and day panel reads only that:
+
+| Table | One row per | Holds |
+|---|---|---|
+| `person_activity_daily` | day × person × workspace × kind | count, first and last instant — and the same three for what a workspace admin may see (`n_ws`, …) |
+| `people_daily_facets` | day × workspace × hour or event type | counts, with no person — the punchcard and "what people do" |
+
+- **The roster** is a handful of `GROUP BY` reads whose results are one row per person, or per
+  period and kind. Weekly windows are bucketed in SQL by a portable `CASE`.
+- **The cached document is a summary**: numbers per person, no series, dates or addresses.
+  Those are added per **page** (24 people): their lines, from `(user_id, day)`; their dates,
+  from the timeline; addresses for privileged readers only.
+- **The day panel** reads that day's rollup rows: exact, not a sample of the most active.
+- **One person** reads the rollup for their totals, line and calendar; the details only raw
+  events hold (types, hours, views opened) and their feed come from each store's actor index.
+- Tests pin it: the roster runs the same statements with 10× the events and 9× the people, and
+  never scans an event table (single-row `min`/`max` seeks for the coverage notes excepted);
+  and every person's actions from the rollup equal a direct count of the raw events.
 
 ### New indexes
 
 | Index | On | Columns |
 |---|---|---|
 | `idx_product_events_actor` | `product_events` | `actor_id`, `created_at` |
-| `idx_product_events_ws` | `product_events` | `workspace_id`, `created_at` (partial) |
 | `idx_val_actor_created` | `view_activity_log` | `actor`, `created_at` |
 
-All three are built `CONCURRENTLY` on Postgres, and the migration recovers from an invalid
-build. With them, one person's year is a range scan.
+Both are built `CONCURRENTLY` on Postgres, and the migration recovers from an invalid build.
+With them, one person's raw events are a range scan. (A third, on `product_events.workspace_id`,
+was dropped again once the roster moved to the rollup: nothing read it, and an unread index still
+costs every insert on the busiest table there is.)
 
 ### Caching
 
@@ -95,11 +124,18 @@ person documents are read through.
 
 ### Backfill: the people indexer
 
-The indexer runs on the scheduler-owner role, under an advisory lock. Each step is short and
-resumable from `people_index_cursors`, and every write only ever moves a date earlier or later,
-so running a step twice changes nothing.
+The indexer runs on the scheduler-owner role, under an advisory lock, one **UTC day** per step in
+its own transaction. Computing a day replaces it: delete, then insert the exact fold of that
+day's events, so a day computed twice is the same day, and a restart resumes where it stopped.
 
-1. **Attribution.** It fills `product_events.workspace_id` for history:
+**Which day next:** today (every minute) and yesterday (until it has closed); then days a late
+ledger row made dirty (the relay recorded it after its day was computed); then history,
+**newest first**, so the ranges people open first are complete first. Days older than raw
+retention are never recomputed (the rows are gone), and the rollup keeps 400 days.
+
+For each day:
+
+1. **Attribution.** It fills `product_events.workspace_id`:
    - A view open belongs to its view's workspace. That is a fact.
    - A trace, search or export belongs to the workspace of the view the same person opened
      within the previous 30 minutes. That is an inference, and a signal with no such open
@@ -113,8 +149,11 @@ so running a step twice changes nothing.
    - **First and last active** come from all three stores.
    - The table outlives raw-event retention.
 
-The pages never wait for the indexer. Every window figure is read live. Join dates also read
-current grants live, and the page says "indexing history" while a backfill runs.
+3. **The rollup.** The day's rows in `person_activity_daily` and `people_daily_facets`.
+
+Figures are at most about two minutes behind, in line with the rest of Analytics. While history
+is being indexed, the page says how far it has got and which days are still to come; join dates
+read current grants live, so a new member shows their join date at once.
 
 ### Telemetry
 
@@ -131,7 +170,9 @@ current grants live, and the page says "indexing history" while a backfill runs.
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/api/v1/admin/analytics/people?workspace&q&sort&order&offset&limit` | Aggregates and one page of the roster |
+| `GET` | `/api/v1/admin/analytics/people?workspace&q&sort&order&offset&limit` | Aggregates and one page of the roster, each person with their activity line |
+| `GET` | `/api/v1/admin/analytics/people/lines?ids&workspace` | Up to 24 people's activity lines, to compare |
+| `GET` | `/api/v1/admin/analytics/people/days/{YYYY-MM-DD}?workspace&limit` | Everyone active on that day, most active first |
 | `GET` | `/api/v1/admin/analytics/people/{id}` | One person over the window (`id` may be `me`) |
 | `GET` | `/api/v1/admin/analytics/people/{id}/calendar` | The last 365 days |
 | `GET` | `/api/v1/admin/analytics/people/{id}/days/{YYYY-MM-DD}` | One day's events, in sessions |
@@ -152,8 +193,10 @@ non-existent id gets, so the endpoint cannot be used to discover who has an acco
 - **Days are UTC**, like the rest of Analytics. Times on a day's timeline are UTC clocks.
 - **Sessions are derived** from 30-minute gaps. The platform records no "session started".
 - **Traces and searches recorded before this release** are placed in a workspace by the
-  inference above. Where it cannot place one, that signal counts platform-wide only, and the
-  page says so.
+  inference above. Where it cannot place one, that signal counts platform-wide only.
+- **Figures need the indexer.** Rosters read only the rollup, which the scheduler-owner role
+  keeps. On a deployment where it has never run, the page says so instead of computing a year of
+  events on the request path.
 - **The feed reaches back only as far as raw events are kept**: `PRODUCT_EVENT_RETENTION_DAYS`
   (400 by default) and `ACTIVITY_RETENTION_DAYS` (730). Join and first-activity dates persist
   beyond that.

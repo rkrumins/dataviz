@@ -10,28 +10,33 @@ import { DatabaseZap, Info, Loader2 } from 'lucide-react'
 import { shortDate } from '@/lib/formatMetric'
 import type { PeopleCoverage, PeopleLens, PeopleWindow } from '@/services/peopleActivityService'
 
-export function CoverageNotice({ coverage, window, lens, scoped }: {
+export function CoverageNotice({ coverage, window, lens }: {
     coverage: PeopleCoverage
     window: PeopleWindow
     lens: PeopleLens
-    /** Reading one workspace rather than the platform. */
-    scoped: boolean
 }) {
     const notes: { key: string; icon: typeof Info; text: React.ReactNode }[] = []
     const { index } = coverage
+    const windowStart = window.buckets[0]
 
-    if (index.backfilling) {
+    if (!index.freshAt) {
+        notes.push({
+            key: 'index-off', icon: DatabaseZap,
+            text: <>These figures come from the activity index, which the scheduler role keeps. It has not run on this deployment yet, so there is nothing to show.</>,
+        })
+    } else if (!index.running) {
+        notes.push({
+            key: 'index-stale', icon: DatabaseZap,
+            text: <>Figures were last brought up to date <strong className="font-semibold text-ink">{shortDate(index.freshAt, true)}</strong>: the activity index is not being kept current right now.</>,
+        })
+    }
+    if (index.backfilling && index.completeFrom && windowStart < index.completeFrom) {
         notes.push({
             key: 'index', icon: Loader2,
             text: <>
                 Indexing history{index.progress != null && <> — {Math.round(index.progress * 100)}% done</>}.
-                {' '}Join dates and first activity fill in as it goes; everything else on this page is already live.
+                {' '}Days before <strong className="font-semibold text-ink">{shortDate(index.completeFrom, true)}</strong> fill in as it goes; everything after is complete.
             </>,
-        })
-    } else if (!index.running) {
-        notes.push({
-            key: 'index-off', icon: DatabaseZap,
-            text: <>Join dates come from current access only: the history indexer runs on the scheduler role, and none has run here yet.</>,
         })
     }
     if (lens === 'full' && coverage.ledgerThrough === null) {
@@ -40,17 +45,6 @@ export function CoverageNotice({ coverage, window, lens, scoped }: {
             text: <>No sign-ins or data operations are shown because the activity ledger is empty on this deployment. View opens, traces, searches and edits are counted as usual.</>,
         })
     }
-    if (scoped && coverage.workspaceAttributionSince && coverage.workspaceAttributionSince > window.start) {
-        notes.push({
-            key: 'attribution', icon: Info,
-            text: <>
-                Traces and searches are placed in a workspace from{' '}
-                <strong className="font-semibold text-ink">{shortDate(coverage.workspaceAttributionSince, true)}</strong>.
-                {' '}Earlier ones count platform-wide until the indexer has placed them by the view opened just before.
-            </>,
-        })
-    }
-
     if (!notes.length) return null
     return (
         <div className="space-y-1.5">

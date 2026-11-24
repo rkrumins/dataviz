@@ -1,28 +1,23 @@
 """People analytics — what each person does, day by day, across the platform or in one workspace.
 
-It answers "who signed in, who opened what, and when" from the three stores that already record
-people doing things, without adding a fourth:
+Two kinds of read, and the line between them is what makes it scale:
 
-* ``product_events`` — usage signals: view opens, traces, searches, exports, docs and tours, and
-  which section of the app someone moved to (``app.section``).
-* ``view_activity_log`` — edits to views. Read HERE rather than as the ledger's
-  ``visualization.view.*`` rows, which are the same edits: reading both would count every edit
-  twice, and this table does not depend on the outbox relay running.
-* ``auth_audit_log`` — the activity ledger: sign-ins, data operations, access changes, semantic
-  layer and version-control work.
-
-Every read is one table grouped in SQL by (person, day, type) and stitched together by id in
-Python; ``DOMAIN_OWNERSHIP`` forbids cross-domain JOINs. Days and hours are UTC, as everywhere
-else in Analytics.
+* **Everyone at once** — the roster, its aggregates, the people active on a day, the activity
+  lines of a page of people — comes ONLY from the daily rollup the people indexer maintains
+  (``person_activity_daily``, ``people_daily_facets``; see ``people_index_repo``). One row per
+  person, day, workspace and kind: a roster costs people × days, whatever they did, and every
+  aggregate is a ``GROUP BY`` in SQL. Nothing here reads an event table for everyone.
+* **One person** — their page's totals, line and calendar come from the rollup too; the
+  details only raw events hold (which types, which hours, which views) and their feed are read
+  from the three stores through each one's actor index, so they cost what one person did.
 
 LENSES. A document is built for a lens, never for a reader:
 
 * ``full`` — everything, sign-ins included. For privileged readers, and for a person reading
   their own activity.
-* ``workspace`` — what a workspace admin may know about their workspace: its usage signals, its
-  view edits, and only the ledger rows the Activity explorer would show them
-  (``audience = 'workspace'``). No sign-ins: signing in is a platform event, not any one
-  workspace's, and the explorer withholds identity events from workspace admins for that reason.
+* ``workspace`` — what a workspace admin may know about their workspace: the rollup's ``_ws``
+  columns, which count only what the Activity explorer would show them. No sign-ins: signing
+  in is a platform event, not any one workspace's.
 
 What one particular reader receives — addresses, view and workspace names — is decided on the
 way out by the redactors at the bottom, so one computation serves every reader of a lens.
@@ -30,17 +25,19 @@ way out by the redactors at the bottom, so one computation serves every reader o
 from __future__ import annotations
 
 import json
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field, replace
+from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Iterable, Optional, Sequence
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
     AuthAuditLogORM,
+    PeopleDailyFacetORM,
+    PersonActivityDailyORM,
     ProductEventORM,
     UserORM,
     ViewActivityLogORM,
@@ -49,7 +46,6 @@ from backend.app.db.models import (
 from backend.app.db.repositories import people_index_repo, user_repo
 from backend.app.db.repositories.activity_repo import _punchcard
 from backend.app.db.repositories.analytics_repo import (
-    GRAPH_EXPORT,
     SEARCH_MISS,
     SEARCH_RUN,
     TRACE_EMPTY,
@@ -64,160 +60,149 @@ from backend.app.db.repositories.analytics_repo import (
     _window_label,
     build_window,
     members_by_workspace,
+    previous_window,
+)
+from backend.app.db.repositories.people_kinds import (  # noqa: F401 — re-exported
+    ACTION_KINDS,
+    CALENDAR_DAYS,
+    DAY_CAP,
+    FULL,
+    KINDS,
+    LENSES,
+    SECTION,
+    SECTION_KIND_PREFIX,
+    SESSION_GAP_MINUTES,
+    SIGN_IN,
+    USAGE_KINDS,
+    USAGE_LABELS,
+    WORKSPACE,
+    _ADMIN_VIEWED,
+    _EDIT_META,
+    _EDIT_PREFIX,
+    _FAILED_SIGN_INS,
+    _MIRRORED_LEDGER_PREFIX,
+    _QUIET_LISTED,
+    _TOP_TYPES,
+    edit_type,
+    kind_of,
+    label_of,
+    ledger_kind,
 )
 from backend.app.services.activity import catalogue
 from backend.common.service_accounts import is_person, is_service_account
 
-FULL = "full"
-WORKSPACE = "workspace"
-LENSES = (FULL, WORKSPACE)
+#: Ids a single ``lines`` request may ask for — a compare chart, or a grid page.
+LINES_MAX = 100
 
-#: What people do, in the order the charts draw it. Six colour slots and a neutral "Other" —
-#: the palette's limit, which is why the tail folds rather than inventing a seventh hue. The
-#: client mirrors this list (``activityKinds.ts``) and a test pins the two together.
-KINDS: tuple[str, ...] = ("signin", "browse", "trace", "search", "build", "operate", "other")
-
-SIGN_IN = "user.logged_in"
-SECTION = "app.section"
-_FAILED_SIGN_INS = ("user.login_failed", "user.sso_login_failed")
-
-#: The ``product_events`` read as activity, and what kind each is. Deliberately NOT every
-#: allow-listed type: ``version.published``, ``ontology.published``, ``view.import`` and
-#: ``view.export`` are the same acts the ledger and ``view_activity_log`` already record, and
-#: counting both would credit one publish twice.
-USAGE_KINDS: dict[str, str] = {
-    VIEW_OPENED: "browse",
-    TRACE_RUN: "trace",
-    TRACE_EMPTY: "trace",
-    SEARCH_RUN: "search",
-    SEARCH_MISS: "search",
-    GRAPH_EXPORT: "other",
-    "docs.feedback": "other",
-    "docs.search_miss": "other",
-    "tour.completed": "other",
-    "tour.skipped": "other",
-    "onboarding.step": "other",
-}
-
-USAGE_LABELS: dict[str, str] = {
-    VIEW_OPENED: "Opened a view",
-    TRACE_RUN: "Traced lineage",
-    TRACE_EMPTY: "Traced lineage and found none",
-    SEARCH_RUN: "Searched the graph",
-    SEARCH_MISS: "Searched and found nothing",
-    GRAPH_EXPORT: "Exported from the graph",
-    "docs.feedback": "Rated a docs page",
-    "docs.search_miss": "Searched the docs and found nothing",
-    "tour.completed": "Finished a tour",
-    "tour.skipped": "Skipped a tour",
-    "onboarding.step": "Took an onboarding step",
-}
-
-#: ``view_activity_log.action`` → (type key, label, kind). The key is namespaced so it can sit
-#: in one distribution with the other two sources without colliding.
-_EDIT_META: dict[str, tuple[str, str]] = {
-    "created": ("Created a view", "build"),
-    "updated": ("Edited a view", "build"),
-    "visibility_changed": ("Changed a view's visibility", "build"),
-    "shared": ("Shared a view", "build"),
-    "unshared": ("Stopped sharing a view", "build"),
-    "favourited": ("Favourited a view", "other"),
-    "unfavourited": ("Unfavourited a view", "other"),
-    "deleted": ("Deleted a view", "build"),
-    "restored": ("Restored a view", "build"),
-    "data_changed": ("Changed a view's data", "build"),
-    "publish_requested": ("Asked to publish a view", "build"),
-    "publish_denied": ("Declined a view's publication", "build"),
-    "admin_viewed": ("Opened a private view as an admin", "browse"),
-    "imported": ("Imported a view", "build"),
-    "exported": ("Exported a view", "other"),
-    "version_saved": ("Saved a view version", "build"),
-    "version_restored": ("Restored a view version", "build"),
-    "moved": ("Moved a view", "build"),
-}
-_EDIT_PREFIX = "edit."
-
-#: An admin opening a PRIVATE view is auditor-only in the ledger, so the workspace lens leaves
-#: it out of the edit log too.
-_ADMIN_VIEWED = "admin_viewed"
-
-#: The ledger's own copies of the edits read from ``view_activity_log``.
-_MIRRORED_LEDGER_PREFIX = "visualization.view."
-
-#: A gap longer than this between two events starts a new session.
-SESSION_GAP_MINUTES = 30
-
-#: Rows a single day's timeline returns.
-DAY_CAP = 500
-
-#: Event types named individually in a distribution before the tail folds.
-_TOP_TYPES = 12
-
-#: Quiet people listed by name on the platform scope (the count is always exact).
-_QUIET_LISTED = 200
-
-#: Calendar span, days.
-CALENDAR_DAYS = 365
+A = PersonActivityDailyORM
+F = PeopleDailyFacetORM
 
 
-def edit_type(action: str) -> str:
-    return f"{_EDIT_PREFIX}{action}"
-
-
-def ledger_kind(event_type: str, category: Optional[str]) -> str:
-    """The kind of one ledger event. Sign-ins first; building next, because ontology and
-    version-control work is classified ``content``/``data`` by the ledger and would otherwise
-    read as operations."""
-    if event_type == SIGN_IN:
-        return "signin"
-    if event_type.startswith(("ontology.", "workspace.versioning.", "visualization.")):
-        return "build"
-    if category in ("operations", "data"):
-        return "operate"
-    return "other"
-
-
-def kind_of(event_type: str, category: Optional[str] = None) -> str:
-    if event_type in USAGE_KINDS:
-        return USAGE_KINDS[event_type]
-    if event_type.startswith(_EDIT_PREFIX):
-        meta = _EDIT_META.get(event_type[len(_EDIT_PREFIX):])
-        return meta[1] if meta else "build"
-    return ledger_kind(event_type, category)
-
-
-def label_of(event_type: str) -> str:
-    if event_type in USAGE_LABELS:
-        return USAGE_LABELS[event_type]
-    if event_type.startswith(_EDIT_PREFIX):
-        meta = _EDIT_META.get(event_type[len(_EDIT_PREFIX):])
-        return meta[0] if meta else "Changed a view"
-    return catalogue.label_of(event_type)
-
-
-# ── Reads ─────────────────────────────────────────────────────────────
+# ── Scope over the rollup ─────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
-class _Row:
-    """One grouped row, whichever table it came from.
-
-    ``hour`` is ``YYYY-MM-DDTHH`` in UTC; ``subject`` is the view a ``view.opened`` was about
-    or the section an ``app.section`` named; ``workspace`` is where it happened, when known.
-    """
-    actor: str
-    hour: str
-    type: str
-    kind: str
-    count: int
-    first: str
-    last: str
-    subject: Optional[str] = None
-    workspace: Optional[str] = None
+class _Scope:
+    """Which rollup rows a lens reads, for a workspace or the platform."""
+    lens: str
+    workspace_id: Optional[str]
 
     @property
-    def day(self) -> str:
-        return self.hour[:10]
+    def ws_lens(self) -> bool:
+        return self.lens == WORKSPACE
+
+    @property
+    def n(self):
+        return A.n_ws if self.ws_lens else A.n
+
+    @property
+    def first(self):
+        return A.first_ws_at if self.ws_lens else A.first_at
+
+    @property
+    def last(self):
+        return A.last_ws_at if self.ws_lens else A.last_at
+
+    @property
+    def fn(self):
+        return F.n_ws if self.ws_lens else F.n
+
+    def where(self, people: Optional[Sequence[str]] = None) -> list:
+        """Rollup rows in scope. A full-lens workspace scope also reads its people's sign-ins,
+        which happened in no workspace — so it is read a chunk of people at a time."""
+        if self.workspace_id is None:
+            return []
+        if self.ws_lens:
+            return [A.workspace_id == self.workspace_id, A.n_ws > 0]
+        if people is None:
+            return [A.workspace_id == self.workspace_id]
+        return [A.user_id.in_(people), or_(
+            A.workspace_id == self.workspace_id,
+            and_(A.workspace_id == people_index_repo.PLATFORM, A.kind == "signin"),
+        )]
+
+    def facet_where(self) -> list:
+        if self.workspace_id is None:
+            return []
+        return [F.workspace_id == self.workspace_id] + ([F.n_ws > 0] if self.ws_lens else [])
+
+    @property
+    def chunked(self) -> bool:
+        return self.workspace_id is not None and not self.ws_lens
+
+
+_ACTION = A.kind.in_(ACTION_KINDS)
+_SIGNIN = A.kind == "signin"
+_SECTION_ROW = A.kind.startswith(SECTION_KIND_PREFIX, autoescape=True)
+
+
+def _span(w: Window) -> tuple[str, str]:
+    """The window as whole UTC days, which is the rollup's grain."""
+    return w.buckets[0], w.end[:10]
+
+
+def _prev_span(w: Window) -> tuple[str, str]:
+    first, last = _span(w)
+    n = (date.fromisoformat(last) - date.fromisoformat(first)).days + 1
+    start = date.fromisoformat(first) - timedelta(days=n)
+    return start.isoformat(), (date.fromisoformat(first) - timedelta(days=1)).isoformat()
+
+
+def _bucket(col, w: Window):
+    """The bucket a rollup day falls in, as SQL. Daily windows ARE their days; a weekly window
+    is a ``CASE`` over at most 53 bucket starts — portable, and grouped in the database."""
+    if w.granularity == "day" or len(w.buckets) == 1:
+        return col
+    whens = [(col < w.buckets[i + 1], w.buckets[i]) for i in range(len(w.buckets) - 1)]
+    return case(*whens, else_=w.buckets[-1])
+
+
+async def _people_in_scope(session: AsyncSession, scope: _Scope, spans: Sequence[tuple[str, str]],
+                           members: Iterable[str]) -> list[str]:
+    """Everyone a full-lens workspace scope reads: its members, and whoever did something in
+    it in any of the spans — the set its sign-ins are read for."""
+    people = set(members)
+    for first, last in spans:
+        people.update(u for u in (await session.execute(
+            select(A.user_id).where(A.workspace_id == scope.workspace_id,
+                                    A.day >= first, A.day <= last).distinct()
+        )).scalars().all() if u)
+    return sorted(people)
+
+
+async def _each_chunk(session: AsyncSession, scope: _Scope, people: Optional[list[str]], build):
+    """Run ``build(where)`` once for the scope, or once per chunk of people when the scope
+    needs them, and concatenate the rows. People never span chunks, so per-person groups and
+    distinct counts add up exactly."""
+    if not scope.chunked:
+        return (await session.execute(build(scope.where()))).all()
+    rows: list = []
+    for chunk in _chunked(people or []):
+        rows += (await session.execute(build(scope.where(chunk)))).all()
+    return rows
+
+
+# ── Shared reads ──────────────────────────────────────────────────────
 
 
 def _hour(col):
@@ -226,94 +211,6 @@ def _hour(col):
 
 def _bounds(col, since: str, until: Optional[str]) -> list:
     return [col >= since] + ([col < until] if until else [])
-
-
-async def _workspace_view_ids(session: AsyncSession, workspace_id: str) -> list[str]:
-    """Every view the workspace has had, live or not: opens of a since-deleted view really
-    did happen in it, and dropping them would understate the workspace's past traffic."""
-    return [
-        vid for vid in (await session.execute(
-            select(ViewORM.id).where(ViewORM.workspace_id == workspace_id)
-        )).scalars().all() if vid
-    ]
-
-
-async def _usage_rows(
-    session: AsyncSession, *, since: str, until: Optional[str],
-    actor: Optional[str] = None, workspace_id: Optional[str] = None,
-    ws_view_ids: Optional[Sequence[str]] = None, sections: bool = True,
-) -> list[_Row]:
-    """Usage signals grouped by (actor, hour, type, subject, workspace).
-
-    Scoped to a workspace two ways, because the two kinds of signal know their workspace
-    differently: a view open through its view (``subject_id``, one pass per chunk of the
-    workspace's view ids), everything else through ``workspace_id``. For one person the view
-    opens are fetched unscoped and placed by the caller instead — their handful of views is far
-    smaller than the workspace's catalogue.
-    """
-    T = ProductEventORM
-    types = list(USAGE_KINDS) + ([SECTION] if sections else [])
-    base = [*_bounds(T.created_at, since, until), T.actor_id.is_not(None), is_person(T.actor_id)]
-    if actor:
-        base.append(T.actor_id == actor)
-
-    passes: list[list] = []
-    if workspace_id is None or actor:
-        passes.append([T.event_type.in_(types)])
-    else:
-        others = [t for t in types if t != VIEW_OPENED]
-        passes.append([T.event_type.in_(others), T.workspace_id == workspace_id])
-        for chunk in _chunked(list(ws_view_ids or ())):
-            passes.append([T.event_type == VIEW_OPENED, T.subject_id.in_(chunk)])
-
-    rows: list[_Row] = []
-    for where in passes:
-        stmt = (
-            select(
-                T.actor_id, _hour(T.created_at).label("h"), T.event_type, T.subject_id,
-                T.workspace_id, func.count(), func.min(T.created_at), func.max(T.created_at),
-            )
-            .where(*base, *where)
-            .group_by(T.actor_id, "h", T.event_type, T.subject_id, T.workspace_id)
-        )
-        for a, h, t, subject, ws, n, first, last in (await session.execute(stmt)).all():
-            if not (a and h):
-                continue
-            rows.append(_Row(
-                actor=a, hour=h, type=t, kind=USAGE_KINDS.get(t, "other"), count=int(n),
-                first=first, last=last, subject=subject or None, workspace=ws,
-            ))
-    return rows
-
-
-async def _edit_rows(
-    session: AsyncSession, *, since: str, until: Optional[str], lens: str,
-    actor: Optional[str] = None, workspace_id: Optional[str] = None,
-) -> list[_Row]:
-    T = ViewActivityLogORM
-    where = [*_bounds(T.created_at, since, until), T.actor.is_not(None), is_person(T.actor)]
-    if actor:
-        where.append(T.actor == actor)
-    if workspace_id:
-        where.append(T.workspace_id == workspace_id)
-    if lens == WORKSPACE:
-        where.append(T.action != _ADMIN_VIEWED)
-    stmt = (
-        select(
-            T.actor, _hour(T.created_at).label("h"), T.action, T.workspace_id,
-            func.count(), func.min(T.created_at), func.max(T.created_at),
-        )
-        .where(*where)
-        .group_by(T.actor, "h", T.action, T.workspace_id)
-    )
-    out = []
-    for a, h, action, ws, n, first, last in (await session.execute(stmt)).all():
-        if not (a and h):
-            continue
-        t = edit_type(action)
-        out.append(_Row(actor=a, hour=h, type=t, kind=kind_of(t), count=int(n),
-                        first=first, last=last, workspace=ws))
-    return out
 
 
 def _ledger_scope(lens: str, workspace_id: Optional[str]) -> list:
@@ -331,60 +228,6 @@ def _ledger_scope(lens: str, workspace_id: Optional[str]) -> list:
     if lens == WORKSPACE:
         clause.append(T.audience == catalogue.AUDIENCE_WORKSPACE)
     return clause
-
-
-async def _ledger_rows(
-    session: AsyncSession, *, since: str, until: Optional[str], lens: str,
-    actor: Optional[str] = None, workspace_id: Optional[str] = None,
-) -> list[_Row]:
-    T = AuthAuditLogORM
-    where = [
-        *_bounds(T.occurred_at, since, until),
-        T.actor_kind == "user", T.actor_id.is_not(None), is_person(T.actor_id),
-        ~T.event_type.startswith(_MIRRORED_LEDGER_PREFIX, autoescape=True),
-        *_ledger_scope(lens, workspace_id),
-    ]
-    if actor:
-        where.append(T.actor_id == actor)
-    stmt = (
-        select(
-            T.actor_id, _hour(T.occurred_at).label("h"), T.event_type, T.category,
-            T.workspace_id, func.count(), func.min(T.occurred_at), func.max(T.occurred_at),
-        )
-        .where(*where)
-        .group_by(T.actor_id, "h", T.event_type, T.category, T.workspace_id)
-    )
-    out = []
-    for a, h, t, category, ws, n, first, last in (await session.execute(stmt)).all():
-        if not (a and h):
-            continue
-        out.append(_Row(actor=a, hour=h, type=t, kind=ledger_kind(t, category),
-                        count=int(n), first=first, last=last, workspace=ws))
-    return out
-
-
-async def _signin_rows(
-    session: AsyncSession, *, since: str, until: Optional[str], people: Iterable[str],
-) -> list[_Row]:
-    """Sign-ins of the given people, wherever they happened. For a full-lens workspace scope,
-    whose ledger read is confined to the workspace and so sees no sign-in at all."""
-    T = AuthAuditLogORM
-    out: list[_Row] = []
-    for chunk in _chunked(sorted({p for p in people if p and not is_service_account(p)})):
-        stmt = (
-            select(
-                T.actor_id, _hour(T.occurred_at).label("h"), func.count(),
-                func.min(T.occurred_at), func.max(T.occurred_at),
-            )
-            .where(*_bounds(T.occurred_at, since, until), T.event_type == SIGN_IN,
-                   T.actor_id.in_(chunk))
-            .group_by(T.actor_id, "h")
-        )
-        for a, h, n, first, last in (await session.execute(stmt)).all():
-            if a and h:
-                out.append(_Row(actor=a, hour=h, type=SIGN_IN, kind="signin", count=int(n),
-                                first=first, last=last))
-    return out
 
 
 async def _users(session: AsyncSession, ids: Iterable[str]) -> dict[str, dict]:
@@ -428,82 +271,442 @@ async def _views(session: AsyncSession, ids: Iterable[str]) -> dict[str, dict]:
     return out
 
 
-async def _coverage(session: AsyncSession, w: Window) -> dict:
-    """How far each source can be trusted for this window — so a chart can say "not
-    tracked yet" instead of drawing a zero that reads as "nobody did it".
+# ── The roster ────────────────────────────────────────────────────────
 
-    Each is one indexed seek: the newest ledger row, the first section visit, and the first
-    workspace-attributed signal inside the window.
+
+async def people_doc(
+    session: AsyncSession, *, days: Optional[int] = None,
+    start: Optional[str] = None, end: Optional[str] = None,
+    now: Optional[datetime] = None, workspace_id: Optional[str] = None,
+    lens: str = FULL, scope: Any = None,
+) -> dict:
+    """Everyone's activity over one window: a summary row per person, the scope's aggregates,
+    and who has gone quiet. Read entirely from the rollup — a handful of grouped queries whose
+    results are bounded by people × buckets, never by events.
+
+    The rows carry no per-period series and no dates: those are added per PAGE by
+    :func:`enrich_page`, so the cached document stays small at ten thousand people.
+
+    ``scope`` is accepted and ignored so the analytics warmer can build this like its other
+    surfaces; the document is always unredacted, and redacted per reader by the endpoint.
     """
-    ledger_through = (await session.execute(
-        select(func.max(AuthAuditLogORM.occurred_at))
-    )).scalar()
-    sections_since = (await session.execute(
-        select(func.min(ProductEventORM.created_at))
-        .where(ProductEventORM.event_type == SECTION)
-    )).scalar()
-    attributed_since = (await session.execute(
-        select(func.min(ProductEventORM.created_at)).where(
-            ProductEventORM.workspace_id.is_not(None),
-            ProductEventORM.created_at >= w.start,
+    del scope
+    if lens not in LENSES:
+        raise ValueError(f"unknown lens {lens!r}")
+    if lens == WORKSPACE and not workspace_id:
+        raise ValueError("the workspace lens needs a workspace")
+    now = now or datetime.now(timezone.utc)
+    w = build_window(days, start=start, end=end, now=now)
+    sc = _Scope(lens, workspace_id)
+    first, last = _span(w)
+    pfirst, plast = _prev_span(w)
+
+    members = (
+        (await members_by_workspace(session, now=now, workspace_id=workspace_id)).get(
+            workspace_id, set())
+        if workspace_id else None
+    )
+    people = (await _people_in_scope(session, sc, [(first, last), (pfirst, plast)], members or ())
+              if sc.chunked else None)
+    N, LAST = sc.n, sc.last
+
+    # Per person: one row each — per (person, day) folded in a subquery, then per person.
+    def per_person(where):
+        per_day = (
+            select(
+                A.user_id.label("u"), A.day.label("d"),
+                func.sum(case((_ACTION, N), else_=0)).label("acts"),
+                func.sum(case((_SIGNIN, N), else_=0)).label("sins"),
+                func.max(case((_ACTION, LAST), else_=None)).label("last_act"),
+                func.max(case((_SIGNIN, LAST), else_=None)).label("last_sin"),
+            )
+            .where(A.day >= first, A.day <= last, ~_SECTION_ROW, *where)
+            .group_by(A.user_id, A.day)
+        ).subquery()
+        return (
+            select(
+                per_day.c.u,
+                func.sum(per_day.c.acts), func.sum(per_day.c.sins),
+                func.sum(case((per_day.c.acts > 0, 1), else_=0)),
+                func.sum(case((per_day.c.sins > 0, 1), else_=0)),
+                func.sum(case((and_(per_day.c.sins > 0, per_day.c.acts == 0), 1), else_=0)),
+                func.max(per_day.c.last_act), func.max(per_day.c.last_sin),
+            ).group_by(per_day.c.u)
         )
-    )).scalar()
+
+    rows = await _each_chunk(session, sc, people, per_person)
+    kind_rows = await _each_chunk(session, sc, people, lambda where: (
+        select(A.user_id, A.kind, func.sum(N))
+        .where(A.day >= first, A.day <= last, _ACTION, *where)
+        .group_by(A.user_id, A.kind)))
+    prev_rows = await _each_chunk(session, sc, people, lambda where: (
+        select(A.user_id, func.sum(case((_ACTION, N), else_=0)),
+               func.sum(case((_SIGNIN, N), else_=0)))
+        .where(A.day >= pfirst, A.day <= plast, ~_SECTION_ROW, *where)
+        .group_by(A.user_id)))
+
+    top_kind: dict[str, tuple[int, str]] = {}
+    for uid, kind, n in kind_rows:
+        n = int(n or 0)
+        best = top_kind.get(uid)
+        if n and (best is None or n > best[0] or (n == best[0] and KINDS.index(kind) < KINDS.index(best[1]))):
+            top_kind[uid] = (n, kind)
+    previous = {uid: int(a or 0) for uid, a, _ in prev_rows}
+    prev_signed = sum(1 for _, _, s in prev_rows if s)
+
+    ids = {r[0] for r in rows if r[0] and not is_service_account(r[0])}
+    users = await _users(session, ids | set(members or ()))
+    if members is not None:
+        # People with access today: a binding can outlive its account, and a group can hold a
+        # service account, and neither is a member anyone needs to nudge.
+        members = {m for m in members
+                   if m in users and not users[m]["deleted"] and not is_service_account(m)}
+
+    full = lens == FULL
+    roster = []
+    for uid, acts, sins, active_days, sin_days, idle, last_act, last_sin in rows:
+        if uid not in ids:
+            continue
+        acts, sins = int(acts or 0), int(sins or 0)
+        if not acts and not (full and sins):
+            continue
+        u = users.get(uid, {})
+        prev = previous.get(uid, 0)
+        roster.append({
+            "userId": uid,
+            "name": u.get("name") or uid,
+            "deleted": bool(u.get("deleted")),
+            "actions": acts,
+            "previous": prev,
+            "changePct": _delta(acts, prev),
+            "activeDays": int(active_days or 0),
+            "signIns": sins if full else None,
+            "signInDays": int(sin_days or 0) if full else None,
+            "idleSignInDays": int(idle or 0) if full else None,
+            "lastActiveAt": last_act,
+            "lastSignInAt": (last_sin or u.get("lastLoginAt")) if full else None,
+            "topKind": top_kind.get(uid, (0, None))[1],
+            "joinedInWindow": bool(u.get("createdAt") and u["createdAt"] >= w.start),
+        })
+    roster.sort(key=lambda r: (-r["actions"], -(r["signIns"] or 0), r["name"].lower()))
+
+    active_ids = {r["userId"] for r in roster if r["actions"]}
+    sign_in_days = sum(r["signInDays"] or 0 for r in roster)
+    idle_days = sum(r["idleSignInDays"] or 0 for r in roster)
+    series, kinds, sections = await _scope_series(session, sc, w, people)
+    punchcard, types = await _scope_facets(session, sc, w)
+    if sc.chunked:
+        signin_total = sum(k["count"] for k in kinds if k["kind"] == "signin")
+        if signin_total:
+            types.append({"type": SIGN_IN, "kind": "signin", "label": label_of(SIGN_IN),
+                          "count": signin_total})
+            types.sort(key=lambda t: -t["count"])
+
+    scope_key = workspace_id or people_index_repo.PLATFORM
+    timeline = await people_index_repo.timeline_for_workspace(
+        session, scope_key, set(members or ()) - active_ids) if members is not None else {}
+    quiet = await _quiet(session, members=members, active=active_ids, users=users, lens=lens,
+                         timeline=timeline, scope_key=scope_key, workspace_id=workspace_id)
+
+    doc = {
+        "generatedAt": now.isoformat(),
+        "window": _window_doc(w),
+        "scope": {"workspaceId": workspace_id, "lens": lens},
+        "coverage": await _coverage(session, now),
+        "totals": {
+            "activePeople": _m(len(active_ids), sum(1 for v in previous.values() if v)),
+            "signedIn": _m(sum(1 for r in roster if r["signIns"]), prev_signed) if full else None,
+            "actions": _m(sum(r["actions"] for r in roster), sum(previous.values())),
+            "avgActiveDays": (
+                round(sum(r["activeDays"] for r in roster if r["actions"]) / len(active_ids), 1)
+                if active_ids else None
+            ),
+            "idleSignIns": (
+                {"days": idle_days, "signInDays": sign_in_days,
+                 "rate": round(idle_days / sign_in_days, 3) if sign_in_days else None}
+                if full else None
+            ),
+            "newcomers": sum(1 for r in roster if r["joinedInWindow"] and r["actions"]),
+            "members": len(members) if members is not None else None,
+            "quiet": quiet["count"],
+        },
+        "series": series,
+        "kinds": kinds,
+        "types": types[:_TOP_TYPES] + (
+            [{"type": "other", "kind": "other", "label": "Everything else",
+              "count": sum(t["count"] for t in types[_TOP_TYPES:])}]
+            if len(types) > _TOP_TYPES else []),
+        "punchcard": punchcard,
+        "sections": sections,
+        "people": roster,
+        "quiet": quiet,
+    }
+    doc["insights"] = _people_insights(doc, w)
+    return doc
+
+
+async def _scope_series(session: AsyncSession, sc: _Scope, w: Window,
+                        people: Optional[list[str]]) -> tuple[dict, list[dict], list[dict]]:
+    """Per bucket: each kind's events, and how many distinct people were active and signed in;
+    the scope's kinds; and sections with the people who moved to them. Groups of at most
+    buckets × kinds rows."""
+    first, last = _span(w)
+    idx = {b: i for i, b in enumerate(w.buckets)}
+    bucket = _bucket(A.day, w).label("b")
+    N = sc.n
+    in_window = [A.day >= first, A.day <= last]
+
+    by_kind = {k: [0] * len(w.buckets) for k in KINDS}
+    for b, kind, n in await _each_chunk(session, sc, people, lambda where: (
+        select(bucket, A.kind, func.sum(N)).where(*in_window, ~_SECTION_ROW, *where)
+        .group_by("b", A.kind))):
+        if b in idx and kind in by_kind:
+            by_kind[kind][idx[b]] += int(n or 0)
+
+    def distinct_per_bucket(pred):
+        return lambda where: (
+            select(bucket, func.count(func.distinct(A.user_id)))
+            .where(*in_window, pred, *where).group_by("b"))
+
+    active = [0] * len(w.buckets)
+    for b, n in await _each_chunk(session, sc, people, distinct_per_bucket(_ACTION)):
+        if b in idx:
+            active[idx[b]] += int(n or 0)
+    signed: Optional[list[int]] = None
+    if sc.lens == FULL:
+        signed = [0] * len(w.buckets)
+        for b, n in await _each_chunk(session, sc, people, distinct_per_bucket(_SIGNIN)):
+            if b in idx:
+                signed[idx[b]] += int(n or 0)
+
+    section_counts: Counter = Counter()
+    section_people: Counter = Counter()
+    for kind, n, ppl in await _each_chunk(session, sc, people, lambda where: (
+        select(A.kind, func.sum(N), func.count(func.distinct(A.user_id)))
+        .where(*in_window, _SECTION_ROW, *where).group_by(A.kind))):
+        name = kind[len(SECTION_KIND_PREFIX):]
+        section_counts[name] += int(n or 0)
+        section_people[name] += int(ppl or 0)
+
+    shown = [k for k in KINDS if not (k == "signin" and sc.ws_lens)]
+    series = {
+        "buckets": list(w.buckets),
+        "byKind": [{"kind": k, "values": by_kind[k]} for k in shown],
+        "activePeople": active,
+        "signedIn": signed,
+    }
+    kinds = [{"kind": k, "count": sum(by_kind[k])} for k in shown]
+    sections = [{"section": s, "count": int(n), "people": int(section_people[s])}
+                for s, n in section_counts.most_common()]
+    return series, kinds, sections
+
+
+async def _scope_facets(session: AsyncSession, sc: _Scope, w: Window) -> tuple[list[list[int]], list[dict]]:
+    """The punchcard and "what people do" by name, from the facet rollup: days × 24 hours and
+    days × types at most."""
+    first, last = _span(w)
+    by_hour: Counter = Counter()
+    by_type: Counter = Counter()
+    for facet, value, day, n in (await session.execute(
+        select(F.facet, F.value, F.day, func.sum(sc.fn))
+        .where(F.day >= first, F.day <= last, *sc.facet_where())
+        .group_by(F.facet, F.value, F.day)
+    )).all():
+        n = int(n or 0)
+        if facet == "hour":
+            by_hour[f"{day}T{value}"] += n
+        elif facet == "type":
+            by_type[value] += n
+    types = [{"type": t, "kind": kind_of(t), "label": label_of(t), "count": int(n)}
+             for t, n in by_type.most_common() if n]
+    return _punchcard(by_hour), types
+
+
+async def _quiet(
+    session: AsyncSession, *, members: Optional[set[str]], active: set[str],
+    users: dict[str, dict], lens: str, timeline: dict[str, dict], scope_key: str,
+    workspace_id: Optional[str],
+) -> dict:
+    """Who has access and did nothing in the window: an exact count, and the most recently
+    active of them by name — at most ``_QUIET_LISTED``, in any scope. A list of thousands is
+    one nobody reads past the first screen.
+
+    ``lastActiveAt`` is their last activity IN THIS SCOPE, from the index. When they last
+    signed in, or did anything anywhere, is presence a workspace admin is not told.
+    """
+    def _row(uid: str, u: dict) -> dict:
+        here = timeline.get(uid, {}).get("lastActiveAt")
+        return {
+            "userId": uid, "name": u.get("name") or uid, "email": u.get("email"),
+            "joinedAt": timeline.get(uid, {}).get("joinedAt")
+            or (u.get("createdAt") if workspace_id is None else None),
+            "lastLoginAt": u.get("lastLoginAt") if lens == FULL else None,
+            "lastActiveAt": here or (u.get("lastActiveAt") if lens == FULL and workspace_id is None
+                                     else None),
+        }
+
+    if members is not None:
+        quiet_ids = sorted((m for m in members if m not in active),
+                           key=lambda m: (timeline.get(m, {}).get("lastActiveAt") or ""),
+                           reverse=True)
+        joins = await people_index_repo.join_candidates(session, workspace_id=workspace_id)
+        for uid in quiet_ids[:_QUIET_LISTED]:
+            t = timeline.setdefault(uid, {})
+            t["joinedAt"] = people_index_repo.merge_join(t, joins.get((uid, workspace_id)))
+        return {"count": len(quiet_ids),
+                "people": [_row(m, users.get(m, {})) for m in quiet_ids[:_QUIET_LISTED]]}
+
+    live = [UserORM.deleted_at.is_(None), is_person(UserORM.id),
+            UserORM.status == "active", UserORM.is_system_account.is_not(True)]
+    total_live = int((await session.execute(
+        select(func.count()).select_from(UserORM).where(*live))).scalar() or 0)
+    live_active = 0
+    for chunk in _chunked(sorted(active)):
+        live_active += int((await session.execute(
+            select(func.count()).select_from(UserORM).where(*live, UserORM.id.in_(chunk))
+        )).scalar() or 0)
+    # Over-fetch by the number of active people so the cap survives skipping them, without
+    # reading the whole users table.
+    candidates = (await session.execute(
+        select(UserORM.id).where(*live)
+        .order_by(UserORM.last_active_at.desc().nulls_last(), UserORM.id)
+        .limit(_QUIET_LISTED + len(active))
+    )).scalars().all()
+    wanted = [c for c in candidates if c not in active][:_QUIET_LISTED]
+    named = await _users(session, wanted)
+    timeline.update(await people_index_repo.timeline_for_workspace(session, scope_key, wanted))
+    return {"count": max(total_live - live_active, 0),
+            "people": [_row(uid, named.get(uid, {})) for uid in wanted]}
+
+
+async def _coverage(session: AsyncSession, now: datetime) -> dict:
+    """How far the figures reach: the newest ledger row (sign-ins and operations come from
+    there), when section visits began being recorded, and how much of history the rollup
+    holds. Each is an index seek or a scan of at most a year of day rows."""
     return {
-        "ledgerThrough": ledger_through,
-        "sectionsSince": sections_since,
-        "workspaceAttributionSince": attributed_since,
+        "ledgerThrough": (await session.execute(
+            select(func.max(AuthAuditLogORM.occurred_at)))).scalar(),
+        "sectionsSince": (await session.execute(
+            select(func.min(ProductEventORM.created_at))
+            .where(ProductEventORM.event_type == SECTION))).scalar(),
+        "index": await people_index_repo.coverage(session, now=now),
     }
 
 
-# ── Folding ───────────────────────────────────────────────────────────
+# ── A page of people, and their lines ─────────────────────────────────
 
 
-@dataclass
-class _Person:
-    """One person's figures over a window. ``actions`` leaves out sign-ins: signing in and
-    leaving is not using the platform, which is the same line ``analytics_repo`` draws for
-    active users."""
-    actions: int = 0
-    sign_ins: int = 0
-    kinds: Counter = field(default_factory=Counter)
-    types: Counter = field(default_factory=Counter)
-    active_days: set = field(default_factory=set)
-    sign_in_days: set = field(default_factory=set)
-    by_bucket: Counter = field(default_factory=Counter)
-    last: Optional[str] = None
-    last_sign_in: Optional[str] = None
+async def lines(
+    session: AsyncSession, user_ids: Sequence[str], *, days: Optional[int] = None,
+    start: Optional[str] = None, end: Optional[str] = None, now: Optional[datetime] = None,
+    workspace_id: Optional[str] = None, lens: str = FULL,
+) -> dict:
+    """Each person's activity line: their actions per bucket of the window, in the scope.
 
-    def add(self, row: _Row, bucket: Optional[str]) -> None:
-        if row.type == SECTION:
-            return
-        self.kinds[row.kind] += row.count
-        self.types[row.type] += row.count
-        if row.kind == "signin":
-            self.sign_ins += row.count
-            self.sign_in_days.add(row.day)
-            if not self.last_sign_in or row.last > self.last_sign_in:
-                self.last_sign_in = row.last
-            return
-        self.actions += row.count
-        self.active_days.add(row.day)
-        if bucket:
-            self.by_bucket[bucket] += row.count
-        if not self.last or row.last > self.last:
-            self.last = row.last
+    One grouped read of the rollup through ``(user_id, day)``: at most people × buckets rows,
+    for a page or a compare chart — never for everyone. In a workspace a line counts only what
+    happened there."""
+    now = now or datetime.now(timezone.utc)
+    w = build_window(days, start=start, end=end, now=now)
+    sc = _Scope(lens, workspace_id)
+    first, last = _span(w)
+    idx = {b: i for i, b in enumerate(w.buckets)}
+    bucket = _bucket(A.day, w).label("b")
+    out = {uid: [0] * len(w.buckets) for uid in user_ids}
+    where = ([A.workspace_id == workspace_id] + ([A.n_ws > 0] if sc.ws_lens else [])
+             if workspace_id else [])
+    for chunk in _chunked(sorted(set(user_ids))):
+        for uid, b, n in (await session.execute(
+            select(A.user_id, bucket, func.sum(sc.n))
+            .where(A.user_id.in_(chunk), A.day >= first, A.day <= last, _ACTION, *where)
+            .group_by(A.user_id, "b")
+        )).all():
+            if uid in out and b in idx:
+                out[uid][idx[b]] += int(n or 0)
+    return {"buckets": list(w.buckets), "granularity": w.granularity, "lines": out}
 
 
-def _top_kind(kinds: Counter) -> Optional[str]:
-    actions = {k: v for k, v in kinds.items() if k != "signin" and v}
-    if not actions:
-        return None
-    return max(actions.items(), key=lambda kv: (kv[1], -KINDS.index(kv[0])))[0]
+async def enrich_page(
+    session: AsyncSession, rows: list[dict], *, days: Optional[int] = None,
+    start: Optional[str] = None, end: Optional[str] = None, now: Optional[datetime] = None,
+    workspace_id: Optional[str] = None, lens: str = FULL, emails: bool = False,
+) -> list[dict]:
+    """What a page of roster rows needs beyond the cached summary: each person's activity line,
+    when they joined and were first and last active in the scope, and — for a reader allowed
+    it — their address. Bounded by the page, never by everyone."""
+    ids = [r["userId"] for r in rows]
+    if not ids:
+        return rows
+    drawn = await lines(session, ids, days=days, start=start, end=end, now=now,
+                        workspace_id=workspace_id, lens=lens)
+    scope_key = workspace_id or people_index_repo.PLATFORM
+    timeline = await people_index_repo.timeline_for_workspace(session, scope_key, ids)
+    joins = ({uid: at for (uid, _ws), at in (await people_index_repo.join_candidates(
+        session, workspace_id=workspace_id)).items()} if workspace_id else {})
+    users = await _users(session, ids)
+    out = []
+    for r in rows:
+        uid = r["userId"]
+        t = timeline.get(uid, {})
+        u = users.get(uid, {})
+        out.append({
+            **r,
+            "line": drawn["lines"].get(uid, []),
+            "joinedAt": (people_index_repo.merge_join(t, joins.get(uid)) if workspace_id
+                         else u.get("createdAt")),
+            "firstActiveAt": t.get("firstActiveAt"),
+            "lastActiveEverAt": t.get("lastActiveAt") or r.get("lastActiveAt"),
+            **({"email": u.get("email")} if emails else {}),
+        })
+    return out
 
 
-def _kind_list(kinds: Counter, *, lens: str) -> list[dict]:
-    return [
-        {"kind": k, "count": int(kinds.get(k, 0))}
-        for k in KINDS if not (k == "signin" and lens == WORKSPACE)
-    ]
+async def scope_day(
+    session: AsyncSession, day: str, *, workspace_id: Optional[str] = None, lens: str = FULL,
+    limit: int = 200,
+) -> dict:
+    """Everyone active on one UTC day in the scope — exactly, not a sample: one grouped read of
+    that day's rollup rows, then the most active ``limit`` named."""
+    sc = _Scope(lens, workspace_id)
+    where = ([A.workspace_id == workspace_id] + ([A.n_ws > 0] if sc.ws_lens else [])
+             if workspace_id else [])
+    per: dict[str, dict] = {}
+    kinds: Counter = Counter()
+    for uid, kind, n in (await session.execute(
+        select(A.user_id, A.kind, func.sum(sc.n))
+        .where(A.day == day, ~_SECTION_ROW, *where).group_by(A.user_id, A.kind)
+    )).all():
+        n = int(n or 0)
+        if not n:
+            continue
+        p = per.setdefault(uid, {"actions": 0, "signIns": 0, "kinds": {}})
+        if kind == "signin":
+            p["signIns"] += n
+        else:
+            p["actions"] += n
+        p["kinds"][kind] = p["kinds"].get(kind, 0) + n
+        kinds[kind] += n
+    active = sorted((u for u, p in per.items() if p["actions"]),
+                    key=lambda u: (-per[u]["actions"], u))
+    named = await _users(session, active[:limit])
+    return {
+        "day": day,
+        "scope": {"workspaceId": workspace_id, "lens": lens},
+        "active": len(active),
+        # Sign-ins happened in no workspace; a workspace's day does not read them.
+        "signedIn": None if workspace_id else sum(1 for p in per.values() if p["signIns"]),
+        "kinds": [{"kind": k, "count": int(kinds[k])} for k in KINDS if kinds.get(k)],
+        "people": [
+            {"userId": u, "name": named.get(u, {}).get("name") or u,
+             "actions": per[u]["actions"],
+             "signIns": None if workspace_id else per[u]["signIns"],
+             "kinds": per[u]["kinds"]}
+            for u in active[:limit]
+        ],
+    }
+
+
+# ── Shaping ───────────────────────────────────────────────────────────
 
 
 def _type_list(types: Counter, kinds: dict[str, str]) -> list[dict]:
@@ -517,54 +720,6 @@ def _type_list(types: Counter, kinds: dict[str, str]) -> list[dict]:
     if tail:
         out.append({"type": "other", "kind": "other", "label": "Everything else", "count": int(tail)})
     return out
-
-
-def _sections(rows: Iterable[_Row]) -> list[dict]:
-    counts: Counter = Counter()
-    people: dict[str, set] = defaultdict(set)
-    for r in rows:
-        if r.type == SECTION and r.subject:
-            counts[r.subject] += r.count
-            people[r.subject].add(r.actor)
-    return [
-        {"section": s, "count": int(n), "people": len(people[s])}
-        for s, n in counts.most_common()
-    ]
-
-
-def _punch(rows: Iterable[_Row]) -> list[list[int]]:
-    by_hour: Counter = Counter()
-    for r in rows:
-        if r.type != SECTION and r.kind != "signin":
-            by_hour[r.hour] += r.count
-    return _punchcard(by_hour)
-
-
-def _series(rows: Iterable[_Row], w: Window, *, lens: str) -> dict:
-    """Per-bucket figures for a window: each kind's events, and how many distinct people were
-    active, and signed in, in each bucket."""
-    idx = {b: i for i, b in enumerate(w.buckets)}
-    by_kind = {k: [0] * len(w.buckets) for k in KINDS}
-    active: list[set] = [set() for _ in w.buckets]
-    signed: list[set] = [set() for _ in w.buckets]
-    for r in rows:
-        if r.type == SECTION:
-            continue
-        b = w.bucket_of(r.day)
-        if b is None or b not in idx:
-            continue
-        i = idx[b]
-        by_kind[r.kind][i] += r.count
-        (signed if r.kind == "signin" else active)[i].add(r.actor)
-    return {
-        "buckets": list(w.buckets),
-        "byKind": [
-            {"kind": k, "values": by_kind[k]}
-            for k in KINDS if not (k == "signin" and lens == WORKSPACE)
-        ],
-        "activePeople": [len(s) for s in active],
-        "signedIn": [len(s) for s in signed] if lens == FULL else None,
-    }
 
 
 def _window_doc(w: Window) -> dict:
@@ -601,233 +756,9 @@ def _minute_of_day(ts: str) -> Optional[int]:
     return at.hour * 60 + at.minute
 
 
-# ── The roster ────────────────────────────────────────────────────────
-
-
-async def people_doc(
-    session: AsyncSession, *, days: Optional[int] = None,
-    start: Optional[str] = None, end: Optional[str] = None,
-    now: Optional[datetime] = None, workspace_id: Optional[str] = None,
-    lens: str = FULL, scope: Any = None,
-) -> dict:
-    """Everyone's activity over one window: the roster, its aggregates, and who has gone quiet.
-
-    ``scope`` is accepted and ignored so the analytics warmer can build this like its other
-    surfaces; the document is always unredacted, and redacted per reader by the endpoint.
-    """
-    del scope
-    if lens not in LENSES:
-        raise ValueError(f"unknown lens {lens!r}")
-    if lens == WORKSPACE and not workspace_id:
-        raise ValueError("the workspace lens needs a workspace")
-    now = now or datetime.now(timezone.utc)
-    w = build_window(days, start=start, end=end, now=now)
-
-    ws_views = await _workspace_view_ids(session, workspace_id) if workspace_id else None
-    members = (
-        (await members_by_workspace(session, now=now, workspace_id=workspace_id)).get(
-            workspace_id, set())
-        if workspace_id else None
-    )
-
-    async def _read(since: str, until: Optional[str]) -> list[_Row]:
-        rows = await _usage_rows(session, since=since, until=until,
-                                 workspace_id=workspace_id, ws_view_ids=ws_views)
-        rows += await _edit_rows(session, since=since, until=until, lens=lens,
-                                 workspace_id=workspace_id)
-        rows += await _ledger_rows(session, since=since, until=until, lens=lens,
-                                   workspace_id=workspace_id)
-        if workspace_id and lens == FULL:
-            people = set(members or ()) | {r.actor for r in rows}
-            rows += await _signin_rows(session, since=since, until=until, people=people)
-        return rows
-
-    rows = await _read(w.start, w.end)
-    # The equal-length window just before, for every delta: the same bounds the rest of
-    # Analytics compares against, so a person's "+20%" means what the dashboard's does.
-    prev_rows = await _read(w.previous_start, w.start)
-
-    persons: dict[str, _Person] = defaultdict(_Person)
-    totals_kinds: Counter = Counter()
-    totals_types: Counter = Counter()
-    type_kinds: dict[str, str] = {}
-    for r in rows:
-        if r.type == SECTION:
-            continue
-        persons[r.actor].add(r, w.bucket_of(r.day))
-        totals_kinds[r.kind] += r.count
-        totals_types[r.type] += r.count
-        type_kinds[r.type] = r.kind
-
-    previous: Counter = Counter()
-    prev_signed: set[str] = set()
-    for r in prev_rows:
-        if r.type == SECTION:
-            continue
-        if r.kind == "signin":
-            prev_signed.add(r.actor)
-        else:
-            previous[r.actor] += r.count
-
-    users = await _users(session, set(persons) | set(members or ()))
-    # All-time, from the index: when each person joined this scope and was first and last
-    # active in it. The platform's "joined" is the account's creation.
-    scope_key = workspace_id or people_index_repo.PLATFORM
-    timeline = await people_index_repo.timeline_for_workspace(
-        session, scope_key, set(persons) | set(members or ()))
-    joins = (
-        {uid: at for (uid, _ws), at in (await people_index_repo.join_candidates(
-            session, workspace_id=workspace_id)).items()}
-        if workspace_id else {}
-    )
-
-    def _joined(uid: str) -> Optional[str]:
-        if not workspace_id:
-            return users.get(uid, {}).get("createdAt")
-        return people_index_repo.merge_join(timeline.get(uid, {}), joins.get(uid))
-
-    if members is not None:
-        # People with access today: a binding can outlive its account, and a group can
-        # hold a service account, and neither is a member anyone needs to nudge.
-        members = {
-            m for m in members
-            if m in users and not users[m]["deleted"] and not is_service_account(m)
-        }
-    buckets = list(w.buckets)
-    people = []
-    for uid, p in persons.items():
-        u = users.get(uid, {})
-        people.append({
-            "userId": uid,
-            "name": u.get("name") or uid,
-            "email": u.get("email"),
-            "deleted": bool(u.get("deleted")),
-            "actions": p.actions,
-            "previous": int(previous.get(uid, 0)),
-            "changePct": _delta(p.actions, int(previous.get(uid, 0))),
-            "activeDays": len(p.active_days),
-            "signIns": p.sign_ins if lens == FULL else None,
-            "signInDays": len(p.sign_in_days) if lens == FULL else None,
-            "idleSignInDays": len(p.sign_in_days - p.active_days) if lens == FULL else None,
-            "lastActiveAt": p.last,
-            "lastSignInAt": (p.last_sign_in or u.get("lastLoginAt")) if lens == FULL else None,
-            "kinds": {k: int(v) for k, v in p.kinds.items() if v},
-            "topKind": _top_kind(p.kinds),
-            "values": [int(p.by_bucket.get(b, 0)) for b in buckets],
-            "joinedInWindow": bool(u.get("createdAt") and u["createdAt"] >= w.start),
-            "joinedAt": _joined(uid),
-            "firstActiveAt": timeline.get(uid, {}).get("firstActiveAt"),
-            "lastActiveEverAt": timeline.get(uid, {}).get("lastActiveAt") or p.last,
-        })
-    people.sort(key=lambda r: (-r["actions"], -(r["signIns"] or 0), r["name"].lower()))
-
-    active_ids = {r["userId"] for r in people if r["actions"]}
-    signed_ids = {r["userId"] for r in people if r["signIns"]}
-    total_actions = sum(r["actions"] for r in people)
-    sign_in_days = sum(r["signInDays"] or 0 for r in people)
-    idle_days = sum(r["idleSignInDays"] or 0 for r in people)
-
-    quiet = await _quiet(session, members=members, active=active_ids, users=users, lens=lens,
-                         timeline=timeline, joined=_joined, scope_key=scope_key)
-
-    doc = {
-        "generatedAt": now.isoformat(),
-        "window": _window_doc(w),
-        "scope": {"workspaceId": workspace_id, "lens": lens},
-        "coverage": {**await _coverage(session, w),
-                     "index": await people_index_repo.coverage(session, now=now)},
-        "totals": {
-            "activePeople": _m(len(active_ids), sum(1 for v in previous.values() if v)),
-            "signedIn": _m(len(signed_ids), len(prev_signed)) if lens == FULL else None,
-            "actions": _m(total_actions, sum(previous.values())),
-            "avgActiveDays": (
-                round(sum(r["activeDays"] for r in people if r["actions"]) / len(active_ids), 1)
-                if active_ids else None
-            ),
-            "idleSignIns": (
-                {"days": idle_days, "signInDays": sign_in_days,
-                 "rate": round(idle_days / sign_in_days, 3) if sign_in_days else None}
-                if lens == FULL else None
-            ),
-            "newcomers": sum(1 for r in people if r["joinedInWindow"] and r["actions"]),
-            "members": len(members) if members is not None else None,
-            "quiet": quiet["count"],
-        },
-        "series": _series(rows, w, lens=lens),
-        "kinds": _kind_list(totals_kinds, lens=lens),
-        "types": _type_list(totals_types, type_kinds),
-        "punchcard": _punch(rows),
-        "sections": _sections(rows),
-        "people": people,
-        "quiet": quiet,
-    }
-    doc["insights"] = _people_insights(doc, w)
-    return doc
-
-
 def _m(current: int, previous: int) -> dict:
     return {"current": int(current), "previous": int(previous),
             "changePct": _delta(int(current), int(previous))}
-
-
-async def _quiet(
-    session: AsyncSession, *, members: Optional[set[str]], active: set[str],
-    users: dict[str, dict], lens: str, timeline: dict[str, dict], joined,
-    scope_key: str,
-) -> dict:
-    """Who has access and did nothing in the window.
-
-    In a workspace: its members, every one of them, by name — the list a workspace admin acts
-    on. Platform-wide: an exact count of live accounts, and the most recently seen of them by
-    name, because "everyone who did nothing" on a large tenancy is a list nobody reads past
-    the first screen.
-    """
-    members_scope = members is not None
-
-    def _row(uid: str, u: dict) -> dict:
-        # ``lastActiveAt`` is the last time they did something IN THIS SCOPE, from the index —
-        # in a workspace, their last activity there. When they last signed in, or did
-        # anything anywhere on the platform, is presence a workspace admin is not told.
-        here = timeline.get(uid, {}).get("lastActiveAt")
-        return {
-            "userId": uid, "name": u.get("name") or uid, "email": u.get("email"),
-            "joinedAt": joined(uid),
-            "lastLoginAt": u.get("lastLoginAt") if lens == FULL else None,
-            "lastActiveAt": here or (u.get("lastActiveAt") if lens == FULL and not members_scope
-                                     else None),
-        }
-
-    if members is not None:
-        quiet_ids = sorted(
-            (m for m in members if m not in active),
-            key=lambda m: (users.get(m, {}).get("lastActiveAt") or ""), reverse=True,
-        )
-        return {"count": len(quiet_ids),
-                "people": [_row(m, users.get(m, {})) for m in quiet_ids]}
-
-    live = [UserORM.deleted_at.is_(None), is_person(UserORM.id),
-            UserORM.status == "active", UserORM.is_system_account.is_not(True)]
-    total_live = int((await session.execute(
-        select(func.count()).select_from(UserORM).where(*live))).scalar() or 0)
-    live_active = 0
-    for chunk in _chunked(sorted(active)):
-        live_active += int((await session.execute(
-            select(func.count()).select_from(UserORM).where(*live, UserORM.id.in_(chunk))
-        )).scalar() or 0)
-    listed: list[dict] = []
-    # Over-fetch by the number of active people so the cap survives skipping them, without
-    # reading the whole users table.
-    candidates = (await session.execute(
-        select(UserORM.id).where(*live)
-        .order_by(UserORM.last_active_at.desc().nulls_last(), UserORM.id)
-        .limit(_QUIET_LISTED + len(active))
-    )).scalars().all()
-    wanted = [c for c in candidates if c not in active][:_QUIET_LISTED]
-    named = await _users(session, wanted)
-    timeline.update(await people_index_repo.timeline_for_workspace(session, scope_key, wanted))
-    users.update(named)
-    listed = [_row(uid, named.get(uid, {})) for uid in wanted]
-    return {"count": max(total_live - live_active, 0), "people": listed}
 
 
 def _people_insights(doc: dict, w: Window) -> list[dict]:
@@ -904,41 +835,80 @@ def _people_insights(doc: dict, w: Window) -> list[dict]:
 # ── One person ────────────────────────────────────────────────────────
 
 
-async def _person_rows(
-    session: AsyncSession, user_id: str, *, since: str, until: Optional[str],
-    workspace_id: Optional[str], lens: str,
-) -> list[_Row]:
-    """One person's rows from all three stores, placed in the scope.
+def _person_where(user_id: str, workspace_id: Optional[str], lens: str) -> list:
+    where = [A.user_id == user_id]
+    if workspace_id is None:
+        return where
+    if lens == WORKSPACE:
+        return where + [A.workspace_id == workspace_id, A.n_ws > 0]
+    return where + [or_(A.workspace_id == workspace_id,
+                        and_(A.workspace_id == people_index_repo.PLATFORM, A.kind == "signin"))]
 
-    Their view opens are read unscoped by the person's own index and placed through each
-    view's workspace here — a person opens dozens of views, a workspace holds thousands.
-    """
-    usage = await _usage_rows(session, since=since, until=until, actor=user_id)
-    opened = {r.subject for r in usage if r.type == VIEW_OPENED and r.subject}
-    homes = {vid: v["workspaceId"] for vid, v in (await _views(session, opened)).items()}
-    # A view open's workspace is its view's.
-    usage = [
-        replace(r, workspace=homes.get(r.subject)) if r.type == VIEW_OPENED else r
-        for r in usage
-    ]
+
+async def _raw_person_details(
+    session: AsyncSession, user_id: str, w: Window, *, workspace_id: Optional[str], lens: str,
+) -> tuple[Counter, dict[str, str], Counter, Counter]:
+    """What only raw events hold, for one person over one window, each a small grouped read
+    through that store's actor index: counts by event type, actions by hour, and the views they
+    opened. Bounded by what one person did."""
+    types: Counter = Counter()
+    type_kinds: dict[str, str] = {}
+    by_hour: Counter = Counter()
+    opens: Counter = Counter()
+
+    P = ProductEventORM
+    where = [P.actor_id == user_id, P.created_at >= w.start, P.created_at < w.end,
+             P.event_type.in_(list(USAGE_KINDS))]
     if workspace_id:
-        usage = [r for r in usage if r.workspace == workspace_id]
-    rows = usage
-    rows += await _edit_rows(session, since=since, until=until, lens=lens,
-                             actor=user_id, workspace_id=workspace_id)
-    rows += await _ledger_rows(session, since=since, until=until, lens=lens,
-                               actor=user_id, workspace_id=workspace_id)
+        where.append(P.workspace_id == workspace_id)
+    for t, n in (await session.execute(
+        select(P.event_type, func.count()).where(*where).group_by(P.event_type))).all():
+        types[t] += int(n)
+        type_kinds[t] = USAGE_KINDS[t]
+    for h, n in (await session.execute(
+        select(_hour(P.created_at).label("h"), func.count()).where(*where).group_by("h"))).all():
+        by_hour[h] += int(n)
+    for vid, n in (await session.execute(
+        select(P.subject_id, func.count()).where(*where, P.event_type == VIEW_OPENED,
+                                                 P.subject_id.is_not(None))
+        .group_by(P.subject_id))).all():
+        opens[vid] += int(n)
+
+    E = ViewActivityLogORM
+    ewhere = [E.actor == user_id, E.created_at >= w.start, E.created_at < w.end]
+    if workspace_id:
+        ewhere.append(E.workspace_id == workspace_id)
+    if lens == WORKSPACE:
+        ewhere.append(E.action != _ADMIN_VIEWED)
+    for action, h, n in (await session.execute(
+        select(E.action, _hour(E.created_at).label("h"), func.count())
+        .where(*ewhere).group_by(E.action, "h"))).all():
+        t = edit_type(action)
+        types[t] += int(n)
+        type_kinds[t] = kind_of(t)
+        by_hour[h] += int(n)
+
+    L = AuthAuditLogORM
+    lwhere = [L.actor_id == user_id, L.actor_kind == "user",
+              L.occurred_at >= w.start, L.occurred_at < w.end,
+              ~L.event_type.startswith(_MIRRORED_LEDGER_PREFIX, autoescape=True)]
+    scoped = _ledger_scope(lens, workspace_id)
     if workspace_id and lens == FULL:
-        rows += await _signin_rows(session, since=since, until=until, people=[user_id])
-    return rows
-
-
-async def profile(session: AsyncSession, user_id: str) -> Optional[dict]:
-    users = await _users(session, [user_id])
-    u = users.get(user_id)
-    if u is None:
-        return None
-    return {"userId": user_id, **u}
+        # Their sign-ins happened in no workspace; the full lens shows them beside the rest.
+        lwhere.append(or_(and_(*scoped), L.event_type == SIGN_IN))
+    else:
+        lwhere += scoped
+    if lens == WORKSPACE:
+        lwhere.append(L.event_type != SIGN_IN)
+    for t, category, h, n in (await session.execute(
+        select(L.event_type, L.category, _hour(L.occurred_at).label("h"), func.count())
+        .where(*lwhere).group_by(L.event_type, L.category, "h"))).all():
+        types[t] += int(n)
+        kind = ledger_kind(t, category)
+        type_kinds[t] = kind
+        if kind != "signin":
+            by_hour[h] += int(n)
+    return types, type_kinds, by_hour, opens
 
 
 async def person_doc(
@@ -950,46 +920,93 @@ async def person_doc(
     """One person over one window. ``None`` when there is no such account."""
     now = now or datetime.now(timezone.utc)
     w = build_window(days, start=start, end=end, now=now)
+    prev_w = previous_window(w)
     who = await profile(session, user_id)
     if who is None:
         return None
+    sc = _Scope(lens, workspace_id)
+    first, last = _span(w)
+    pfirst, plast = _prev_span(w)
+    where = _person_where(user_id, workspace_id, lens)
 
-    rows = await _person_rows(session, user_id, since=w.start, until=w.end,
-                              workspace_id=workspace_id, lens=lens)
-    prev_rows = await _person_rows(session, user_id, since=w.previous_start, until=w.start,
-                                   workspace_id=workspace_id, lens=lens)
-
-    p = _Person()
-    for r in rows:
-        p.add(r, w.bucket_of(r.day))
-    q = _Person()
-    for r in prev_rows:
-        q.add(r, None)
-
-    def _count(types: Sequence[str], person: _Person = p) -> int:
-        return int(sum(person.types.get(t, 0) for t in types))
-
+    # Their days, from the rollup: at most two windows of days × kinds.
+    day_rows = (await session.execute(
+        select(A.day, A.kind, func.sum(sc.n), func.min(sc.first), func.max(sc.last))
+        .where(A.day >= pfirst, A.day <= last, *where).group_by(A.day, A.kind)
+    )).all()
+    n_b = len(w.buckets)
+    by_kind = {k: [0] * n_b for k in KINDS}
+    actions_line, prev_line, signins_line = [0] * n_b, [0] * len(prev_w.buckets), [0] * n_b
+    idx = {b: i for i, b in enumerate(w.buckets)}
+    pidx = {b: i for i, b in enumerate(prev_w.buckets)}
+    kinds_total: Counter = Counter()
+    prev_kinds: Counter = Counter()
+    sections: Counter = Counter()
+    active_days: set[str] = set()
+    signin_days: set[str] = set()
+    prev_active: set[str] = set()
+    actions = prev_actions = signins = prev_signins = 0
     first_by_day: dict[str, str] = {}
     last_by_day: dict[str, str] = {}
-    for r in rows:
-        if r.type == SECTION or r.kind == "signin":
+    last_action: Optional[str] = None
+    for day, kind, n, f_at, l_at in day_rows:
+        n = int(n or 0)
+        if not n:
             continue
-        if r.day not in first_by_day or r.first < first_by_day[r.day]:
-            first_by_day[r.day] = r.first
-        if r.day not in last_by_day or r.last > last_by_day[r.day]:
-            last_by_day[r.day] = r.last
+        current = day >= first
+        if kind.startswith(SECTION_KIND_PREFIX):
+            if current:
+                sections[kind[len(SECTION_KIND_PREFIX):]] += n
+            continue
+        if not current:
+            prev_kinds[kind] += n
+            if kind == "signin":
+                prev_signins += n
+            else:
+                prev_actions += n
+                prev_active.add(day)
+                b = prev_w.bucket_of(day)
+                if b in pidx:
+                    prev_line[pidx[b]] += n
+            continue
+        b = w.bucket_of(day)
+        i = idx.get(b) if b else None
+        kinds_total[kind] += n
+        if i is not None:
+            by_kind[kind][i] += n
+        if kind == "signin":
+            signins += n
+            signin_days.add(day)
+            if i is not None:
+                signins_line[i] += n
+            continue
+        actions += n
+        active_days.add(day)
+        if i is not None:
+            actions_line[i] += n
+        if f_at and (day not in first_by_day or f_at < first_by_day[day]):
+            first_by_day[day] = f_at
+        if l_at and (day not in last_by_day or l_at > last_by_day[day]):
+            last_by_day[day] = l_at
+        if l_at and (last_action is None or l_at > last_action):
+            last_action = l_at
+
     firsts = [m for m in map(_minute_of_day, first_by_day.values()) if m is not None]
     lasts = [m for m in map(_minute_of_day, last_by_day.values()) if m is not None]
-    longest, current = _streaks(p.active_days, last_day=w.end[:10])
+    longest, current_streak = _streaks(active_days, last_day=last)
 
-    # Where their activity landed, and what they opened.
-    by_ws: Counter = Counter()
-    for r in rows:
-        if r.type != SECTION and r.kind != "signin" and r.workspace:
-            by_ws[r.workspace] += r.count
+    by_ws = Counter({ws: int(n or 0) for ws, n in (await session.execute(
+        select(A.workspace_id, func.sum(sc.n))
+        .where(A.day >= first, A.day <= last, _ACTION, *where,
+               A.workspace_id != people_index_repo.PLATFORM)
+        .group_by(A.workspace_id))).all()})
+
+    types, type_kinds, by_hour, opens = await _raw_person_details(
+        session, user_id, w, workspace_id=workspace_id, lens=lens)
+
     # Every workspace they belong to or were ever active in, with when they joined it and were
-    # first and last active there — from the index, so it reaches back past the window and
-    # past raw-event retention. The window's actions sit beside it.
+    # first and last active there — from the index, so it reaches past the window and past
+    # raw-event retention.
     timeline = await people_index_repo.timeline_for_person(session, user_id)
     platform_row = timeline.pop(people_index_repo.PLATFORM, {})
     joins = {ws: at for (_uid, ws), at in (await people_index_repo.join_candidates(
@@ -1010,45 +1027,57 @@ async def person_doc(
         })
     # Busiest in the window first, then most recently active.
     ws_rows.sort(key=lambda r: (r["actions"], r["lastActiveAt"] or ""), reverse=True)
-    opens: Counter = Counter()
-    for r in rows:
-        if r.type == VIEW_OPENED and r.subject:
-            opens[r.subject] += r.count
     top_views = [vid for vid, _ in opens.most_common(10)]
     view_meta = await _views(session, top_views)
 
-    type_kinds = {r.type: r.kind for r in rows}
-    traces = _count((TRACE_RUN, TRACE_EMPTY))
-    searches = _count((SEARCH_RUN, SEARCH_MISS))
+    def _count(names: Sequence[str]) -> int:
+        return int(sum(types.get(t, 0) for t in names))
+
+    # Opens, traces and searches from the rollup's kinds — the same measurement in both
+    # periods; the raw types only split a trace that found lineage from one that did not.
+    traces, searches = int(kinds_total.get("trace", 0)), int(kinds_total.get("search", 0))
+    full = lens == FULL
+    shown = [k for k in KINDS if not (k == "signin" and not full)]
     doc = {
         "generatedAt": now.isoformat(),
         "window": _window_doc(w),
         "scope": {"workspaceId": workspace_id, "lens": lens},
-        "coverage": {**await _coverage(session, w),
-                     "index": await people_index_repo.coverage(session, now=now)},
+        "coverage": await _coverage(session, now),
         "profile": {**who,
                     "firstActiveAt": platform_row.get("firstActiveAt") if not workspace_id
                     else (timeline.get(workspace_id) or {}).get("firstActiveAt")},
         "totals": {
-            "actions": _m(p.actions, q.actions),
-            "activeDays": _m(len(p.active_days), len(q.active_days)),
-            "signIns": _m(p.sign_ins, q.sign_ins) if lens == FULL else None,
-            "idleSignInDays": len(p.sign_in_days - p.active_days) if lens == FULL else None,
-            "viewsOpened": _m(_count((VIEW_OPENED,)), _count((VIEW_OPENED,), q)),
+            "actions": _m(actions, prev_actions),
+            "activeDays": _m(len(active_days), len(prev_active)),
+            "signIns": _m(signins, prev_signins) if full else None,
+            "idleSignInDays": len(signin_days - active_days) if full else None,
+            "viewsOpened": _m(int(kinds_total.get("browse", 0)), int(prev_kinds.get("browse", 0))),
             "distinctViews": len(opens),
-            "traces": _m(traces, _count((TRACE_RUN, TRACE_EMPTY), q)),
-            "traceEmptyRate": round(_count((TRACE_EMPTY,)) / traces, 3) if traces else None,
-            "searches": _m(searches, _count((SEARCH_RUN, SEARCH_MISS), q)),
-            "searchMissRate": round(_count((SEARCH_MISS,)) / searches, 3) if searches else None,
+            "traces": _m(traces, int(prev_kinds.get("trace", 0))),
+            "traceEmptyRate": (round(_count((TRACE_EMPTY,)) / _count((TRACE_RUN, TRACE_EMPTY)), 3)
+                               if _count((TRACE_RUN, TRACE_EMPTY)) else None),
+            "searches": _m(searches, int(prev_kinds.get("search", 0))),
+            "searchMissRate": (round(_count((SEARCH_MISS,)) / _count((SEARCH_RUN, SEARCH_MISS)), 3)
+                               if _count((SEARCH_RUN, SEARCH_MISS)) else None),
             "longestStreak": longest,
-            "currentStreak": current,
-            "lastActiveAt": p.last,
+            "currentStreak": current_streak,
+            "lastActiveAt": last_action,
         },
-        "series": _series(rows, w, lens=lens),
-        "kinds": _kind_list(p.kinds, lens=lens),
-        "types": _type_list(p.types, type_kinds),
-        "punchcard": _punch(rows),
-        "sections": _sections(rows),
+        "series": {
+            "buckets": list(w.buckets),
+            "byKind": [{"kind": k, "values": by_kind[k]} for k in shown],
+            "activePeople": [1 if v else 0 for v in actions_line],
+            "signedIn": [1 if v else 0 for v in signins_line] if full else None,
+            # Their activity line, the period before it index-aligned for the ghost, and their
+            # sign-ins beside it.
+            "actions": actions_line,
+            "previousActions": prev_line,
+            "signIns": signins_line if full else None,
+        },
+        "kinds": [{"kind": k, "count": int(kinds_total.get(k, 0))} for k in shown],
+        "types": _type_list(types, type_kinds),
+        "punchcard": _punchcard(by_hour),
+        "sections": [{"section": s, "count": int(n), "people": 1} for s, n in sections.most_common()],
         "typicalDay": {
             "firstMinute": int(median(firsts)) if firsts else None,
             "lastMinute": int(median(lasts)) if lasts else None,
@@ -1060,9 +1089,48 @@ async def person_doc(
              "workspaceId": None, "visibility": None, "createdBy": None, "deleted": True})}
             for vid in top_views
         ],
-        "signIns": (await _sign_in_detail(session, user_id, w) if lens == FULL else None),
+        "signIns": (await _sign_in_detail(session, user_id, w) if full else None),
     }
     return doc
+
+
+async def person_calendar(
+    session: AsyncSession, user_id: str, *, now: Optional[datetime] = None,
+    workspace_id: Optional[str] = None, lens: str = FULL,
+) -> dict:
+    """The last year, a day at a time, from the rollup — independent of the range picker, so
+    the calendar on a person's page always shows the whole year around the selected window."""
+    now = now or datetime.now(timezone.utc)
+    last = now.date()
+    first = last - timedelta(days=CALENDAR_DAYS - 1)
+    sc = _Scope(lens, workspace_id)
+    actions: Counter = Counter()
+    sign_ins: Counter = Counter()
+    for day, acts, sins in (await session.execute(
+        select(A.day, func.sum(case((_ACTION, sc.n), else_=0)),
+               func.sum(case((_SIGNIN, sc.n), else_=0)))
+        .where(A.day >= first.isoformat(), A.day <= last.isoformat(),
+               *_person_where(user_id, workspace_id, lens))
+        .group_by(A.day)
+    )).all():
+        actions[day] += int(acts or 0)
+        sign_ins[day] += int(sins or 0)
+    days = [(first + timedelta(days=i)).isoformat() for i in range(CALENDAR_DAYS)]
+    return {
+        "generatedAt": now.isoformat(),
+        "scope": {"workspaceId": workspace_id, "lens": lens},
+        "days": days,
+        "actions": [int(actions.get(d, 0)) for d in days],
+        "signIns": [int(sign_ins.get(d, 0)) for d in days] if lens == FULL else None,
+    }
+
+
+async def profile(session: AsyncSession, user_id: str) -> Optional[dict]:
+    users = await _users(session, [user_id])
+    u = users.get(user_id)
+    if u is None:
+        return None
+    return {"userId": user_id, **u}
 
 
 def _method(payload: dict) -> str:
@@ -1108,38 +1176,11 @@ async def _sign_in_detail(session: AsyncSession, user_id: str, w: Window) -> dic
     }
 
 
-async def person_calendar(
-    session: AsyncSession, user_id: str, *, now: Optional[datetime] = None,
-    workspace_id: Optional[str] = None, lens: str = FULL,
-) -> dict:
-    """The last year, a day at a time — independent of the range picker, so the calendar on a
-    person's page always shows the whole year around whatever window is selected."""
-    now = now or datetime.now(timezone.utc)
-    last = now.date()
-    first = last - timedelta(days=CALENDAR_DAYS - 1)
-    since = datetime.combine(first, datetime.min.time(), tzinfo=timezone.utc).isoformat()
-    rows = await _person_rows(session, user_id, since=since, until=None,
-                              workspace_id=workspace_id, lens=lens)
-    actions: Counter = Counter()
-    sign_ins: Counter = Counter()
-    for r in rows:
-        if r.type == SECTION:
-            continue
-        (sign_ins if r.kind == "signin" else actions)[r.day] += r.count
-    days = [(first + timedelta(days=i)).isoformat() for i in range(CALENDAR_DAYS)]
-    return {
-        "generatedAt": now.isoformat(),
-        "scope": {"workspaceId": workspace_id, "lens": lens},
-        "days": days,
-        "actions": [int(actions.get(d, 0)) for d in days],
-        "signIns": [int(sign_ins.get(d, 0)) for d in days] if lens == FULL else None,
-    }
-
-
 # ── One person's events ───────────────────────────────────────────────
 
 #: What a feed can be filtered to: the activity kinds, and section moves.
 FEED_KINDS: tuple[str, ...] = KINDS + ("section",)
+
 
 _BUILD_PREFIXES = ("ontology.", "workspace.versioning.", "visualization.")
 
@@ -1376,9 +1417,10 @@ def sessions_of(events: Sequence[dict], *, gap_minutes: int = SESSION_GAP_MINUTE
 
 _ROSTER_FIELDS = (
     "userId", "name", "deleted", "actions", "previous", "changePct", "activeDays", "signIns",
-    "signInDays", "idleSignInDays", "lastActiveAt", "lastSignInAt", "kinds", "topKind",
-    "values", "joinedInWindow", "joinedAt", "firstActiveAt", "lastActiveEverAt",
+    "signInDays", "idleSignInDays", "lastActiveAt", "lastSignInAt", "topKind", "joinedInWindow",
 )
+#: What page enrichment adds to a roster row. Email is added only for privileged readers.
+PAGE_FIELDS = ("line", "joinedAt", "firstActiveAt", "lastActiveEverAt")
 _QUIET_FIELDS = ("userId", "name", "joinedAt", "lastLoginAt", "lastActiveAt")
 
 
@@ -1391,9 +1433,7 @@ def _with_email(row: dict, src: dict, viewer) -> dict:
 def redact_people(doc: dict, viewer) -> dict:
     out = {k: doc[k] for k in ("generatedAt", "window", "scope", "coverage", "totals",
                                "series", "kinds", "types", "punchcard", "sections", "insights")}
-    out["people"] = [
-        _with_email({k: p.get(k) for k in _ROSTER_FIELDS}, p, viewer) for p in doc["people"]
-    ]
+    out["people"] = [{k: p.get(k) for k in _ROSTER_FIELDS} for p in doc["people"]]
     out["quiet"] = {
         "count": doc["quiet"]["count"],
         "people": [

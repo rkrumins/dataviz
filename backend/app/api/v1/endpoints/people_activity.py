@@ -3,7 +3,9 @@
 Mounted at ``/api/v1/admin/analytics/people``:
 
 * ``GET /`` — everyone's activity in a scope (the platform, or one workspace): aggregates,
-  insights and one page of the roster.
+  insights and one page of the roster, each person on it with their activity line.
+* ``GET /lines`` — the activity lines of up to 24 people, to compare them.
+* ``GET /days/{day}`` — everyone active on one day in the scope.
 * ``GET /{user_id}`` — one person over the window. ``me`` is the caller.
 * ``GET /{user_id}/calendar`` — their last year, a day at a time.
 * ``GET /{user_id}/days/{day}`` — every event of one UTC day, split into sessions.
@@ -151,12 +153,78 @@ async def people_roster(
     people = doc["people"]
     if q:
         needle = q.strip().lower()
-        people = [p for p in people if needle in (p.get("name") or "").lower()
-                  or needle in (p.get("email") or "").lower()]
+        people = [p for p in people if needle in (p.get("name") or "").lower()]
     ranked = _sort(people, sort, order)
-    doc["people"] = ranked[offset:offset + limit]
+    # The cached summary carries no series, dates or addresses — at ten thousand people they
+    # would be most of it. The page's own people get theirs here, a page at a time.
+    _epoch, build_args = _at_epoch(args)
+    doc["people"] = await repo.enrich_page(
+        session, ranked[offset:offset + limit], workspace_id=access.workspace_id,
+        lens=access.lens, emails=reader.privileged, **build_args)
     doc["page"] = {"offset": offset, "limit": limit, "total": len(ranked)}
     return doc
+
+
+#: A compare chart's people, or a grid's — never everyone.
+_LINES_MAX = 24
+
+
+@router.get("/lines")
+async def people_lines(
+    ids: str = Query(..., description=f"Comma-separated user ids, at most {_LINES_MAX}."),
+    days: int = _DAYS,
+    date_from: Optional[str] = _FROM,
+    date_to: Optional[str] = _TO,
+    workspace: Optional[str] = _WORKSPACE,
+    reader: PeopleReader = Depends(resolve_people_reader),
+    session: AsyncSession = Depends(get_readonly_db_session),
+) -> dict[str, Any]:
+    """The activity lines of a few people, on one axis, to compare them.
+
+    The same access as the roster. A workspace admin is answered only about people in their
+    workspace — its members, or anyone who did something there in the window — so this cannot
+    be used to learn who else has an account."""
+    access = roster_access(reader, workspace)
+    wanted = [i for i in dict.fromkeys(x.strip() for x in ids.split(",")) if i]
+    if not wanted or len(wanted) > _LINES_MAX:
+        raise HTTPException(status_code=422, detail=f"Ask for 1 to {_LINES_MAX} people.")
+    await _workspace_exists(session, workspace)
+    args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
+    try:
+        drawn = await repo.lines(session, wanted, workspace_id=access.workspace_id,
+                                 lens=access.lens, **build_args)
+    except analytics_repo.InvalidWindow as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if access.lens == repo.WORKSPACE:
+        members = (await analytics_repo.members_by_workspace(
+            session, now=epoch, workspace_id=access.workspace_id)).get(access.workspace_id, set())
+        drawn["lines"] = {uid: line for uid, line in drawn["lines"].items()
+                          if uid in members or any(line)}
+    names = await repo._users(session, list(drawn["lines"]))
+    drawn["names"] = {uid: names.get(uid, {}).get("name") or uid for uid in drawn["lines"]}
+    drawn["scope"] = {"workspaceId": access.workspace_id, "lens": access.lens}
+    return drawn
+
+
+@router.get("/days/{day}")
+async def people_on_day(
+    day: str = Path(..., description="A UTC day, YYYY-MM-DD."),
+    workspace: Optional[str] = _WORKSPACE,
+    limit: int = Query(200, ge=1, le=500),
+    reader: PeopleReader = Depends(resolve_people_reader),
+    session: AsyncSession = Depends(get_readonly_db_session),
+) -> dict[str, Any]:
+    """Everyone who did something on one day in the scope, most active first — exactly, from
+    that day's rollup rows."""
+    access = roster_access(reader, workspace)
+    try:
+        date.fromisoformat(day)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Days are ISO 'YYYY-MM-DD'.") from exc
+    await _workspace_exists(session, workspace)
+    return await repo.scope_day(session, day, workspace_id=access.workspace_id,
+                                lens=access.lens, limit=limit)
 
 
 async def _reach(

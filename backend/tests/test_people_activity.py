@@ -18,6 +18,8 @@ from backend.app.db.models import (
     GroupORM,
     OutboxEventORM,
     PeopleIndexCursorORM,
+    PeopleIndexDayORM,
+    PersonActivityDailyORM,
     PersonWorkspaceActivityORM,
     ProductEventORM,
     RoleBindingORM,
@@ -62,7 +64,7 @@ def _ledger(eid: str, event_type: str, at: str, *, actor=None, subject=None, ws=
     )
 
 
-async def _seed(session, now: datetime = FIXED) -> None:
+async def _seed(session, now: datetime = FIXED, *, index_now: bool = True) -> None:
     """Two workspaces, six people, one service account.
 
     * ann — ws_a by direct grant; opens, traces, searches, edits; signs in.
@@ -159,6 +161,10 @@ async def _seed(session, now: datetime = FIXED) -> None:
                 subject="usr_ann", ws="ws_a", category="access", audience="workspace"),
     ])
     await session.commit()
+    if index_now:
+        # Everything a roster reads comes from the rollup the indexer keeps.
+        await indexer.catch_up(session, now=now)
+        await session.commit()
 
 
 def _person(doc: dict, uid: str) -> dict:
@@ -177,8 +183,10 @@ async def test_roster_unions_three_stores_without_double_counting(db_session):
     # not the section move, not the sign-in.
     assert ann["actions"] == 5
     assert ann["signIns"] == 1
-    assert ann["kinds"] == {"browse": 2, "trace": 1, "search": 1, "build": 1, "signin": 1}
+    assert ann["topKind"] == "browse"
     assert ann["previous"] == 1 and ann["changePct"] == 400.0
+    # The cached summary carries no series, dates or addresses: those come per page.
+    assert not {"line", "values", "email", "joinedAt"} & set(ann)
     assert ann["activeDays"] == 2
 
     dan = _person(doc, "usr_dan")
@@ -213,8 +221,9 @@ async def test_full_lens_workspace_scope_carries_members_sign_ins(db_session):
     await _seed(db_session)
     doc = await repo.people_doc(db_session, days=7, now=FIXED, workspace_id="ws_a")
     assert _person(doc, "usr_dan")["signIns"] == 1
-    # The trace has no workspace until the indexer places it.
-    assert _person(doc, "usr_ann")["kinds"].get("trace") is None
+    # In ws_a: the open, the inferred trace and the edit — not the search two hours later,
+    # which nothing places in a workspace.
+    assert _person(doc, "usr_ann")["actions"] == 3
 
 
 async def test_quiet_members_and_joins(db_session):
@@ -226,10 +235,15 @@ async def test_quiet_members_and_joins(db_session):
     assert [q["userId"] for q in quiet["people"]] == ["usr_dan"]
     # Never a platform presence for a workspace admin.
     assert quiet["people"][0]["lastLoginAt"] is None
+    assert quiet["people"][0]["joinedAt"] == _at(FIXED, 40)
+    page = await repo.enrich_page(db_session, doc["people"], days=7, now=FIXED,
+                                  workspace_id="ws_a", lens=repo.WORKSPACE)
+    joined = {p["userId"]: p["joinedAt"] for p in page}
     # Joined: the later of the group's grant and joining the group.
-    assert _person(doc, "usr_bob")["joinedAt"] == _at(FIXED, 20)
-    # Read live, before any indexing: the ledger's member event predates today's grant.
-    assert _person(doc, "usr_ann")["joinedAt"] == _at(FIXED, 90)
+    assert joined["usr_bob"] == _at(FIXED, 20)
+    # The ledger's member event predates today's grant.
+    assert joined["usr_ann"] == _at(FIXED, 90)
+    assert all("email" not in p for p in page)
 
 
 # ── The index: backfill, inference, idempotence ───────────────────────
@@ -247,7 +261,7 @@ async def test_indexer_backfills_attribution_and_infers_traces(db_session):
     assert ws["pev_cat"] == "ws_b"
 
     doc = await repo.people_doc(db_session, days=7, now=FIXED, workspace_id="ws_a")
-    assert _person(doc, "usr_ann")["kinds"]["trace"] == 1
+    assert {k["kind"]: k["count"] for k in doc["kinds"]}["trace"] == 1
 
 
 async def test_indexer_rolls_up_joins_and_first_last_activity(db_session):
@@ -271,7 +285,8 @@ async def test_indexer_rolls_up_joins_and_first_last_activity(db_session):
     assert ("usr_ann", "ws_b") not in rows
 
     cov = await index.coverage(db_session, now=FIXED)
-    assert cov["running"] and cov["activityThrough"] is not None
+    assert cov["running"] and not cov["backfilling"] and cov["progress"] == 1.0
+    assert cov["completeFrom"] == cov["historyFrom"] == _at(FIXED, 90)[:10]
 
 
 async def test_indexer_is_idempotent_and_resumes(db_session):
@@ -282,15 +297,24 @@ async def test_indexer_is_idempotent_and_resumes(db_session):
         for r in (await db_session.execute(select(PersonWorkspaceActivityORM))).scalars())
     assert await indexer.catch_up(db_session, now=FIXED) == 0
 
-    # Forget the cursors: a full re-run over the same history changes nothing.
-    for c in (await db_session.execute(select(PeopleIndexCursorORM))).scalars():
-        await db_session.delete(c)
+    rollup = sorted(
+        (r.day, r.user_id, r.workspace_id, r.kind, r.n, r.n_ws, r.first_at, r.last_ws_at)
+        for r in (await db_session.execute(select(PersonActivityDailyORM))).scalars())
+    assert rollup, "the seed should have been indexed"
+
+    # Forget everything the indexer knows: a full re-run over the same history changes nothing.
+    for model in (PeopleIndexCursorORM, PeopleIndexDayORM):
+        for c in (await db_session.execute(select(model))).scalars():
+            await db_session.delete(c)
     await db_session.flush()
     await indexer.catch_up(db_session, now=FIXED)
     after = sorted(
         (r.user_id, r.workspace_id, r.joined_at, r.first_active_at, r.last_active_at)
         for r in (await db_session.execute(select(PersonWorkspaceActivityORM))).scalars())
     assert before == after
+    assert rollup == sorted(
+        (r.day, r.user_id, r.workspace_id, r.kind, r.n, r.n_ws, r.first_at, r.last_ws_at)
+        for r in (await db_session.execute(select(PersonActivityDailyORM))).scalars())
 
 
 async def test_indexer_picks_up_new_activity_incrementally(db_session):
@@ -382,33 +406,137 @@ async def test_feed_filters_by_kind(db_session):
     assert [e["type"] for e in events] == ["lineage.trace", "user.logged_in"]
 
 
-async def test_roster_query_count_does_not_grow_with_people(db_session):
-    """The roster is a fixed number of grouped reads, whatever the headcount."""
-    await _seed(db_session)
+_RAW_TABLES = ("product_events", "view_activity_log", "auth_audit_log")
+
+
+def _reads_raw_events(sql: str) -> bool:
+    """A statement that scans or groups an event table. The coverage notes' single-row
+    ``min``/``max`` index seeks (newest ledger row, first recorded day) are allowed: they cost
+    the same at a hundred events as at a hundred million."""
+    if not any(f" {t}" in sql or f"{t}." in sql for t in _RAW_TABLES):
+        return False
+    seek = ("max(" in sql or "min(" in sql) and "GROUP BY" not in sql.upper()
+    return not seek
+
+
+async def _statements_during(db_session, build) -> list[str]:
     statements: list[str] = []
 
-    def _count(*args, **kwargs):
-        statements.append(args[2] if len(args) > 2 else "")
+    def _record(conn, cursor, statement, *args, **kwargs):
+        statements.append(statement)
 
     engine = db_session.get_bind()
-    event.listen(engine, "before_cursor_execute", _count)
+    event.listen(engine, "before_cursor_execute", _record)
     try:
-        await repo.people_doc(db_session, days=7, now=FIXED)
-        small = len(statements)
-        statements.clear()
-        for i in range(40):
-            db_session.add(UserORM(id=f"usr_x{i}", email=f"x{i}@corp.io", password_hash="x",
-                                   first_name="X", last_name=str(i), status="active",
-                                   created_at=_at(FIXED, 50)))
-            db_session.add(ProductEventORM(id=f"pev_x{i}", event_type="view.opened",
-                                           actor_id=f"usr_x{i}", subject_id="view_a1",
-                                           created_at=_at(FIXED, 1, 15, 0)))
-        await db_session.flush()
-        statements.clear()
-        await repo.people_doc(db_session, days=7, now=FIXED)
-        assert len(statements) == small
+        await build()
     finally:
-        event.remove(engine, "before_cursor_execute", _count)
+        event.remove(engine, "before_cursor_execute", _record)
+    return statements
+
+
+async def test_roster_cost_grows_with_neither_people_nor_events(db_session):
+    """The roster is a fixed set of grouped reads of the rollup: ten times the events, or
+    forty more people, change neither how many statements run nor which tables they read."""
+    await _seed(db_session)
+    small = await _statements_during(db_session, lambda: repo.people_doc(db_session, days=7, now=FIXED))
+    for i in range(40):
+        db_session.add(UserORM(id=f"usr_x{i}", email=f"x{i}@corp.io", password_hash="x",
+                               first_name="X", last_name=str(i), status="active",
+                               created_at=_at(FIXED, 50)))
+        for j in range(10):
+            db_session.add(ProductEventORM(id=f"pev_x{i}_{j}", event_type="view.opened",
+                                           actor_id=f"usr_x{i}", subject_id="view_a1",
+                                           created_at=_at(FIXED, 1, 15, j)))
+    await db_session.flush()
+    await index.index_day(db_session, _at(FIXED, 1)[:10], now=FIXED)
+    analytics_cache.clear()
+    big = await _statements_during(db_session, lambda: repo.people_doc(db_session, days=7, now=FIXED))
+    doc = await repo.people_doc(db_session, days=7, now=FIXED)
+    assert len(doc["people"]) == 45
+    assert len(big) == len(small)
+    for sql in big:
+        assert not _reads_raw_events(sql), sql
+
+
+async def test_lines_and_the_day_panel_read_only_the_rollup(db_session):
+    await _seed(db_session)
+    day = _at(FIXED, 1)[:10]
+    for build in (
+        lambda: repo.lines(db_session, ["usr_ann", "usr_bob"], days=7, now=FIXED),
+        lambda: repo.scope_day(db_session, day),
+    ):
+        for sql in await _statements_during(db_session, build):
+            assert not _reads_raw_events(sql), sql
+
+
+async def test_rollup_agrees_with_the_raw_events(db_session):
+    """The correctness anchor: every person's actions over the window, counted straight from
+    the three stores by the same rules, equal what the roster reports from the rollup."""
+    await _seed(db_session)
+    doc = await repo.people_doc(db_session, days=7, now=FIXED)
+    first, last = doc["window"]["buckets"][0], doc["window"]["end"][:10]
+    since, until = index.day_bounds(first)[0], index.day_bounds(last)[1]
+    raw: dict[str, int] = {}
+    for actor, t in (await db_session.execute(select(ProductEventORM.actor_id, ProductEventORM.event_type)
+                     .where(ProductEventORM.created_at >= since, ProductEventORM.created_at < until))).all():
+        if t in repo.USAGE_KINDS and not actor.startswith("svc_"):
+            raw[actor] = raw.get(actor, 0) + 1
+    for (actor,) in (await db_session.execute(select(ViewActivityLogORM.actor)
+                     .where(ViewActivityLogORM.created_at >= since, ViewActivityLogORM.created_at < until))).all():
+        raw[actor] = raw.get(actor, 0) + 1
+    for actor, t, kind in (await db_session.execute(
+            select(AuthAuditLogORM.actor_id, AuthAuditLogORM.event_type, AuthAuditLogORM.actor_kind)
+            .where(AuthAuditLogORM.occurred_at >= since, AuthAuditLogORM.occurred_at < until))).all():
+        if kind == "user" and actor and t != repo.SIGN_IN and not t.startswith("visualization.view."):
+            raw[actor] = raw.get(actor, 0) + 1
+    assert {p["userId"]: p["actions"] for p in doc["people"] if p["actions"]} == raw
+
+
+async def test_a_late_ledger_row_recomputes_its_day(db_session):
+    await _seed(db_session)
+    day = _at(FIXED, 5)[:10]
+    before = await repo.people_doc(db_session, days=7, now=FIXED)
+    assert "usr_eve" in {p["userId"] for p in before["people"]}
+    # The relay records, a minute from now, something eve did five days ago.
+    late = AuthAuditLogORM(
+        id="aud_late", source_event_id="src_late", event_type="aggregation.job.started",
+        payload="{}", occurred_at=_at(FIXED, 5, 9, 0),
+        recorded_at=(FIXED + timedelta(minutes=1)).isoformat(),
+        category="operations", audience="workspace", actor_id="usr_eve", actor_kind="user",
+        workspace_id="ws_b")
+    db_session.add(late)
+    await db_session.flush()
+    later = FIXED + timedelta(minutes=10)
+    await indexer.catch_up(db_session, now=later)
+    rows = (await db_session.execute(select(PersonActivityDailyORM).where(
+        PersonActivityDailyORM.day == day, PersonActivityDailyORM.user_id == "usr_eve"))).scalars().all()
+    assert [(r.workspace_id, r.kind, r.n, r.n_ws) for r in rows] == [("ws_b", "operate", 1, 1)]
+    assert (await db_session.get(PeopleIndexDayORM, day)).dirty is False
+
+
+async def test_days_past_raw_retention_are_never_recomputed(db_session, monkeypatch):
+    from backend.app.services import product_event_gc
+    monkeypatch.setattr(product_event_gc, "retention_days", lambda: 365)
+    db_session.add(ProductEventORM(id="pev_ancient", event_type="view.opened", actor_id="usr_ann",
+                                   subject_id="view_a1", created_at=_at(FIXED, 380, 10, 0)))
+    await _seed(db_session)
+    assert await db_session.get(PeopleIndexDayORM, _at(FIXED, 380)[:10]) is None
+    assert await db_session.get(PeopleIndexDayORM, _at(FIXED, 364)[:10]) is not None
+
+
+async def test_recomputing_a_day_changes_nothing(db_session):
+    await _seed(db_session)
+    day = _at(FIXED, 2)[:10]
+
+    async def snapshot():
+        return sorted(
+            (r.user_id, r.workspace_id, r.kind, r.n, r.n_ws, r.first_at, r.last_at)
+            for r in (await db_session.execute(select(PersonActivityDailyORM)
+                      .where(PersonActivityDailyORM.day == day))).scalars())
+    once = await snapshot()
+    await index.index_day(db_session, day, now=FIXED)
+    await index.index_day(db_session, day, now=FIXED)
+    assert await snapshot() == once
 
 
 # ── The API: who may see whom ─────────────────────────────────────────
@@ -450,6 +578,42 @@ async def test_privileged_reader_sees_everyone(test_client, db_session):
     assert [p["userId"] for p in body["people"]][0] == "usr_ann"
     named = await test_client.get(PEOPLE, params={"days": 7, "q": "bob"})
     assert [p["userId"] for p in named.json()["people"]] == ["usr_bob"]
+    # Every person on the page has their activity line, one value per period.
+    ann = body["people"][0]
+    assert len(ann["line"]) == len(body["window"]["buckets"]) and sum(ann["line"]) == ann["actions"]
+    assert ann["joinedAt"] and ann["firstActiveAt"]
+
+
+async def test_lines_endpoint(test_client, db_session, restore_identity):
+    await _seed(db_session, datetime.now(timezone.utc))
+    r = await test_client.get(f"{PEOPLE}/lines", params={"ids": "usr_ann,usr_bob", "days": 7})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body["lines"]) == {"usr_ann", "usr_bob"}
+    assert body["names"]["usr_ann"] == "Ann Tester"
+    assert sum(body["lines"]["usr_ann"]) == 5
+    too_many = ",".join(f"usr_{i}" for i in range(25))
+    assert (await test_client.get(f"{PEOPLE}/lines", params={"ids": too_many})).status_code == 422
+    # A workspace admin is told about their workspace's people only: eve is in no workspace.
+    _as(WS_ADMIN, "usr_ann")
+    scoped = await test_client.get(f"{PEOPLE}/lines", params={
+        "ids": "usr_ann,usr_eve,usr_dan", "days": 7, "workspace": "ws_a"})
+    assert scoped.status_code == 200, scoped.text
+    assert set(scoped.json()["lines"]) == {"usr_ann", "usr_dan"}
+    assert (await test_client.get(f"{PEOPLE}/lines", params={"ids": "usr_ann"})).status_code == 403
+
+
+async def test_day_panel_endpoint(test_client, db_session):
+    now = datetime.now(timezone.utc)
+    await _seed(db_session, now)
+    day = (now - timedelta(days=1)).date().isoformat()
+    r = await test_client.get(f"{PEOPLE}/days/{day}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # bob opened Atlas, cat built and ran a job, ann opened a private view as an admin.
+    assert body["active"] == 3 and body["signedIn"] == 1
+    assert [p["userId"] for p in body["people"]] == ["usr_cat", "usr_ann", "usr_bob"]
+    assert (await test_client.get(f"{PEOPLE}/days/nope")).status_code == 422
 
 
 @pytest.mark.parametrize("params,expected", [

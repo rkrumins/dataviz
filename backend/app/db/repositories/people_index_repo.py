@@ -1,44 +1,48 @@
-"""People analytics' index — built from history, then kept up.
+"""People analytics' index — built from history, then kept current, one UTC day at a time.
 
-Two jobs, both backfills on their first run and incremental after that, both resumable from a
-cursor (``people_index_cursors``) and both safe to run twice:
+The People roster must cost people × days, not events: at thousands of people and a year's
+window, raw events are tens of millions of rows. So the indexer folds each day's raw events —
+``product_events``, ``view_activity_log`` and the activity ledger — into a rollup of one row
+per (day, person, workspace, kind) (``person_activity_daily``), plus the same day without the
+person, by hour and by event type (``people_daily_facets``). Every request-path read of a
+roster comes from there.
 
-1. **Attribute.** ``product_events.workspace_id`` for the usage signals recorded without one,
-   which is every one recorded before the client started sending it:
+THE UNIT OF WORK IS A DAY (:func:`index_day`):
 
-   * a view open belongs to its view's workspace — a fact, looked up once per view;
-   * a trace, a search or an export belongs to the workspace of the view the same person
-     opened LAST, if that was within ``INFER_WINDOW`` — an inference, and the same one a
-     person reading the log would make: traces and searches happen on the canvas of a view
-     someone just opened. A signal with no such open stays unattributed rather than guessed.
+1. Give the day's usage signals their workspace. A view open belongs to its view's workspace —
+   a fact. A trace, a search or an export belongs to the workspace of the view the same person
+   opened last, if within ``INFER_WINDOW`` — an inference, the one a person reading the log
+   would make. A signal with no such open stays unattributed rather than guessed.
+2. Fold the day's raw events into rollup rows, in memory: one grouped read per store.
+3. Replace the day's rows: delete, then insert. A day is always the exact fold of its events,
+   never an increment that could drift, so computing it twice changes nothing.
+4. Fold the day into ``person_workspace_activity`` (joined / first / last active), whose
+   columns only ever move one way, so that is idempotent too.
 
-   Rows are walked oldest first in keyset order, so a restart resumes where it stopped and
-   the cursor says how far history has been attributed.
+WHICH DAY NEXT (:func:`step`): joins; then today (every minute) and yesterday (until it has
+closed); then days a late ledger row made dirty; then history, newest first — so the ranges
+people open first are complete first; then retention. Days older than raw retention are never
+recomputed: the raw rows are gone, and recomputing would empty them.
 
-2. **Roll up.** ``person_workspace_activity``: when each person joined each workspace, and
-   was first and last active in it (and on the platform as a whole, ``workspace_id = ''``).
-   Read from all three activity stores in time slices; joins from role bindings, group
-   membership and the ledger's member events. Every column only moves one way — earlier for
-   ``joined_at``/``first_active_at``, later for ``last_active_at`` — so each write is a
-   min/max upsert, and a slice processed twice changes nothing.
-
-Rows newer than ``LAG`` are left for the next pass, so a transaction still committing when a
-slice is read is not skipped. Every read is one table; ids are stitched in Python.
+Every read is one table; ids are stitched in Python.
 """
 from __future__ import annotations
 
 from bisect import bisect_right
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Optional
+from datetime import date, datetime, time as dtime, timedelta, timezone
+from typing import Iterable, Optional
 
-from sqlalchemy import and_, bindparam, case, func, or_, select, update
+from sqlalchemy import case, delete, func, insert as sa_insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
     AuthAuditLogORM,
     GroupMemberORM,
+    PeopleDailyFacetORM,
     PeopleIndexCursorORM,
+    PeopleIndexDayORM,
+    PersonActivityDailyORM,
     PersonWorkspaceActivityORM,
     ProductEventORM,
     RoleBindingORM,
@@ -55,18 +59,31 @@ from backend.app.db.repositories.analytics_repo import (
     VIEW_OPENED,
     _chunked,
 )
+from backend.app.db.repositories.people_kinds import (
+    ACTION_KINDS,
+    SECTION,
+    SECTION_KIND_PREFIX,
+    SIGN_IN,
+    USAGE_KINDS,
+    _ADMIN_VIEWED,
+    _MIRRORED_LEDGER_PREFIX,
+    edit_type,
+    kind_of,
+    ledger_kind,
+    section_kind,
+)
 from backend.app.services.activity import catalogue
 from backend.common.service_accounts import is_person, is_service_account
 
-#: ``person_workspace_activity.workspace_id`` for the platform as a whole.
+#: ``workspace_id`` for no workspace — the platform as a whole in ``person_workspace_activity``,
+#: and events that happened in no workspace in the rollup.
 PLATFORM = ""
 
-CURSOR_ATTRIBUTE = "attribute"
-CURSOR_USAGE = "rollup.usage"
-CURSOR_EDITS = "rollup.edits"
-CURSOR_LEDGER = "rollup.ledger"
 CURSOR_JOINS = "joins"
-ROLLUP_CURSORS = (CURSOR_USAGE, CURSOR_EDITS, CURSOR_LEDGER)
+#: How far the ledger has been read for rows recorded after their day was computed.
+CURSOR_LEDGER = "ledger.recorded"
+#: The oldest day computed contiguously back from yesterday; ``started_at`` is history's start.
+CURSOR_BACKFILL = "backfill"
 
 #: Left for the next pass: long enough for any request's transaction to have committed.
 LAG = timedelta(minutes=2)
@@ -74,29 +91,16 @@ LAG = timedelta(minutes=2)
 #: How long after opening a view a trace or search is taken to have happened in it.
 INFER_WINDOW = timedelta(minutes=30)
 
-ATTRIBUTE_BATCH = 5_000
+#: How stale today's rollup may get before the indexer computes it again.
+HOT_REFRESH = timedelta(seconds=60)
 
-#: One rollup step reads this much history from each source. A day of a busy platform is a
-#: few hundred thousand rows grouped to a few thousand, which keeps a step to well under a
-#: second and its transaction short.
-ROLLUP_SLICE = timedelta(days=1)
+#: Rollup days older than this are purged: no window or calendar reaches past a year.
+ROLLUP_KEEP_DAYS = 400
 
-_BY_VIEW = (VIEW_OPENED,)
 _INFERRED = (TRACE_RUN, TRACE_EMPTY, SEARCH_RUN, SEARCH_MISS, GRAPH_EXPORT)
-
-#: The usage signals that count as someone being active. Docs and tours count too — they
-#: are someone using the product — but section moves are presence, not activity.
-_ACTIVE_USAGE = (
-    VIEW_OPENED, TRACE_RUN, TRACE_EMPTY, SEARCH_RUN, SEARCH_MISS, GRAPH_EXPORT,
-    "docs.feedback", "docs.search_miss", "tour.completed", "tour.skipped", "onboarding.step",
-)
-
-_SIGN_IN = "user.logged_in"
-_MIRRORED = "visualization.view."
-_ADMIN_VIEWED = "admin_viewed"
 _MEMBER_EVENTS = ("rbac.workspace.member_bound", "rbac.workspace.member_joined")
-
 _UPSERT_CHUNK = 500
+_INSERT_CHUNK = 1_000
 
 
 def _iso(at: datetime) -> str:
@@ -119,6 +123,17 @@ def _insert(session: AsyncSession):
     else:
         from sqlalchemy.dialects.postgresql import insert
     return insert
+
+
+def day_bounds(day: str) -> tuple[str, str]:
+    """``[since, until)`` instants of one UTC day, in the stores' own ISO form."""
+    d = date.fromisoformat(day)
+    since = datetime.combine(d, dtime.min, tzinfo=timezone.utc)
+    return since.isoformat(), (since + timedelta(days=1)).isoformat()
+
+
+def _shift(day: str, days: int) -> str:
+    return (date.fromisoformat(day) + timedelta(days=days)).isoformat()
 
 
 # ── Cursors ───────────────────────────────────────────────────────────
@@ -204,9 +219,6 @@ async def upsert(session: AsyncSession, rows: Iterable[dict]) -> int:
     return len(ordered)
 
 
-# ── 1. Attribute ──────────────────────────────────────────────────────
-
-
 async def _view_homes(session: AsyncSession, view_ids: Iterable[str]) -> dict[str, str]:
     """``{view_id: workspace_id}``, deleted views included — their opens happened."""
     out: dict[str, str] = {}
@@ -219,200 +231,354 @@ async def _view_homes(session: AsyncSession, view_ids: Iterable[str]) -> dict[st
     return out
 
 
-async def attribute_batch(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
-    """Attribute the next batch of unattributed signals. Returns how many rows it looked at;
-    0 means attribution has caught up to ``now - LAG``."""
-    now = now or datetime.now(timezone.utc)
-    upper = _iso(now - LAG)
-    T = ProductEventORM
-    cursor = await get_cursor(session, CURSOR_ATTRIBUTE)
-    where = [
-        T.event_type.in_(_BY_VIEW + _INFERRED), T.workspace_id.is_(None),
-        T.actor_id.is_not(None), T.created_at <= upper,
-    ]
-    if cursor and cursor.through:
-        where.append(or_(
-            T.created_at > cursor.through,
-            and_(T.created_at == cursor.through, T.id > (cursor.through_id or "")),
-        ))
-    rows = (await session.execute(
-        select(T.id, T.created_at, T.event_type, T.actor_id, T.subject_id)
-        .where(*where).order_by(T.created_at, T.id).limit(ATTRIBUTE_BATCH)
-    )).all()
-    if not rows:
-        # Nothing left up to the lag line: the cursor still moves, so "attributed through"
-        # reads as current rather than as the time of the last signal that needed it.
-        if not cursor or not cursor.through or cursor.through < upper:
-            await _advance(session, CURSOR_ATTRIBUTE, upper, through_id="")
-        return 0
+# ── 1. One day ────────────────────────────────────────────────────────
 
-    inferred = [r for r in rows if r.event_type in _INFERRED]
+
+async def attribute_day(session: AsyncSession, day: str) -> int:
+    """Give one day's unattributed usage signals their workspace. Returns rows placed.
+
+    View opens are placed a workspace at a time (one UPDATE per chunk of that workspace's
+    views); inferred signals a workspace at a time too, by id — a few statements a day however
+    many signals it holds.
+    """
+    T = ProductEventORM
+    since, until = day_bounds(day)
+    in_day = [T.created_at >= since, T.created_at < until, T.workspace_id.is_(None)]
+    placed = 0
+
+    opened = [
+        v for v in (await session.execute(
+            select(T.subject_id).where(T.event_type == VIEW_OPENED, T.subject_id.is_not(None), *in_day)
+            .distinct()
+        )).scalars().all() if v
+    ]
+    homes = await _view_homes(session, opened)
+    by_ws: dict[str, list[str]] = defaultdict(list)
+    for vid, ws in homes.items():
+        by_ws[ws].append(vid)
+    for ws, vids in by_ws.items():
+        for chunk in _chunked(sorted(vids)):
+            result = await session.execute(
+                update(T).where(T.event_type == VIEW_OPENED, T.subject_id.in_(chunk), *in_day)
+                .values(workspace_id=ws).execution_options(synchronize_session=False))
+            placed += result.rowcount or 0
+
+    inferred = (await session.execute(
+        select(T.id, T.created_at, T.actor_id)
+        .where(T.event_type.in_(_INFERRED), T.actor_id.is_not(None), *in_day)
+        .order_by(T.created_at)
+    )).all()
+    if not inferred:
+        return placed
+    lo = _iso((_parse(since) or datetime.now(timezone.utc)) - INFER_WINDOW)
     opens: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    if inferred:
-        first = _parse(inferred[0].created_at)
-        lo = _iso(first - INFER_WINDOW) if first else inferred[0].created_at
-        hi = inferred[-1].created_at
-        for chunk in _chunked(sorted({r.actor_id for r in inferred})):
-            for actor, at, subject in (await session.execute(
-                select(T.actor_id, T.created_at, T.subject_id)
-                .where(T.event_type == VIEW_OPENED, T.actor_id.in_(chunk),
-                       T.created_at >= lo, T.created_at <= hi, T.subject_id.is_not(None))
-                .order_by(T.created_at)
-            )).all():
-                opens[actor].append((at, subject))
-
-    homes = await _view_homes(
-        session,
-        [r.subject_id for r in rows if r.event_type == VIEW_OPENED]
-        + [s for pairs in opens.values() for _, s in pairs],
-    )
+    for chunk in _chunked(sorted({r.actor_id for r in inferred})):
+        for actor, at, subject in (await session.execute(
+            select(T.actor_id, T.created_at, T.subject_id)
+            .where(T.event_type == VIEW_OPENED, T.actor_id.in_(chunk),
+                   T.created_at >= lo, T.created_at < until, T.subject_id.is_not(None))
+            .order_by(T.created_at)
+        )).all():
+            opens[actor].append((at, subject))
+    homes.update(await _view_homes(
+        session, {s for pairs in opens.values() for _, s in pairs} - set(homes)))
     stamps = {actor: [at for at, _ in pairs] for actor, pairs in opens.items()}
-
-    updates = []
-    for r in rows:
-        ws = None
-        if r.event_type == VIEW_OPENED:
-            ws = homes.get(r.subject_id)
-        else:
-            pairs = opens.get(r.actor_id)
-            if pairs:
-                i = bisect_right(stamps[r.actor_id], r.created_at) - 1
-                if i >= 0:
-                    opened_at, subject = pairs[i]
-                    gap = (_parse(r.created_at) or now) - (_parse(opened_at) or now)
-                    if gap <= INFER_WINDOW:
-                        ws = homes.get(subject)
-        if ws:
-            updates.append({"row_id": r.id, "ws": ws})
-    if updates:
-        table = T.__table__
-        await session.execute(
-            update(table).where(table.c.id == bindparam("row_id"))
-            .values(workspace_id=bindparam("ws")),
-            updates,
-        )
-    last = rows[-1]
-    await _advance(session, CURSOR_ATTRIBUTE, last.created_at, through_id=last.id,
-                   started_at=rows[0].created_at)
-    return len(rows)
-
-
-# ── 2. Roll up ────────────────────────────────────────────────────────
-
-
-async def _slice(
-    session: AsyncSession, name: str, ts_col, *, upper: str, first_where: list,
-) -> Optional[tuple[str, str, bool]]:
-    """The next (start, end, inclusive_start) slice of one source, or ``None`` when it has
-    caught up. The very first slice starts AT the oldest row; later ones just after the last
-    slice's end."""
-    cursor = await get_cursor(session, name)
-    if cursor and cursor.through:
-        start, inclusive = cursor.through, False
-    else:
-        start = (await session.execute(
-            select(func.min(ts_col)).where(*first_where))).scalar()
-        if start is None:
-            await _advance(session, name, upper)
-            return None
-        inclusive = True
-    begin = _parse(start)
-    if begin is None or start >= upper:
-        return None
-    end = min(_iso(begin + ROLLUP_SLICE), upper)
-    return start, end, inclusive
-
-
-def _range(col, start: str, end: str, inclusive: bool) -> list:
-    return [(col >= start) if inclusive else (col > start), col <= end]
-
-
-def _rows_for(grouped: Iterable[tuple], *, workspace_ok=lambda *_: True) -> list[dict]:
-    """(actor, workspace, first, last[, audience]) groups → upsert rows: one per workspace
-    the person was active in, and one for the platform as a whole."""
-    out: list[dict] = []
-    for actor, ws, first, last, *extra in grouped:
-        if not actor or is_service_account(actor):
+    to_ws: dict[str, list[str]] = defaultdict(list)
+    for r in inferred:
+        pairs = opens.get(r.actor_id)
+        if not pairs:
             continue
-        out.append({"user_id": actor, "workspace_id": PLATFORM,
-                    "first_active_at": first, "last_active_at": last})
-        if ws and workspace_ok(*extra):
-            out.append({"user_id": actor, "workspace_id": ws,
-                        "first_active_at": first, "last_active_at": last})
-    return out
+        i = bisect_right(stamps[r.actor_id], r.created_at) - 1
+        if i < 0:
+            continue
+        opened_at, subject = pairs[i]
+        at, then = _parse(r.created_at), _parse(opened_at)
+        ws = homes.get(subject)
+        if ws and at and then and at - then <= INFER_WINDOW:
+            to_ws[ws].append(r.id)
+    for ws, ids in to_ws.items():
+        for chunk in _chunked(ids):
+            await session.execute(
+                update(T).where(T.id.in_(chunk)).values(workspace_id=ws)
+                .execution_options(synchronize_session=False))
+            placed += len(chunk)
+    return placed
 
 
-async def rollup_usage_slice(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
-    """One slice of usage signals into the rollup. Waits for attribution: a slice is only
-    read once every row in it has been given its workspace."""
-    now = now or datetime.now(timezone.utc)
-    attributed = await get_cursor(session, CURSOR_ATTRIBUTE)
-    if not attributed or not attributed.through:
-        return 0
-    upper = min(attributed.through, _iso(now - LAG))
-    T = ProductEventORM
-    active = [T.event_type.in_(_ACTIVE_USAGE), T.actor_id.is_not(None), is_person(T.actor_id)]
-    window = await _slice(session, CURSOR_USAGE, T.created_at, upper=upper, first_where=active)
-    if window is None:
-        return 0
-    start, end, inclusive = window
-    grouped = (await session.execute(
-        select(T.actor_id, T.workspace_id, func.min(T.created_at), func.max(T.created_at))
-        .where(*active, *_range(T.created_at, start, end, inclusive))
-        .group_by(T.actor_id, T.workspace_id)
-    )).all()
-    await upsert(session, _rows_for(grouped))
-    await _advance(session, CURSOR_USAGE, end, started_at=start)
-    return 1
+class _DayFold:
+    """One day's rollup, accumulated in memory before it replaces the stored day."""
+
+    def __init__(self) -> None:
+        # (user, workspace, kind) -> [n, n_ws, first, last, first_ws, last_ws]
+        self.people: dict[tuple[str, str, str], list] = {}
+        # (workspace, facet, value) -> [n, n_ws]
+        self.facets: dict[tuple[str, str, str], list] = {}
+
+    def add(self, user: str, ws: Optional[str], kind: str, n: int, first: str, last: str, *,
+            visible: bool, type_key: Optional[str], hour: Optional[str]) -> None:
+        ws = ws or PLATFORM
+        a = self.people.setdefault((user, ws, kind), [0, 0, None, None, None, None])
+        a[0] += n
+        a[2] = first if a[2] is None or first < a[2] else a[2]
+        a[3] = last if a[3] is None or last > a[3] else a[3]
+        if visible:
+            a[1] += n
+            a[4] = first if a[4] is None or first < a[4] else a[4]
+            a[5] = last if a[5] is None or last > a[5] else a[5]
+        if kind.startswith(SECTION_KIND_PREFIX):
+            return
+        facets = [("type", type_key)] if type_key else []
+        if kind != "signin" and hour:
+            facets.append(("hour", hour))
+        for facet, value in facets:
+            f = self.facets.setdefault((ws, facet, value), [0, 0])
+            f[0] += n
+            if visible:
+                f[1] += n
 
 
-async def rollup_edits_slice(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
-    now = now or datetime.now(timezone.utc)
-    T = ViewActivityLogORM
-    # An admin opening a private view is auditor-only; it moves no workspace's timeline.
-    active = [T.actor.is_not(None), is_person(T.actor), T.action != _ADMIN_VIEWED]
-    window = await _slice(session, CURSOR_EDITS, T.created_at, upper=_iso(now - LAG),
-                          first_where=active)
-    if window is None:
-        return 0
-    start, end, inclusive = window
-    grouped = (await session.execute(
-        select(T.actor, T.workspace_id, func.min(T.created_at), func.max(T.created_at))
-        .where(*active, *_range(T.created_at, start, end, inclusive))
-        .group_by(T.actor, T.workspace_id)
-    )).all()
-    await upsert(session, _rows_for(grouped))
-    await _advance(session, CURSOR_EDITS, end, started_at=start)
-    return 1
+def _hour_of(col):
+    return func.substr(col, 12, 2)
 
 
-async def rollup_ledger_slice(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
-    """One slice of the ledger. Sliced by ``recorded_at`` — when the relay wrote the row,
-    which only moves forward — and folded by ``occurred_at``, when it happened.
+async def fold_day(session: AsyncSession, day: str) -> _DayFold:
+    """Read one day of all three stores, grouped in SQL, and fold it into rollup rows."""
+    fold = _DayFold()
+    since, until = day_bounds(day)
 
-    A workspace's timeline takes only its workspace-audience rows: the timeline is read by
-    that workspace's admins, and these are the rows the Activity explorer shows them."""
-    now = now or datetime.now(timezone.utc)
-    T = AuthAuditLogORM
-    active = [
-        T.actor_kind == "user", T.actor_id.is_not(None), is_person(T.actor_id),
-        T.event_type != _SIGN_IN, ~T.event_type.startswith(_MIRRORED, autoescape=True),
+    P = ProductEventORM
+    sect = case((P.event_type == SECTION, P.subject_id), else_=None)
+    for actor, ws, t, hour, section, n, first, last in (await session.execute(
+        select(P.actor_id, P.workspace_id, P.event_type, _hour_of(P.created_at).label("h"),
+               sect.label("s"), func.count(), func.min(P.created_at), func.max(P.created_at))
+        .where(P.created_at >= since, P.created_at < until,
+               P.event_type.in_(list(USAGE_KINDS) + [SECTION]),
+               P.actor_id.is_not(None), is_person(P.actor_id))
+        .group_by(P.actor_id, P.workspace_id, P.event_type, "h", "s")
+    )).all():
+        if not actor:
+            continue
+        if t == SECTION:
+            if section:
+                fold.add(actor, ws, section_kind(section), int(n), first, last,
+                         visible=True, type_key=None, hour=None)
+            continue
+        fold.add(actor, ws, USAGE_KINDS[t], int(n), first, last,
+                 visible=True, type_key=t, hour=hour)
+
+    E = ViewActivityLogORM
+    for actor, ws, action, hour, n, first, last in (await session.execute(
+        select(E.actor, E.workspace_id, E.action, _hour_of(E.created_at).label("h"),
+               func.count(), func.min(E.created_at), func.max(E.created_at))
+        .where(E.created_at >= since, E.created_at < until,
+               E.actor.is_not(None), is_person(E.actor))
+        .group_by(E.actor, E.workspace_id, E.action, "h")
+    )).all():
+        if not actor:
+            continue
+        t = edit_type(action)
+        # An admin opening a PRIVATE view is auditor-only: never shown to a workspace admin.
+        fold.add(actor, ws, kind_of(t), int(n), first, last,
+                 visible=action != _ADMIN_VIEWED, type_key=t, hour=hour)
+
+    L = AuthAuditLogORM
+    for actor, ws, t, category, audience, hour, n, first, last in (await session.execute(
+        select(L.actor_id, L.workspace_id, L.event_type, L.category, L.audience,
+               _hour_of(L.occurred_at).label("h"),
+               func.count(), func.min(L.occurred_at), func.max(L.occurred_at))
+        .where(L.occurred_at >= since, L.occurred_at < until,
+               L.actor_kind == "user", L.actor_id.is_not(None), is_person(L.actor_id),
+               ~L.event_type.startswith(_MIRRORED_LEDGER_PREFIX, autoescape=True))
+        .group_by(L.actor_id, L.workspace_id, L.event_type, L.category, L.audience, "h")
+    )).all():
+        if not actor:
+            continue
+        # What a workspace admin may read of their workspace: the Activity explorer's rule.
+        visible = bool(ws) and audience == catalogue.AUDIENCE_WORKSPACE
+        fold.add(actor, ws, ledger_kind(t, category), int(n), first, last,
+                 visible=visible, type_key=t, hour=hour)
+    return fold
+
+
+async def _replace_day(session: AsyncSession, day: str, fold: _DayFold) -> None:
+    A, F = PersonActivityDailyORM.__table__, PeopleDailyFacetORM.__table__
+    await session.execute(delete(A).where(A.c.day == day))
+    await session.execute(delete(F).where(F.c.day == day))
+    people = [
+        {"day": day, "user_id": u, "workspace_id": ws, "kind": k, "n": v[0], "n_ws": v[1],
+         "first_at": v[2], "last_at": v[3], "first_ws_at": v[4], "last_ws_at": v[5]}
+        for (u, ws, k), v in sorted(fold.people.items())
     ]
-    window = await _slice(session, CURSOR_LEDGER, T.recorded_at, upper=_iso(now - LAG),
-                          first_where=active)
-    if window is None:
+    for start in range(0, len(people), _INSERT_CHUNK):
+        await session.execute(sa_insert(A), people[start:start + _INSERT_CHUNK])
+    facets = [
+        {"day": day, "workspace_id": ws, "facet": f, "value": v, "n": c[0], "n_ws": c[1]}
+        for (ws, f, v), c in sorted(fold.facets.items())
+    ]
+    for start in range(0, len(facets), _INSERT_CHUNK):
+        await session.execute(sa_insert(F), facets[start:start + _INSERT_CHUNK])
+
+
+def _timeline_rows(fold: _DayFold) -> list[dict]:
+    """The day's first and last activity per person and workspace, and per person overall.
+    A workspace's timeline takes only what its admins may see; the platform's takes all."""
+    rows: list[dict] = []
+    overall: dict[str, list] = {}
+    for (user, ws, kind), (_n, n_ws, first, last, first_ws, last_ws) in fold.people.items():
+        if kind not in ACTION_KINDS:
+            continue
+        o = overall.setdefault(user, [first, last])
+        o[0], o[1] = min(o[0], first), max(o[1], last)
+        if ws and n_ws:
+            rows.append({"user_id": user, "workspace_id": ws,
+                         "first_active_at": first_ws, "last_active_at": last_ws})
+    rows += [{"user_id": u, "workspace_id": PLATFORM, "first_active_at": f, "last_active_at": l}
+             for u, (f, l) in overall.items()]
+    return rows
+
+
+async def index_day(session: AsyncSession, day: str, *, now: Optional[datetime] = None) -> int:
+    """Compute one day of the rollup from scratch. Returns how many person rows it holds."""
+    now = now or datetime.now(timezone.utc)
+    await attribute_day(session, day)
+    await session.flush()
+    fold = await fold_day(session, day)
+    await _replace_day(session, day, fold)
+    await upsert(session, _timeline_rows(fold))
+    row = await session.get(PeopleIndexDayORM, day)
+    if row is None:
+        session.add(PeopleIndexDayORM(day=day, computed_at=_iso(now), dirty=False))
+    else:
+        row.computed_at, row.dirty = _iso(now), False
+    await session.flush()
+    return len(fold.people)
+
+
+# ── 2. Which day next ─────────────────────────────────────────────────
+
+
+def _retention_floor(now: datetime) -> str:
+    """The oldest day whose raw events are all still kept. Older days keep the rollup they
+    have: recomputing them from what retention left would empty them."""
+    from backend.app.services import activity_retention, product_event_gc
+    days = product_event_gc.retention_days()
+    ledger_days = activity_retention.retention_days()
+    if ledger_days is not None:
+        days = min(days, ledger_days)
+    return (now.date() - timedelta(days=days - 1)).isoformat()
+
+
+async def _history_start(session: AsyncSession) -> Optional[str]:
+    """The first day anything was recorded — three index seeks."""
+    firsts = [
+        (await session.execute(select(func.min(col)))).scalar()
+        for col in (ProductEventORM.created_at, ViewActivityLogORM.created_at,
+                    AuthAuditLogORM.occurred_at)
+    ]
+    days = [f[:10] for f in firsts if f]
+    return min(days) if days else None
+
+
+async def _computed(session: AsyncSession, day: str) -> Optional[PeopleIndexDayORM]:
+    return await session.get(PeopleIndexDayORM, day)
+
+
+async def _mark_ledger_dirty(session: AsyncSession, now: datetime) -> int:
+    """Days a ledger row arrived late for: recorded after the day was computed. The relay
+    can lag, or catch up after an outage; those days are computed again."""
+    upper = _iso(now - LAG)
+    cursor = await get_cursor(session, CURSOR_LEDGER)
+    if cursor is None or not cursor.through:
+        # First run: everything recorded so far is history the backfill will compute.
+        await _advance(session, CURSOR_LEDGER, upper)
         return 0
-    start, end, inclusive = window
-    grouped = (await session.execute(
-        select(T.actor_id, T.workspace_id, func.min(T.occurred_at), func.max(T.occurred_at),
-               T.audience)
-        .where(*active, *_range(T.recorded_at, start, end, inclusive))
-        .group_by(T.actor_id, T.workspace_id, T.audience)
-    )).all()
-    await upsert(session, _rows_for(
-        grouped, workspace_ok=lambda audience: audience == catalogue.AUDIENCE_WORKSPACE))
-    await _advance(session, CURSOR_LEDGER, end, started_at=start)
-    return 1
+    if cursor.through >= upper:
+        return 0
+    L = AuthAuditLogORM
+    late = (await session.execute(
+        select(func.substr(L.occurred_at, 1, 10)).where(
+            L.recorded_at > cursor.through, L.recorded_at <= upper,
+            L.actor_kind == "user",
+        ).distinct()
+    )).scalars().all()
+    marked = 0
+    for day in late:
+        row = await _computed(session, day)
+        if row is not None and not row.dirty:
+            row.dirty = True
+            marked += 1
+    await _advance(session, CURSOR_LEDGER, upper)
+    return marked
+
+
+async def _next_backfill_day(session: AsyncSession, now: datetime) -> Optional[str]:
+    """The newest day not yet computed, walking back from the day before yesterday."""
+    start = await _history_start(session)
+    if start is None:
+        return None
+    floor = max(start, _retention_floor(now))
+    cursor = await get_cursor(session, CURSOR_BACKFILL)
+    oldest_hot = _shift(now.date().isoformat(), -1)
+    nxt = _shift(cursor.through, -1) if cursor and cursor.through else _shift(oldest_hot, -1)
+    while nxt >= floor:
+        if await _computed(session, nxt) is None:
+            return nxt
+        await _advance(session, CURSOR_BACKFILL, nxt, started_at=start)
+        nxt = _shift(nxt, -1)
+    return None
+
+
+async def purge_rollup(session: AsyncSession, *, now: datetime) -> int:
+    """Drop one rollup day past ``ROLLUP_KEEP_DAYS``. Returns rows removed."""
+    cutoff = (now.date() - timedelta(days=ROLLUP_KEEP_DAYS)).isoformat()
+    oldest = (await session.execute(
+        select(func.min(PeopleIndexDayORM.day)).where(PeopleIndexDayORM.day < cutoff))).scalar()
+    if oldest is None:
+        return 0
+    A, F, D = (PersonActivityDailyORM.__table__, PeopleDailyFacetORM.__table__,
+               PeopleIndexDayORM.__table__)
+    gone = (await session.execute(delete(A).where(A.c.day == oldest))).rowcount or 0
+    await session.execute(delete(F).where(F.c.day == oldest))
+    await session.execute(delete(D).where(D.c.day == oldest))
+    return gone + 1
+
+
+async def step(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
+    """One unit of the most urgent work. Returns how much was done; 0 means caught up."""
+    now = now or datetime.now(timezone.utc)
+    done = await joins_pass(session, now=now)
+
+    today = now.date().isoformat()
+    yesterday = _shift(today, -1)
+    yesterday_closed = _iso(datetime.combine(date.fromisoformat(today), dtime.min,
+                                             tzinfo=timezone.utc) + LAG)
+    for day, fresh_after in ((today, _iso(now - HOT_REFRESH)), (yesterday, yesterday_closed)):
+        row = await _computed(session, day)
+        if row is None or row.dirty or (row.computed_at or "") < fresh_after:
+            await index_day(session, day, now=now)
+            return done + 1
+
+    await _mark_ledger_dirty(session, now)
+    floor = _retention_floor(now)
+    dirty = (await session.execute(
+        select(PeopleIndexDayORM.day)
+        .where(PeopleIndexDayORM.dirty.is_(True), PeopleIndexDayORM.day >= floor)
+        .order_by(PeopleIndexDayORM.day.desc()).limit(1)
+    )).scalar()
+    if dirty:
+        await index_day(session, dirty, now=now)
+        return done + 1
+
+    day = await _next_backfill_day(session, now)
+    if day:
+        await index_day(session, day, now=now)
+        await _advance(session, CURSOR_BACKFILL, day, started_at=await _history_start(session))
+        return done + 1
+
+    return done + (1 if await purge_rollup(session, now=now) else 0)
+
+
+# ── 3. Joins ──────────────────────────────────────────────────────────
 
 
 async def join_candidates(
@@ -584,36 +750,39 @@ async def timeline_for_person(session: AsyncSession, user_id: str) -> dict[str, 
 
 
 async def coverage(session: AsyncSession, *, now: Optional[datetime] = None) -> dict:
-    """How far the index has got, for the page to say so while a backfill runs.
+    """How far the rollup reaches, for the page to say so.
 
-    ``through`` is the oldest of the rollup cursors — the instant up to which every source
-    has been indexed. ``None`` everywhere means the indexer has never run here (it runs on
-    the scheduler-owner role), and the page falls back to what it can read live."""
+    ``completeFrom`` is the oldest day from which every day up to today is computed and clean
+    — a window starting at or after it is exact. ``running`` is whether the indexer has
+    computed today recently; when it has not, the rollup is not being kept current here (it
+    runs on the scheduler-owner role)."""
     now = now or datetime.now(timezone.utc)
+    today = now.date().isoformat()
     rows = {
-        r.name: r for r in (await session.execute(select(PeopleIndexCursorORM))).scalars().all()
+        d: (c, dirty) for d, c, dirty in (await session.execute(
+            select(PeopleIndexDayORM.day, PeopleIndexDayORM.computed_at, PeopleIndexDayORM.dirty)
+            .where(PeopleIndexDayORM.day >= _shift(today, -ROLLUP_KEEP_DAYS))
+        )).all()
     }
-
-    def at(name: str) -> Optional[str]:
-        return rows[name].through if name in rows else None
-
-    rolled = [at(n) for n in ROLLUP_CURSORS]
-    through = min(rolled) if all(rolled) else None
-    started = [rows[n].started_at for n in rows if rows[n].started_at]
-    since = min(started) if started else None
-    lagging = through is None or (_parse(through) or now) < now - timedelta(hours=1)
+    complete_from: Optional[str] = None
+    cursor_day = today
+    while cursor_day in rows and not rows[cursor_day][1]:
+        complete_from = cursor_day
+        cursor_day = _shift(cursor_day, -1)
+    backfill = await get_cursor(session, CURSOR_BACKFILL)
+    history = (backfill.started_at if backfill else None) or await _history_start(session)
+    fresh_at = rows.get(today, (None, False))[0]
     progress = None
-    if since and through:
-        begin, end = _parse(since), _parse(through)
-        if begin and end and now > begin:
-            progress = round(max(0.0, min(1.0, (end - begin) / (now - begin))), 3)
+    if history and complete_from:
+        span = (date.fromisoformat(today) - date.fromisoformat(history)).days
+        done = (date.fromisoformat(today) - date.fromisoformat(complete_from)).days
+        progress = 1.0 if span <= 0 else round(min(1.0, done / span), 3)
     return {
-        "attributedThrough": at(CURSOR_ATTRIBUTE),
-        "activityThrough": through,
-        "joinsThrough": at(CURSOR_JOINS),
-        "historyFrom": since,
-        "backfilling": bool(rows) and lagging,
-        "running": bool(rows),
+        "freshAt": fresh_at,
+        "completeFrom": complete_from,
+        "historyFrom": history,
+        "running": bool(fresh_at and fresh_at >= _iso(now - timedelta(minutes=15))),
+        "backfilling": bool(history and (complete_from is None or complete_from > history)),
         "progress": progress,
     }
 
@@ -625,10 +794,3 @@ def merge_join(timeline: dict, current: Optional[str]) -> Optional[str]:
     if indexed and current:
         return min(indexed, current)
     return indexed or current
-
-
-__all__: list[Any] = [
-    "PLATFORM", "attribute_batch", "rollup_usage_slice", "rollup_edits_slice",
-    "rollup_ledger_slice", "joins_pass", "join_candidates", "timeline_for_workspace",
-    "timeline_for_person", "coverage", "merge_join", "upsert",
-]
