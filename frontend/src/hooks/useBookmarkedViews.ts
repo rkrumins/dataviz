@@ -17,25 +17,27 @@ import {
   favouriteView,
   unfavouriteView,
   type View,
+  type ViewListResponse,
 } from '@/services/viewApiService'
 
 const BOOKMARKS_QUERY_KEY = ['views', 'bookmarks'] as const
+const NO_BOOKMARKS: View[] = []
 
 export function useBookmarkedViews() {
   const queryClient = useQueryClient()
 
   const query = useQuery({
     queryKey: BOOKMARKS_QUERY_KEY,
-    queryFn: async (): Promise<View[]> => {
-      const { items } = await listViews({ favouritedOnly: true })
-      return items
-    },
+    // The newest page of them, with the server's count of all of them: the
+    // list's length stopped at the page size.
+    queryFn: () => listViews({ favouritedOnly: true }),
     // Bookmarks don't go stale quickly — default TTL is fine. The 30s
     // stale time de-dupes the burst of mounts at app startup.
     staleTime: 30_000,
   })
 
-  const bookmarks = query.data ?? []
+  const bookmarks = query.data?.items ?? NO_BOOKMARKS
+  const total = query.data?.total ?? 0
 
   /**
    * Toggle the bookmark state for a view.
@@ -46,9 +48,11 @@ export function useBookmarkedViews() {
   const toggleBookmark = useCallback(async (viewId: string, isCurrentlyBookmarked: boolean) => {
     // Optimistic remove applied immediately via cache surgery.
     if (isCurrentlyBookmarked) {
-      queryClient.setQueryData<View[]>(
+      queryClient.setQueryData<ViewListResponse>(
         BOOKMARKS_QUERY_KEY,
-        (prev) => (prev ?? []).filter(v => v.id !== viewId),
+        (prev) => prev && prev.items.some(v => v.id === viewId)
+          ? { ...prev, items: prev.items.filter(v => v.id !== viewId), total: prev.total - 1 }
+          : prev,
       )
     }
     try {
@@ -69,6 +73,7 @@ export function useBookmarkedViews() {
 
   return {
     bookmarks,
+    total,
     isLoading: query.isLoading,
     toggleBookmark,
     refetch: () => queryClient.invalidateQueries({ queryKey: BOOKMARKS_QUERY_KEY }),

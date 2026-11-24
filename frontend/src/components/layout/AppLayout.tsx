@@ -81,9 +81,10 @@ export function AppLayout() {
   // Auto-recover data when backend comes back from an outage
   useBackendRecovery()
 
-  // Load views from the API into the schema store cache.
-  // Fetches ALL accessible views (no workspace filter) so that cross-workspace
-  // links in the sidebar and deep-linked URLs resolve without a page refresh.
+  // Load views from the API into the schema store cache: the newest page of the
+  // views the reader can open (no workspace filter), so cross-workspace links
+  // resolve without a request. Not every view: a deep link to an older one
+  // fetches it (useViewNavigation), and no count may come from it.
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   useEffect(() => {
     // Not while a password change is pending: the API refuses the read,
