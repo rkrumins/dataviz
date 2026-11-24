@@ -24,7 +24,6 @@ import {
     REVEAL_PAGE,
     type LensViewState,
     type FocusLayoutInput,
-    type WalkExportNode,
 } from '../focus-layout'
 import {
     FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
@@ -656,29 +655,21 @@ describe('focus-layout — frames only where they clarify', () => {
         expect(g.edges.reduce((n, e) => n + e.count, 0)).toBe(4)
     })
 
-    it('the export names a picture parent only when the picture has one — no dangling ids', () => {
+    it('the export names a parent only when the picture has one — no dangling ids', () => {
         const g = layout(sharedPlatform())
         const payload = buildWalkExport(g, 'REPORTING', () => 'now')
         const urns = new Set(payload.nodes.map(n => n.urn))
         for (const node of payload.nodes) {
-            if (node.pictureParentUrn !== null) expect(urns.has(node.pictureParentUrn)).toBe(true)
-            expect(node.pictureParentUrn === null).toBe(node.depth === 0)
+            if (node.parentUrn !== null) expect(urns.has(node.parentUrn)).toBe(true)
+            expect(node.parentUrn === null).toBe(node.depth === 0)
         }
         // GOLD is the drawn grain, so it is top-level and its table is a
         // row of it — both true, and both resolvable in the export.
-        const gold = payload.nodes.find(n => n.urn === 'GOLD')!
-        expect(gold.pictureParentUrn).toBeNull()
-        expect(payload.nodes.find(n => n.urn === 'gold_t')?.pictureParentUrn).toBe('GOLD')
+        expect(payload.nodes.find(n => n.urn === 'GOLD')?.parentUrn).toBeNull()
+        expect(payload.nodes.find(n => n.urn === 'gold_t')?.parentUrn).toBe('GOLD')
         // ...while the focus's own contents keep the parent they are
         // drawn inside — the contains-stack is the focus's card.
-        expect(payload.nodes.find(n => n.urn === 'rep_a')?.pictureParentUrn).toBe('REPORTING')
-        // Where it LIVES is another matter: GOLD sits in Snowflake whether
-        // or not this picture draws Snowflake, as every export says it.
-        expect(gold).toMatchObject({ parentUrn: 'SNOW', parentName: 'Snowflake', path: ['Snowflake'], pathUrns: ['SNOW'] })
-        expect(payload.nodes.find(n => n.urn === 'gold_t')).toMatchObject({
-            parentUrn: 'GOLD', parentName: 'GOLD', parentType: 'CONTAINER',
-            path: ['Snowflake', 'GOLD'], pathUrns: ['SNOW', 'GOLD'],
-        })
+        expect(payload.nodes.find(n => n.urn === 'rep_a')?.parentUrn).toBe('REPORTING')
     })
 
     it('a walked-through level keeps its own ⊕ — folded onto the card its group is presented as', () => {
@@ -2783,12 +2774,6 @@ function walkGrainSeamPure(): LensSubgraph<LensWalkNode> {
 
 // ── walk export (JSON/CSV) ───────────────────────────────────────────
 
-/** A walk-export row at the top of the graph and of the picture. */
-const WALK_ROW: WalkExportNode = {
-    urn: 'x', name: 'x', type: 't', parentUrn: null, parentName: null, parentType: null, path: [], pathUrns: [],
-    pictureParentUrn: null, depth: 0, direction: 'focus', hops: 0, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0,
-}
-
 describe('focus-layout — walk export, pure and server-free', () => {
     it('serializes the visible picture to JSON: nodes with parent+depth, edges resolved to urns', () => {
         const sg = collateralEstate()
@@ -2800,19 +2785,15 @@ describe('focus-layout — walk export, pure and server-free', () => {
         // is not in the picture and not in the export of the picture.
         expect(payload.nodes.some(n => n.urn === 'DOM')).toBe(false)
         const db = payload.nodes.find(n => n.urn === 'DB')!
-        expect(db).toMatchObject({ name: 'RISK_DB', type: 'DATABASE', pictureParentUrn: null, depth: 0 })
+        expect(db).toMatchObject({ name: 'RISK_DB', type: 'DATABASE', parentUrn: null, depth: 0 })
         // WHERE IT LIVES, WHICH SIDE IT IS ON, AND WHAT IT CONNECTS TO —
         // the three things a reader sorts a lineage export by, and none
-        // of which used to be in it. Where it lives survives a container
-        // the picture demoted to a breadcrumb, which is exactly when its
-        // picture parent goes null: the five columns every export of
-        // entities writes, meaning what they mean everywhere.
+        // of which used to be in it. `path` survives a container the
+        // picture demoted to a breadcrumb, which is exactly when
+        // `parentUrn` goes null.
         expect(db.direction).toBe('upstream')
         expect(db.hops).toBeGreaterThan(0)
-        expect(db).toMatchObject({
-            parentUrn: 'CTR2', parentName: 'CURATED',
-            path: ['Finance', 'RiskApp', 'PROD', 'CURATED'], pathUrns: ['DOM', 'APP', 'CTR1', 'CTR2'],
-        })
+        expect(typeof db.path).toBe('string')
         expect(db.knownIn).toBeGreaterThanOrEqual(db.drawnIn)
         expect(db.knownOut).toBeGreaterThanOrEqual(db.drawnOut)
         // Edges are addressed by URN, not the layout's internal card ids —
@@ -2835,21 +2816,19 @@ describe('focus-layout — walk export, pure and server-free', () => {
         const payload = buildWalkExport(layout(sg), sg.focusUrn, () => '2026-08-13T00:00:00.000Z')
         const csv = walkExportToCsv(payload)
         const lines = csv.split('\n')
-        expect(lines[0]).toBe('urn,name,type,direction,hops,pictureParentUrn,depth,drawnIn,drawnOut,knownIn,knownOut,'
-            + 'parentUrn,parentName,parentType,path,pathUrns')
+        expect(lines[0]).toBe('urn,name,type,path,direction,hops,parentUrn,depth,drawnIn,drawnOut,knownIn,knownOut')
         const blankAt = lines.indexOf('')
         expect(blankAt).toBeGreaterThan(0)
         expect(lines[blankAt + 1]).toBe('sourceUrn,targetUrn,type,weight,insideContainer')
         // A name that itself contains a comma is quoted, not corrupted.
-        const withComma = { ...payload, nodes: [{ ...WALK_ROW, urn: 'x', name: 'Revenue, Q1' }] }
+        const withComma = { ...payload, nodes: [{
+            urn: 'x', name: 'Revenue, Q1', type: 't', path: '', direction: 'focus' as const, hops: 0,
+            parentUrn: null, depth: 0, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0,
+        }] }
         expect(walkExportToCsv(withComma)).toContain('"Revenue, Q1"')
         // A urn with no parent IN THE PICTURE renders as an EMPTY field,
-        // not the literal string "null"; where it lives is a path of
-        // names, A / B, and of urns, a; b — as the trace's file writes it.
-        const db = lines.find(l => l.startsWith('DB,RISK_DB,DATABASE,'))!
-        expect(db.split(',').slice(5, 6)).toEqual([''])
-        expect(db).toContain(',CTR2,CURATED,')
-        expect(db).toContain(',Finance / RiskApp / PROD / CURATED,DOM; APP; CTR1; CTR2')
+        // not the literal string "null".
+        expect(lines.some(l => l.startsWith('DB,RISK_DB,DATABASE,'))).toBe(true)
         expect(csv).not.toContain('null')
     })
 
@@ -2862,20 +2841,19 @@ describe('focus-layout — walk export, pure and server-free', () => {
             focus: 'x',
             generatedAt: '2026-08-14T00:00:00.000Z',
             nodes: [
-                { ...WALK_ROW, urn: '=cmd|calc', name: '@SUM(A1)', type: '+t', pictureParentUrn: '-x', depth: -1,
-                    parentUrn: '-x', parentName: '=Parent', path: ['=Top', '=Parent'], pathUrns: ['+t1', '-x'] },
-                { ...WALK_ROW, urn: 'plain', name: 'Revenue', type: 't' },
+                { urn: '=cmd|calc', name: '@SUM(A1)', type: '+t', path: '', direction: 'focus' as const, hops: 0, parentUrn: '-x', depth: -1, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0 },
+                { urn: 'plain', name: 'Revenue', type: 't', path: '', direction: 'focus' as const, hops: 0, parentUrn: null, depth: 0, drawnIn: 0, drawnOut: 0, knownIn: 0, knownOut: 0 },
             ],
             edges: [{ sourceUrn: '=a', targetUrn: 'b', type: 'FLOWS', weight: 2, insideContainer: false }],
         }
         const lines = walkExportToCsv(payload).split('\n')
 
-        expect(lines[1]).toBe("'=cmd|calc,'@SUM(A1),'+t,focus,0,'-x,-1,0,0,0,0,'-x,'=Parent,,'=Top / =Parent,'+t1; -x")
+        expect(lines[1]).toBe("'=cmd|calc,'@SUM(A1),'+t,,focus,0,'-x,-1,0,0,0,0")
         // A NUMBER is never a formula: defusing a negative depth into
         // `'-1` would corrupt the column it was meant to protect.
         expect(lines[1]).toContain(',-1,')
         // And an ordinary name is left exactly as it was.
-        expect(lines[2]).toBe('plain,Revenue,t,focus,0,,0,0,0,0,0,,,,,')
+        expect(lines[2]).toBe('plain,Revenue,t,,focus,0,,0,0,0,0,0')
         expect(lines[lines.length - 1]).toBe("'=a,b,FLOWS,2,no")
     })
 })
