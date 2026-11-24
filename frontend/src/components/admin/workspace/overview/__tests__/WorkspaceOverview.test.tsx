@@ -64,14 +64,17 @@ function ws(over: Partial<WorkspaceResponse> = {}): WorkspaceResponse {
 }
 
 const onGoTo = vi.fn()
+const LOADED = { stats: false, readiness: false, views: false, viewCounts: false }
 function renderOverview(props: Partial<React.ComponentProps<typeof WorkspaceOverview>> = {}) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    // Everything in, unless a test says otherwise: the count is the list's.
+    const total = props.views?.length ?? 0
     return render(
         <QueryClientProvider client={qc}>
             <MemoryRouter>
                 <WorkspaceOverview
-                    workspace={ws()} views={[]} readinessMap={{}}
-                    aggregateStats={{ totalNodes: 0, totalEdges: 0, totalTypes: 0, totalViews: 0 }}
+                    workspace={ws()} views={[]} viewTotal={total} viewCountByDs={{}} pending={LOADED} readinessMap={{}}
+                    aggregateStats={{ totalNodes: 0, totalEdges: 0, totalTypes: 0, totalViews: total }}
                     canManageSources={false} canManageMembers={false} canAddMembers={false}
                     versioningEnabled showActivity={false} onGoTo={onGoTo}
                     {...props}
@@ -247,6 +250,32 @@ describe('In the Playground', () => {
         fireEvent.click(screen.getByRole('button', { name: /My experiment/ }))
         expect(onOpenGraph).toHaveBeenCalledWith('ds_mine')
     })
+
+    it('counts every view on a graph, past the Playground’s first page', () => {
+        renderOverview({ workspace: playground(), viewCountByDs: { ds_mine: 240 } })
+        const graph = screen.getByRole('button', { name: /My experiment/ })
+        expect(within(graph).getByText('240 views')).toBeInTheDocument()
+    })
+
+    it('holds the count’s place while it is on its way, and leaves it out if it can’t be read', () => {
+        const { unmount } = renderOverview({ workspace: playground(), viewCountByDs: null, pending: { ...LOADED, viewCounts: true } })
+        expect(within(screen.getByRole('button', { name: /My experiment/ })).queryByText(/views?\b|No views yet/)).toBeNull()
+        unmount()
+        renderOverview({ workspace: playground(), viewCountByDs: null })
+        expect(within(screen.getByRole('button', { name: /My experiment/ })).queryByText(/No views yet/)).toBeNull()
+    })
+
+    it('shows the reader’s own views, asked for as theirs rather than picked from everyone’s newest', async () => {
+        const mineView = {
+            id: 'v_mine', name: 'My lineage', viewType: 'graph', workspaceId: 'ws_play', dataSourceId: 'ds_mine',
+            visibility: 'workspace', isFavourited: false, favouriteCount: 0, tags: [], config: {},
+            createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-19T00:00:00Z', createdBy: 'usr_me',
+        }
+        listViews.mockImplementation(async (p: { createdBy?: string }) => ({ items: p.createdBy === 'usr_me' ? [mineView] : [] }))
+        renderOverview({ workspace: playground(), views: [] })
+        expect(await screen.findByRole('button', { name: /My lineage/ })).toBeInTheDocument()
+        expect(listViews).toHaveBeenCalledWith({ workspaceId: 'ws_play', createdBy: 'usr_me' })
+    })
 })
 
 describe('Views, shown the way the Explorer shows them', () => {
@@ -313,6 +342,44 @@ describe('The reader chooses how views are laid out', () => {
         expect(names()).toEqual(['Zeta flows', 'Alpha map'])
         fireEvent.click(within(shelf).getByRole('button', { name: /^Sort by Name/ }))
         expect(names()).toEqual(['Alpha map', 'Zeta flows'])
+    })
+})
+
+describe('Each part shows its own placeholder until its answer lands', () => {
+    it('holds the views’ places while the count and the list are on their way', () => {
+        renderOverview({
+            workspace: ws({ dataSources: [{ id: 'ds1', label: 'Ledger' }, { id: 'ds2', label: 'CRM' }] as never }),
+            viewTotal: null, pending: { stats: true, readiness: true, views: true, viewCounts: true },
+        })
+        expect(screen.getByRole('status', { name: 'Loading views' })).toBeInTheDocument()
+        expect(screen.queryByText('No views here yet')).toBeNull()
+        // At a glance: the sources are the record's, the counts placeholders — never a zero that isn't true.
+        const glance = screen.getByRole('region', { name: 'At a glance' })
+        expect(within(glance).getByText('2')).toBeInTheDocument()
+        expect(within(glance).queryByText('0')).toBeNull()
+        expect(within(glance).queryByText('Connections not built yet')).toBeNull()
+    })
+
+    it('shows the exact count and the popular shelf before the views list lands', async () => {
+        listViews.mockResolvedValue({ items: [] })
+        renderOverview({ viewTotal: 1250, pending: { ...LOADED, views: true } })
+        const glance = screen.getByRole('region', { name: 'At a glance' })
+        expect(within(glance).getByText('1,250')).toBeInTheDocument()
+        // The shelves are there; Jump back in holds its place until its list lands.
+        expect(within(screen.getByRole('region', { name: 'Jump back in' })).getByRole('status', { name: 'Loading views' })).toBeInTheDocument()
+        expect(screen.getByRole('region', { name: 'Popular here' })).toBeInTheDocument()
+        expect(listViews).toHaveBeenCalledWith(expect.objectContaining({ sort: 'most-opened' }))
+    })
+
+    it('says plainly when the count could not be read', () => {
+        renderOverview({ viewTotal: null })
+        expect(within(screen.getByRole('region', { name: 'At a glance' })).getByText('\u2014')).toBeInTheDocument()
+    })
+
+    it('asks for nothing popular in a workspace known to have no views', () => {
+        renderOverview({ viewTotal: 0 })
+        expect(screen.getByText('No views here yet')).toBeInTheDocument()
+        expect(listViews).not.toHaveBeenCalled()
     })
 })
 

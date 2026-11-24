@@ -5,6 +5,7 @@ import type { DataSourceResponse } from '@/services/workspaceService'
 import { resolveSourceMode } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { getProviderLogo } from '../ProviderLogos'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
@@ -62,7 +63,11 @@ interface DataSourceGridCardProps {
     ontologyName?: string
     ontologyVersion?: number
     ontologyPublished?: boolean
-    viewCount: number
+    /** Its views, counted exactly; undefined while still being counted, null
+     *  when the count could not be read. */
+    viewCount?: number | null
+    /** The page's stats for every source are still on their way. */
+    statsPending?: boolean
     isSelected: boolean
     onSelect: () => void
     onSetPrimary?: () => void
@@ -96,6 +101,7 @@ function DataSourceGridCardBase({
     ontologyVersion,
     ontologyPublished,
     viewCount,
+    statsPending,
     isSelected,
     onSelect,
     onSetPrimary,
@@ -117,8 +123,11 @@ function DataSourceGridCardBase({
         </div>
     )
     const computing = stats?.computing
+    // Each figure is drawn as its own answer lands: a placeholder while it is on its way.
+    const arriving = <Skeleton className="h-4 w-8 mx-auto my-0.5" />
     const counted = (n?: number) =>
-        computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(n ?? 0) : '\u2014'
+        computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" />
+            : stats ? compactNum(n ?? 0) : statsPending ? arriving : '\u2014'
 
     return (
         <div
@@ -239,7 +248,7 @@ function DataSourceGridCardBase({
 
                 {/* What's in it, and what's built on it */}
                 <div className="grid grid-cols-3 gap-2 mb-3">
-                    {statCell(viewCount, viewCount === 1 ? 'view' : 'views')}
+                    {statCell(viewCount === undefined ? arriving : viewCount ?? '\u2014', viewCount === 1 ? 'view' : 'views')}
                     {statCell(counted(stats?.nodeCount), technical ? 'nodes' : 'things', computing ? 'Being counted \u2014 check back shortly.' : 'Entities in this source')}
                     {statCell(counted(stats?.edgeCount), technical ? 'edges' : 'connections', computing ? 'Being counted \u2014 check back shortly.' : 'Relationships between them')}
                 </div>

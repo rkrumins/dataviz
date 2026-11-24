@@ -90,8 +90,8 @@ export function WorkspaceDetailPage() {
     // ── Data fetching via custom hook ──────────────────────
     const {
         workspace, catalogItems, providers, ontologies, ontologyMap, dsStatsMap, dsProviderMap,
-        viewsByDs, allWorkspaceViews, readinessMap, healthStatus,
-        aggregateStats, isLoading, isRefreshing, reload
+        allWorkspaceViews, viewTotal, viewCountByDs, readinessMap, healthStatus,
+        aggregateStats, pending, isLoading, isRefreshing, reload
     } = useWorkspaceDetailData(wsId)
 
     // Track whether the workspace was ever loaded successfully for
@@ -581,9 +581,11 @@ export function WorkspaceDetailPage() {
         ...(canEditSchema ? [{ label: 'Edit the data model', to: `/schema?workspaceId=${wsId}`, icon: GitBranch }] : []),
         ...(canManageDataSources ? [{ label: 'Ingestion jobs', to: '/ingestion?tab=jobs', icon: Settings2 }] : []),
     ]
+    // A source's views, exactly: undefined while they are counted, null when they couldn't be.
+    const viewsOn = (dsId: string) => viewCountByDs ? (viewCountByDs[dsId] ?? 0) : pending.viewCounts ? undefined : null
     const tabs: Array<{ id: WorkspaceTab; label: string; icon: typeof Eye; count?: number; alert?: number }> = [
         { id: 'overview', label: 'Overview', icon: Sparkles },
-        { id: 'views', label: 'Views', icon: Eye, count: allWorkspaceViews.length },
+        { id: 'views', label: 'Views', icon: Eye, count: viewTotal ?? undefined },
         { id: 'data', label: 'Data', icon: Database, count: workspace.dataSources.length },
         ...(versioningEnabled ? [
             { id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, alert: reviewsWaiting },
@@ -636,6 +638,7 @@ export function WorkspaceDetailPage() {
                 healthStory={healthStory}
                 onHealthAction={section => goTo('data', section)}
                 aggregateStats={aggregateStats}
+                statsPending={pending.stats}
                 primaryOntologyName={primaryOntologyName}
                 providerInfos={Object.values(dsProviderMap)}
                 exploreHref={`/explorer?workspace=${encodeURIComponent(wsId ?? '')}`}
@@ -694,6 +697,9 @@ export function WorkspaceDetailPage() {
                 <WorkspaceOverview
                     workspace={workspace}
                     views={allWorkspaceViews}
+                    viewTotal={viewTotal}
+                    viewCountByDs={viewCountByDs}
+                    pending={pending}
                     readinessMap={readinessMap}
                     aggregateStats={aggregateStats}
                     canManageSources={canManageDataSources}
@@ -802,7 +808,8 @@ export function WorkspaceDetailPage() {
                                                 ontologyName={onto?.name}
                                                 ontologyVersion={onto?.version}
                                                 ontologyPublished={onto?.isPublished}
-                                                viewCount={(viewsByDs[ds.id] || []).length}
+                                                viewCount={viewsOn(ds.id)}
+                                                statsPending={pending.stats}
                                                 isSelected={selectedDsId === ds.id}
                                                 onSelect={() => setSelectedDsId(prev => prev === ds.id ? null : ds.id)}
                                                 onSetPrimary={canManageDataSources ? () => handleSetPrimary(ds.id) : undefined}
@@ -982,7 +989,7 @@ export function WorkspaceDetailPage() {
                 providerInfo={selectedDsId ? dsProviderMap[selectedDsId] : undefined}
                 ontologyName={selectedDsId ? ontologyNameMap[selectedDs?.ontologyId || ''] : undefined}
                 ontologyId={selectedDs?.ontologyId}
-                views={selectedDsId ? (viewsByDs[selectedDsId] || []) : []}
+                viewCount={selectedDsId ? viewsOn(selectedDsId) : undefined}
                 readiness={selectedDsId ? readinessMap[selectedDsId] : undefined}
                 ontologies={ontologies}
                 onSaveEdit={handleEditDsSave}
@@ -996,7 +1003,7 @@ export function WorkspaceDetailPage() {
                 // built on it moves for whoever manages data sources in both places.
                 // The server decides either way, and the wizard says why when it won't.
                 onMove={selectedDs && !isFork && wsId && (canManageMembers
-                    || (canManageDataSources && (viewsByDs[selectedDs.id] || []).length === 0)
+                    || (canManageDataSources && !!viewCountByDs && !viewCountByDs[selectedDs.id])
                     // In the Playground a graph's maker takes it out, or asks to (the server
                     // knows whose it is; the wizard says so to anyone else).
                     || (workspace.kind === 'playground' && canManageDataSources))

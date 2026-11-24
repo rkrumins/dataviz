@@ -14,11 +14,12 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, ArrowRightLeft, Database, FilePlus, FlaskConical, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
-import type { View } from '@/services/viewApiService'
+import { listViews } from '@/services/viewApiService'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { useAuthStore } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { usePlayground, usePlaygroundSamples } from '@/hooks/usePlayground'
@@ -32,9 +33,14 @@ import type { OverviewLayout } from './overviewLayout'
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
-export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNewGraph, onOpenGraph, onMoveGraph }: {
+export function PlaygroundExperiments({
+    workspace, viewCountByDs, countsPending, layout = 'cards', onNewGraph, onOpenGraph, onMoveGraph,
+}: {
     workspace: WorkspaceResponse
-    views: View[]
+    /** Every view on each graph, anyone's, counted exactly; null when not known. */
+    viewCountByDs: Record<string, number> | null
+    /** Those counts are still on their way. */
+    countsPending: boolean
     /** How the Overview lays out views: the reader's choice. */
     layout?: OverviewLayout
     /** Start a blank graph on the Playground's sandbox provider. */
@@ -57,8 +63,23 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
     const asked = params.get('start')
 
     const graphs = workspace.dataSources.filter(ds => !!me && ds.createdBy === me)
-    const mine = views.filter(v => !!me && v.createdBy === me)
-    const viewsOn = (dsId: string) => views.filter(v => v.dataSourceId === dsId).length
+    // The reader's own views, asked for as such: the Playground's newest views are
+    // everyone's, and in a busy Playground the reader's fell past that first page.
+    const mine = useQuery({
+        queryKey: ['workspace-detail', workspace.id, 'mine', me],
+        queryFn: () => listViews({ workspaceId: workspace.id, createdBy: me! }),
+        enabled: !!me,
+        staleTime: 60_000,
+    }).data?.items ?? []
+    // Each graph's Context View, whoever made it — looked up per graph for the same
+    // reason. A reader has only a handful of graphs (the quota), asked at once.
+    const contextViews = useQueries({
+        queries: graphs.map(ds => ({
+            queryKey: ['workspace-detail', workspace.id, 'context-view', ds.id],
+            queryFn: () => listViews({ workspaceId: workspace.id, dataSourceId: ds.id, viewType: 'reference', limit: 1 }),
+            staleTime: 60_000,
+        })),
+    })
 
     // The quota is the server's count; read it again whenever a graph comes or goes.
     useEffect(() => {
@@ -156,7 +177,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                 ) : (
                     <div className="mt-5 space-y-4">
                         <ul aria-label="Your graphs" className="grid gap-2 sm:grid-cols-2">
-                            {graphs.map(ds => (
+                            {graphs.map((ds, i) => (
                                 <li key={ds.id} className="group flex items-center rounded-2xl border border-glass-border bg-canvas/60 hover:border-violet-500/40 hover:shadow-md hover:shadow-violet-500/10 transition">
                                     <button
                                         type="button"
@@ -168,13 +189,15 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                                         </span>
                                         <span className="min-w-0 flex-1">
                                             <span className="block truncate text-sm font-semibold text-ink">{ds.label || ds.graphName || 'Untitled graph'}</span>
-                                            <span className="block text-[11px] text-ink-muted">{viewsOn(ds.id) ? plural(viewsOn(ds.id), 'view') : 'No views yet'}</span>
+                                            {viewCountByDs ? (
+                                                <span className="block text-[11px] text-ink-muted">{viewCountByDs[ds.id] ? plural(viewCountByDs[ds.id], 'view') : 'No views yet'}</span>
+                                            ) : countsPending && <Skeleton className="mt-1 h-3 w-14" />}
                                         </span>
                                         <ArrowRight className="w-4 h-4 text-ink-muted opacity-0 group-hover:opacity-100 transition" aria-hidden />
                                     </button>
                                     {/* Add more data: its Context View, with the import open in a draft. */}
                                     {(() => {
-                                        const context = views.find(v => v.dataSourceId === ds.id && v.viewType === 'reference')
+                                        const context = contextViews[i]?.data?.items[0]
                                         return context && (
                                             <Link to={`/views/${context.id}?import=1`} title="Add more data from a file, in a draft"
                                                 aria-label={`Add more data to ${ds.label || ds.graphName || 'this graph'}`}
@@ -208,7 +231,7 @@ export function PlaygroundExperiments({ workspace, views, layout = 'cards', onNe
                     </div>
                 )}
                 <YourDataModels className="mt-5 border-t border-glass-border pt-4" />
-                <BuilderChecklist workspace={workspace} views={views} className="mt-5" />
+                <BuilderChecklist workspace={workspace} views={mine} className="mt-5" />
             </div>
             {importing && <BringYourOwnData workspaceId={workspace.id} onClose={closeImport} quotaLeft={samples?.quotaLeft ?? (quota > 0 ? quota - used : undefined)} />}
         </section>
