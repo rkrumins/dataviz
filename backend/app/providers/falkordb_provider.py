@@ -50,10 +50,10 @@ from ..models.graph import (
     TraceResult, TraceFocus,
 )
 # The closure-walk models are not carried by the app-level re-export above.
-from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
+from backend.common.models.graph import ChildrenBatchParent, TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
-from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.common.interfaces.provider import ProviderConfigurationError, children_batch_by_query
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.property_patch import apply_properties_patch
 from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
@@ -7352,56 +7352,9 @@ class FalkorDBProvider(GraphDataProvider):
         # size — a "Load 1 more" that loaded nothing.
         params["lim"] = limit + 1
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
-        raw_rows = len(result.result_set or [])
-
-        children: List[GraphNode] = []
-        containment_edges: List[GraphEdge] = []
-        child_urns: List[str] = []
-
-        for row in (result.result_set or []):
-            n = self._extract_node_from_result(row[0])
-            child_count = row[1]
-            parent_u = row[2]
-            rel_type = row[3]
-            rprops = row[4] or {}
-
-            if n:
-                if child_count is not None:
-                    n.child_count = int(child_count)
-                    if n.properties:
-                        n.properties['childCount'] = int(child_count)
-                children.append(n)
-                child_urns.append(n.urn)
-
-                # Build containment edge from the matched relationship
-                containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
-
-        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
-        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
-        # the cursor MUST be the page's boundary sort key or keyset pagination
-        # skips rows. LIMIT selection is unaffected (known engine behaviour).
-        # Sorts on (displayName, urn) — the same composite key the cursor uses,
-        # in the requested direction.
-        if sort_property == "displayName" and children:
-            # Derive the index permutation from _keyset_sort (the single
-            # source of keyset order, incl. the DESC prefix semantics) so the
-            # paired containment_edges list stays aligned with its child.
-            ordered = _keyset_sort(list(children), sort_direction)
-            index_of = {id(node): i for i, node in enumerate(children)}
-            order = [index_of[id(node)] for node in ordered]
-            children = [children[i] for i in order]
-            containment_edges = [containment_edges[i] for i in order]
-            child_urns = [children[i].urn for i in range(len(children))]
-        # The probe row is the LAST in the page's order (LIMIT selects correctly even where
-        # the engine reorders the aggregating RETURN, and the sort above restores the order):
-        # it says there is more and is served by the next page, not this one.
-        has_more = raw_rows > limit
-        if len(children) > limit:
-            children, containment_edges = children[:limit], containment_edges[:limit]
-            child_urns = [c.urn for c in children]
-        # Rows the page consumed in the query's order — where the next page starts (every
-        # row counts, an unreadable one included, or the position lags and repeats rows).
-        rows_read = min(raw_rows, limit)
+        children, containment_edges, has_more, rows_read = self._children_page(
+            result.result_set or [], limit, sort_property, sort_direction)
+        child_urns = [c.urn for c in children]
         total = offset + len(children) + (1 if has_more else 0)
 
         # --- Step 2: Fetch cross-child lineage edges ---
@@ -7531,6 +7484,259 @@ class FalkorDBProvider(GraphDataProvider):
                 if lineage_failures else None
             ),
         )
+
+    async def get_children_batch(
+        self,
+        parents: List[ChildrenBatchParent],
+        edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        limit: int = 100,
+        include_lineage_edges: bool = True,
+        sort_direction: str = "asc",
+        lineage_scope: str = "page",
+    ) -> Dict[str, ChildrenWithEdgesResult]:
+        """``get_children_with_edges`` for many parents: one ``UNWIND $parents``
+        statement per parent label, each parent's page ordered and cut INSIDE it with
+        the single read's order (displayName, urn, id) and its probe row, then the
+        same post-processing (``_children_page``) — so a parent's page here is the
+        page it reads alone, and pages on from the same ``nextOffset``/``nextCursor``.
+        The pages' lineage is read once for the whole batch and dealt to each parent
+        by the single read's rule. A parent whose label is not known (unlabeled
+        residue, or not in the graph) is read on its own, as the single read anchors
+        it: an unlabeled ``WHERE p.urn = q.urn`` per UNWIND row would be a full scan
+        per parent."""
+        await self._ensure_connected()
+        sort_direction = _validate_sort_direction(sort_direction)
+        siblings_scope = lineage_scope == "siblings"
+        target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
+        aliased_lineage = self._alias_rel_types(lineage_edge_types) if lineage_edge_types else lineage_edge_types
+        rel_list = list(target_edge_types)
+        # The first ask for a parent named twice.
+        firsts: Dict[str, ChildrenBatchParent] = {}
+        for p in parents:
+            firsts.setdefault(p.urn, p)
+        if not rel_list:
+            return {urn: ChildrenWithEdgesResult(
+                children=[], containmentEdges=[], lineageEdges=[],
+                totalChildren=0, hasMore=False, nextOffset=p.offset,
+            ) for urn, p in firsts.items()}
+        rel_alt = "|".join(_sanitize_label(t) for t in rel_list)
+        cmp = "<" if sort_direction == "desc" else ">"
+        dir_kw = " DESC" if sort_direction == "desc" else ""
+
+        # Where each parent's page starts: a cursor (it takes precedence, as on the
+        # single read) as a keyset bound, else an offset as a slice of the ordered rows.
+        asks: Dict[str, Dict[str, Any]] = {}
+        for urn, p in firsts.items():
+            name, last = _decode_keyset_cursor(p.cursor, sort_direction) if p.cursor else (None, None)
+            asks[urn] = {"urn": urn, "skip": 0 if p.cursor else p.offset, "cn": name, "cu": last}
+
+        from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        rows_of: Dict[str, list] = {urn: [] for urn in asks}
+        alone: List[ChildrenBatchParent] = []
+        for label, urns in await self._label_buckets(list(asks)):
+            if not label:
+                alone.extend(firsts[u] for u in urns)
+                continue
+            bucket = [asks[u] for u in urns]
+            # Deep enough for the deepest offset in the bucket, plus the probe row.
+            window = max(a["skip"] for a in bucket) + limit + 1
+            result = await self._ro_query(
+                "UNWIND $parents AS q "
+                "CALL { WITH q "
+                f"MATCH (p:{label})-[r:{rel_alt}]->(c) WHERE p.urn = q.urn "
+                f"AND (q.cn IS NULL OR c.displayName {cmp} q.cn "
+                f"OR (q.cu IS NOT NULL AND c.displayName = q.cn AND c.urn {cmp} q.cu)) "
+                f"WITH r, c ORDER BY c.displayName{dir_kw}, c.urn{dir_kw}, id(c){dir_kw} LIMIT $window "
+                "RETURN collect([c, type(r), properties(r)]) AS page } "
+                "WITH q, page[q.skip..q.skip + $lim] AS page "
+                "UNWIND range(0, size(page) - 1) AS i "
+                "WITH q, i, page[i][0] AS c, page[i][1] AS relType, page[i][2] AS rprops "
+                f"OPTIONAL MATCH (c)-[:{rel_alt}]->(gc) "
+                "RETURN c, count(gc) AS childCount, q.urn AS parentUrn, relType, rprops, i",
+                params={"parents": bucket, "window": window, "lim": limit + 1},
+                timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
+                op="children.batch",
+            )
+            for row in result.result_set or []:
+                rows_of[row[2]].append(row)
+
+        out: Dict[str, ChildrenWithEdgesResult] = {}
+        pages: Dict[str, Tuple[List[GraphNode], List[GraphEdge], bool, int]] = {}
+        alone_urns = {p.urn for p in alone}
+        for urn, rows in rows_of.items():
+            if urn in alone_urns:
+                continue
+            # The count(gc) aggregation reorders rows: back to the order they were cut in.
+            rows.sort(key=lambda row: row[5])
+            pages[urn] = self._children_page(rows, limit, "displayName", sort_direction)
+
+        # --- The pages' lineage, read once for all of them ---
+        # The single read's leg per page, widened to every page of the batch and dealt
+        # back: page scope keeps an edge both of whose ends are in one parent's
+        # {parent} ∪ page; siblings scope one whose near end is on a parent's page and
+        # whose far end is that parent or shares it.
+        lineage_of: Dict[str, List[GraphEdge]] = {urn: [] for urn in pages}
+        lineage_failures: List[str] = []
+        wanted = {urn: [c.urn for c in page[0]] for urn, page in pages.items()
+                  if len(page[0]) >= (1 if siblings_scope else 2)}
+        if include_lineage_edges and wanted:
+            effective_lineage = aliased_lineage or [t for t in self._get_lineage_edge_types() if t]
+            lineage_params: Dict[str, Any] = {}
+            if effective_lineage:
+                # Case-insensitive, as on the single read (see get_children_with_edges).
+                lineage_where = "AND toUpper(type(lr)) IN $lineageUpper "
+                lineage_params["lineageUpper"] = [_sanitize_label(t).upper() for t in effective_lineage]
+            else:
+                lineage_where = "AND NOT type(lr) IN $excludeTypes "
+                lineage_params["excludeTypes"] = list(target_edge_types) + ["AGGREGATED"]
+
+            async def _read(cypher: str, params: Dict[str, Any], op: str) -> list:
+                try:
+                    res = await self._ro_query(
+                        cypher, params={**lineage_params, **params},
+                        timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op=op,
+                    )
+                    return res.result_set or []
+                except Exception as exc:
+                    logger.warning("children batch lineage query failed: %s", exc)
+                    lineage_failures.append(type(exc).__name__)
+                    return []
+
+            # (parent, source, target, type, props) per edge.
+            dealt: List[Tuple[str, str, str, str, dict]] = []
+            if siblings_scope:
+                kids = [u for urns in wanted.values() for u in urns]
+                reads = []
+                for label, bucket in await self._label_buckets(kids):
+                    a_anchor = f"(a:{label})" if label else "(a)"
+                    for outgoing in (True, False):
+                        hop = f"{a_anchor}-[lr]->(b)" if outgoing else f"(b)-[lr]->{a_anchor}"
+                        ret = "a.urn AS src, b.urn AS tgt" if outgoing else "b.urn AS src, a.urn AS tgt"
+                        # The near end's parent among the batch's, read from the near
+                        # end (a short hop), and the far end that parent or under it.
+                        reads.append(_read(
+                            f"MATCH {hop} WHERE a.urn IN $bucketUrns {lineage_where}"
+                            f"MATCH (p)-[:{rel_alt}]->(a) WHERE p.urn IN $parentUrns "
+                            f"WITH p, a, b, lr WHERE b = p OR (p)-[:{rel_alt}]->(b) "
+                            f"RETURN p.urn AS parent, a.urn AS near, {ret}, type(lr), properties(lr)",
+                            {"bucketUrns": bucket, "parentUrns": list(wanted)},
+                            "children.batch.lineage.siblings",
+                        ))
+                on_page = {urn: set(urns) for urn, urns in wanted.items()}
+                for rows in await asyncio.gather(*reads):
+                    for parent_u, near, src, tgt, rel_type, props in rows:
+                        # A child under two of the batch's parents is on the page of one.
+                        if near in on_page[parent_u]:
+                            dealt.append((parent_u, src, tgt, rel_type, props or {}))
+            else:
+                scope = {urn: {urn, *urns} for urn, urns in wanted.items()}
+                page_urns = list(dict.fromkeys(u for urns in scope.values() for u in urns))
+                rows = [row for part in await asyncio.gather(*[
+                    _read(
+                        f"MATCH {f'(a:{label})' if label else '(a)'}-[lr]->(b) "
+                        f"WHERE a.urn IN $bucketUrns AND b.urn IN $pageUrns {lineage_where}"
+                        f"RETURN a.urn, b.urn, type(lr), properties(lr)",
+                        {"bucketUrns": bucket, "pageUrns": page_urns},
+                        "children.batch.lineage",
+                    )
+                    for label, bucket in await self._label_buckets(page_urns)
+                ]) for row in part]
+                for urn, ends in scope.items():
+                    for row in rows:
+                        if row[0] in ends and row[1] in ends:
+                            dealt.append((urn, row[0], row[1], row[2], row[3] or {}))
+            # An edge read from both of its ends (two children of one page) is kept once.
+            seen: Set[Tuple[str, str, str, str, str]] = set()
+            for parent_u, src, tgt, rel_type, props in dealt:
+                key = (parent_u, src, tgt, str(rel_type).upper(), str(props.get("id", "")))
+                if key in seen:
+                    continue
+                seen.add(key)
+                lineage_of[parent_u].append(_edge_from_row(src, tgt, rel_type, props))
+
+        degraded = (
+            f"lineage incomplete: {len(lineage_failures)} lineage "
+            f"quer{'y' if len(lineage_failures) == 1 else 'ies'} failed ({', '.join(sorted(set(lineage_failures)))})"
+            if lineage_failures else None
+        )
+        for urn, (children, containment_edges, has_more, rows_read) in pages.items():
+            offset = firsts[urn].offset
+            out[urn] = ChildrenWithEdgesResult(
+                children=children,
+                containmentEdges=containment_edges,
+                lineageEdges=lineage_of[urn],
+                totalChildren=offset + len(children) + (1 if has_more else 0),
+                hasMore=has_more,
+                nextCursor=(
+                    _encode_keyset_cursor(children[-1].display_name, children[-1].urn, sort_direction)
+                    if children and has_more else None
+                ),
+                nextOffset=offset + rows_read,
+                degradedDetail=degraded if urn in wanted else None,
+            )
+        if alone:
+            scope_kw = {"lineage_scope": lineage_scope} if siblings_scope else {}
+            out.update(await children_batch_by_query(
+                self, alone, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+                limit=limit, include_lineage_edges=include_lineage_edges,
+                sort_direction=sort_direction, **scope_kw,
+            ))
+        return {p.urn: out[p.urn] for p in parents if p.urn in out}
+
+    def _children_page(
+        self, rows: list, limit: int, sort_property: Optional[str], sort_direction: str,
+    ) -> Tuple[List[GraphNode], List[GraphEdge], bool, int]:
+        """One parent's page from its rows ``[child, childCount, parentUrn, relType,
+        rprops]``, read ``limit + 1`` deep — the single read's and the batch's, so the
+        two pages cannot drift apart: (children, containment edges, has_more, rows
+        read, which is where the next page starts)."""
+        raw_rows = len(rows)
+        children: List[GraphNode] = []
+        containment_edges: List[GraphEdge] = []
+
+        for row in rows:
+            n = self._extract_node_from_result(row[0])
+            child_count = row[1]
+            parent_u = row[2]
+            rel_type = row[3]
+            rprops = row[4] or {}
+
+            if n:
+                if child_count is not None:
+                    n.child_count = int(child_count)
+                    if n.properties:
+                        n.properties['childCount'] = int(child_count)
+                children.append(n)
+
+                # Build containment edge from the matched relationship
+                containment_edges.append(_edge_from_row(parent_u, n.urn, rel_type, rprops))
+
+        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
+        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
+        # the cursor MUST be the page's boundary sort key or keyset pagination
+        # skips rows. LIMIT selection is unaffected (known engine behaviour).
+        # Sorts on (displayName, urn) — the same composite key the cursor uses,
+        # in the requested direction.
+        if sort_property == "displayName" and children:
+            # Derive the index permutation from _keyset_sort (the single
+            # source of keyset order, incl. the DESC prefix semantics) so the
+            # paired containment_edges list stays aligned with its child.
+            ordered = _keyset_sort(list(children), sort_direction)
+            index_of = {id(node): i for i, node in enumerate(children)}
+            order = [index_of[id(node)] for node in ordered]
+            children = [children[i] for i in order]
+            containment_edges = [containment_edges[i] for i in order]
+        # The probe row is the LAST in the page's order (LIMIT selects correctly even where
+        # the engine reorders the aggregating RETURN, and the sort above restores the order):
+        # it says there is more and is served by the next page, not this one.
+        has_more = raw_rows > limit
+        if len(children) > limit:
+            children, containment_edges = children[:limit], containment_edges[:limit]
+        # Rows the page consumed in the query's order — where the next page starts (every
+        # row counts, an unreadable one included, or the position lags and repeats rows).
+        rows_read = min(raw_rows, limit)
+        return children, containment_edges, has_more, rows_read
 
     async def get_parent(self, child_urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
