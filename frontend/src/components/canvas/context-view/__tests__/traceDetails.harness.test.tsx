@@ -6,9 +6,9 @@
  * WAS the traced entity, on the assumption that the dock offered Details. It
  * didn't: its focus chip only named the entity. So a Business reader who
  * traced a dashboard could not read about that dashboard without leaving the
- * trace or knowing the right-click. The chip now opens the details, each row
- * of a combined trace's list does too, and the trace's selection bar offers
- * Details for the traced entity where a click doesn't open them.
+ * trace or knowing the right-click. The chip now opens the details and each
+ * row of a combined trace's list does too — so no selection bar repeats them
+ * for the traced entity, taking height from the columns.
  */
 import { describe, expect, it } from 'vitest'
 import { act, fireEvent, screen, within } from '@testing-library/react'
@@ -42,20 +42,13 @@ describe('details from the trace dock', () => {
     expect(h.storeWrites()).toBe(0)
   }, 30000)
 
-  it('Business: the trace bar offers Details for the traced entity, and only Details to read it', async () => {
+  it('Business: no bar repeats the chip for the traced entity', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', persona: 'business' })
     await h.startTrace('cfo')
-
-    const bar = selectionBar()
-    expect(bar).toBeTruthy()
-    // Tracing the traced entity again would only redraw the same trace.
-    expect(within(bar!).queryByRole('button', { name: /trace from here/i })).toBeNull()
-    expect(within(bar!).queryByRole('button', { name: /add to trace/i })).toBeNull()
-
-    await click(h, within(bar!).getByRole('button', { name: /details/i }))
-    expect(h.drawerEntity()).toBe('cfo')
-    // Open, the drawer follows the selection: the bar has nothing left to offer.
+    // The dock's chip reads the traced entity; a bar saying the same would only
+    // take height from the columns.
     expect(selectionBar()).toBeNull()
+    expect(screen.getByRole('button', { name: 'Open details for cfo' })).toBeTruthy()
   }, 30000)
 
   it('Technical: the chip opens the details the trace put away; no bar for the traced entity', async () => {

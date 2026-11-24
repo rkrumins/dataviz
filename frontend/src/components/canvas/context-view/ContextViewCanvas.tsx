@@ -8066,16 +8066,16 @@ export function ContextViewCanvas({
             it to the trace on screen — and read it (Details) or export it, which only read, so the
             trace's write lock doesn't apply. Only once the reader selects something other than
             what is traced: the selection a trace starts from is the trace's own, and the dock
-            already reads it — but for Details, where a click doesn't open them (the dock's focus
-            chip offers them too). The same actions lead a trace card's context menu. */}
-        {traceActive && bulkSelection.length > 0 && (!selectionIsTraced(bulkSelection) || offerDetails) && (
+            already reads it, its focus chip opening the details — a bar repeating that would
+            only take height from the columns. The same actions lead a trace card's context menu. */}
+        {traceActive && bulkSelection.length > 0 && !selectionIsTraced(bulkSelection) && (
           <SelectionBar
             nodeIds={bulkSelection}
             labelFor={(id) => displayMap.get(id)?.name
               || (traceNodeIndex?.get(id)?.data as { label?: string } | undefined)?.label || id}
             onRemove={(id) => selectNode(id, true)}
             onClear={clearSelection}
-            onTraceFrom={selectionIsTraced(bulkSelection) ? undefined : () => startCanvasTrace(bulkSelection)}
+            onTraceFrom={() => startCanvasTrace(bulkSelection)}
             onAddToTrace={selectionTraceAddition && selectionTraceAddition.urns.length > 0
               ? () => addTraceSeeds(selectionTraceAddition.urns)
               : undefined}
