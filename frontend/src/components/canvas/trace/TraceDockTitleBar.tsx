@@ -337,7 +337,9 @@ export function TraceDockTitleBar({
         // The traced entity, one click from its details — in every view. The
         // Business view opens details only when asked, and during a trace the
         // selection bar stands aside for the dock, so this is where to ask.
-        <HoverTip label="Open details" detail={focusName} className="flex min-w-0 shrink">
+        // Shrinks with the dock like the combined chip: the name gives way
+        // inside its own box, never spilling over the counts beside it.
+        <HoverTip label="Open details" detail={focusName} className="flex min-w-[4.5rem] shrink">
           <button
             type="button"
             data-trace-control
@@ -345,7 +347,7 @@ export function TraceDockTitleBar({
             onClick={() => onOpenDetails(focusRef)}
             className={cn(
               FOCUS_CHIP,
-              'transition-all duration-200',
+              'max-w-full overflow-hidden transition-all duration-200',
               'hover:bg-white/[0.12] hover:border-accent-lineage/40',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
             )}
@@ -652,8 +654,9 @@ function FocusChipBody({ name, type, level }: { name: string; type?: string; lev
       <span className="text-sm font-display font-semibold text-ink truncate max-w-[180px] tracking-tight">
         {name}
       </span>
+      {/* The type gives way before the name does. */}
       {type && (
-        <span className="hidden xl:inline-flex shrink-0 px-1.5 py-0.5 rounded-md bg-accent-lineage/20 text-accent-lineage text-[10px] font-bold uppercase tracking-wider border border-accent-lineage/30">
+        <span className="hidden xl:inline-flex min-w-0 shrink-[100] overflow-hidden px-1.5 py-0.5 rounded-md bg-accent-lineage/20 text-accent-lineage text-[10px] font-bold uppercase tracking-wider border border-accent-lineage/30">
           {type}
         </span>
       )}
