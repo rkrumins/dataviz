@@ -200,7 +200,7 @@ What the export holds:
 | `viewId` | Only a view's entities: what it places, with their containment descendants. An edge only when both its ends are in |
 | `ids`, `types` | Comma-separated entity ids or urns, and entity types: only those. An edge only when both its ends are kept |
 | `withChildren` | With `ids`: everything inside those entities too, down the ontology's containment, at every level |
-| `withPath` | `true`: each node also says where it sits, its parent and path (the informational columns below). One containment read for every thousand nodes. The Export dialog asks for it unless it is switched off |
+| `withPath` | `true`: each node also says where it sits, its parent and path (the informational columns below). Off unless asked, so a file reads as it always has to whatever consumes it. One containment read for every thousand nodes. The Export dialog asks for it only while its "Include where each entity sits" switch is on: off until the person turns it on, then remembered for their next export |
 | `props` | Comma-separated property names to add as empty `prop.<name>` columns to fill |
 | `filename`, `idempotencyKey` | The download's name (no extension); a key that makes the request safe to send again |
 
@@ -234,7 +234,7 @@ object, one per node or edge. CSV and TSV files start with a UTF-8 byte-order ma
 | `prop.<name>` | both | One property per column. The data source's name property, `prop.name` unless it names another, is kept in step with `displayName`: edit either |
 | `properties_json` | both | Properties too nested for a column, as a JSON object |
 | `_op` | both | Blank to create or update; `delete` to delete |
-| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | node | **Informational** (`withPath`): where the node sits. Its direct container, then every container from the top of the graph down to it, by name and by urn. Empty at the top of the graph and on an edge row. Lists in NDJSON and JSON; in CSV, TSV and Excel `path` reads `A / B` and `pathUrns` `a; b`. **An import ignores them**: they never become properties, and the graph's containment edges stay what says where a node sits |
+| `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` | node | **Informational**, only in an export asked `withPath=true`: where the node sits. Its direct container, then every container from the top of the graph down to it, by name and by urn. Empty at the top of the graph and on an edge row. Lists in NDJSON and JSON; in CSV, TSV and Excel `path` reads `A / B` and `pathUrns` `a; b`. **An import ignores them**: they never become properties, and the graph's containment edges stay what says where a node sits. A file with them imports exactly as the same file without them, in every format, an edge row that carries them too |
 
 An Excel workbook has a **Nodes** and an **Edges** sheet instead of the `kind` column, with the
 identity columns greyed. An import also reads `source.<name>` and `target.<name>`: an edge's end

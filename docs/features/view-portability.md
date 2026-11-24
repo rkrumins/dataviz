@@ -122,9 +122,12 @@ one schema, one parser and one importer.
   Their ids are never used as ids.
 - **`manifest.entities`** names every entity the view places, so the target can show *what* didn't
   match rather than a bare URN. `entitiesResolved` is false when the source graph couldn't be asked
-  for names at export time. Each also says where it sat there, its parent and path, as every export
-  of entities does: informational, read leniently and by nothing on import, and left out when the
-  source couldn't say.
+  for names at export time. When the export asks for it (`withPath: true`; off by default, and in
+  the Export dialog until the person turns its "Include where each entity sits" switch on, which is
+  then remembered), each also says where it sat there, its parent and path, as any export of
+  entities asked for it does (the example above shows them): informational, read leniently and by
+  nothing on import, and left out when the source couldn't say. A file with them imports exactly as
+  the same file without them.
 - **`history`** is the full ancestry: the view's own versions, preceded by history carried in from
   earlier imports, capped at 500 entries (`historyTruncated`). Its hashes let an import into a
   view that already exists find the version they last had in common.
@@ -350,7 +353,9 @@ control. The scope is `view` (the one view's entities; exactly one view) or `sou
 data source; any number of its views). The data version is `published`, or `draft` (the caller's
 own draft of the view). The views are sealed as versions exactly as for a view file, and an export
 job writes the data and assembles the package around it, streaming, so the data is never held in
-memory. The client polls the job and downloads through the data source's export endpoints; the
+memory. `withPath: true` (off by default, the same remembered switch as a view file's) has its data
+and its views' manifest say where each entity sits; a package with them imports exactly as one
+without. The client polls the job and downloads through the data source's export endpoints; the
 download is named for the package.
 
 **Import:**
@@ -415,12 +420,12 @@ description, icon and tags, never visibility, and says the graph data isn't affe
 
 | Route | Does | Gate |
 |---|---|---|
-| `POST /api/v1/views/transfer/export` | `{views: [{viewId, version?}], message?}` → the file (`X-Bundle-Hash`, and for one view `X-Definition-Hash`, `X-View-Version`) | `viewExportEnabled`; read access to every view. Sealing unsaved changes needs edit access: anyone else exports the latest version |
+| `POST /api/v1/views/transfer/export` | `{views: [{viewId, version?}], message?, withPath?}` → the file (`X-Bundle-Hash`, and for one view `X-Definition-Hash`, `X-View-Version`) | `viewExportEnabled`; read access to every view. Sealing unsaved changes needs edit access: anyone else exports the latest version |
 | `POST /api/v1/views/transfer/export/preview` | `{viewIds}` → per view: the version it would export as, whether that includes unsaved changes, counts and an estimated size. Writes nothing | `viewExportEnabled`; read access to every view |
 | `POST /api/v1/views/transfer/inspect` | raw file → bundle, integrity, identity matches, target suggestions | `viewImportEnabled` |
 | `POST /api/v1/views/transfer/reconcile` | views + targets + resolutions → effective definition, report, update preview | `viewImportEnabled`; create permission in the target workspace, or edit access to the target view |
 | `POST /api/v1/views/transfer/import` | one view → view, version, report, integrity (and `staged` when it went into a draft) | `viewImportEnabled`; the view-create gates, or edit access; staging needs sign-in and `workspace:datasource:manage` |
-| `POST /api/v1/views/transfer/packages` | views + scope + data version → export job | `viewExportEnabled` and `graphExportEnabled`; read access; `workspace:datasource:read` |
+| `POST /api/v1/views/transfer/packages` | views + scope + data version (+ `withPath?`) → export job | `viewExportEnabled` and `graphExportEnabled`; read access; `workspace:datasource:read` |
 | `POST /api/v1/views/transfer/packages/uploads` · `PUT …/{uploadId}/parts/{n}` · `POST …/complete` | a zip in parts → **202**, checked by a `package_inspect` job | `viewImportEnabled`; version control on; sign-in |
 | `POST /api/v1/views/transfer/packages/inspect` | a raw zip of at most 100 MB → **202** `{uploadId, jobId}`, checked the same way | `viewImportEnabled`; version control on; sign-in |
 | `GET /api/v1/views/transfer/packages/{uploadId}` | the checked package: as inspect, plus the package, `ontologyMatch` and `newSources` | `viewImportEnabled`; the uploader |

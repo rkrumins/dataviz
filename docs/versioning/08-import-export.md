@@ -643,17 +643,28 @@ Import/export uses **one shared flat schema across every format** (`rowmodel.py:
 | **Edge core** | `edgeType`, `sourceQualifiedName`, `targetQualifiedName`, `source_entity_id`, `target_entity_id`, `confidence` |
 | **Properties** | one dynamic **`prop.<name>`** column per property + a `properties_json` **overflow** column |
 | **Op** | `_op` — blank/`upsert` (default) or `delete` |
-| **Informational** | `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` — where a node sits, written by an export asked `withPath` (after the node core, only when present); **ignored on import** |
+| **Informational** | `parentUrn`, `parentName`, `parentType`, `path`, `pathUrns` — where a node sits, written only by an export asked `withPath` (after the node core, only when present); **ignored on import** |
 
-> **Decision — where a node sits travels with it, read by nothing.** Every file of entities (a
-> data export in each format, a view package's data, a view file's manifest, a member set, a
-> search's matches, the trace and the Lens walk) carries the same five columns
+> **Decision — where a node sits travels with it when asked, read by nothing.** Every file of
+> entities (a data export in each format, a view package's data, a view file's manifest, a member
+> set, a search's matches, the trace and the Lens walk) can carry the same five columns
 > (`backend/common/ancestry_columns.py`, `frontend/src/lib/ancestryColumns.ts`), so a spreadsheet
-> reader sees each row's container and path as the canvas nests it. They are informational:
+> reader sees each row's container and path as the canvas nests it. **Opt-in**: a data export, a
+> search's export, a view file and a view package write them only when asked (`withPath`, default
+> false), so an integration reading those files sees no new columns; the UI's switch is off until
+> the person turns it on, then remembered for their next export (one preference for all of them,
+> `exportWithPath`). A member set's download has always carried them and still does unless asked
+> `withPath=false` (its own remembered switch, `traceExportWithPath`, on by default); the trace
+> dock's own CSV and JSON always do. They are informational:
 > `rowmodel.INFORMATIONAL_COLUMNS` is never read by `normalize`, the record contract declares them
 > (so the published schema accepts an exported file and the dry run's `unknownColumns` never lists
-> them), and the browser's simple files never make them properties (`ownData.propertyColumns`,
-> case- and underscore-insensitive). Containment edges stay the only thing that places a node.
+> them), and the browser's simple files never make them properties nor offer them as an identifier column
+> (`ownData.propertyColumns`, `identifierCheck`, case- and underscore-insensitive, in a file with
+> the export markers `parentUrn`/`pathUrns`; someone's own `path` column stays theirs). A file with
+> them imports exactly as the same file without them — every format, dry run and applied, an edge
+> file carrying them too (`tests/integration/test_import_ancestry_matrix.py`,
+> `tests/test_export_placement.py`, `fileRows.test.ts`). Containment edges stay the only thing that
+> places a node.
 
 > **Decision — properties are tabular, not a JSON blob.** Every property is its **own `prop.<name>`
 > column** (`column_order`, `export_worker.py:51-80`) — like a spreadsheet — so 10–50 properties are
@@ -962,8 +973,8 @@ fails.
   (`live.placer`). Either way one chain read per thousand nodes, on the pass that writes the file
   only: the spreadsheets' column pass adds the columns without reading a chain. NDJSON and JSON
   keep lists; CSV, TSV and Excel cells read `A / B` and `a; b`; the Edges sheet stays clean. A view
-  package's data always carries them. The ExportDialog asks for it unless the person switches it
-  off.
+  package's data carries them when the package is asked `withPath`. The ExportDialog asks for it
+  only while its switch is on (off until the person turns it on, then remembered).
 
 **The options plumbing is consistent end to end** (verified against the current tree): the
 `create_export` endpoint declares `props`/`ids`/`types` and passes
@@ -973,7 +984,7 @@ them into an `options` dict stored in `field_scope` (`service.py:208-221`) → `
 (`export_worker.py:191-196`).
 
 > **What the UI sends.** The **ExportDialog** sends `format`, `viewId`, `branchId`, `asOfSeq`,
-> `props` and `withPath` (its "Include where each entity sits" switch, on by default); opened on a canvas selection (the selection bar's **Export…**, or **Export with
+> `props` and `withPath` (its "Include where each entity sits" switch: off until the person turns it on, then remembered for their next export); opened on a canvas selection (the selection bar's **Export…**, or **Export with
 > children…** on an entity's context menu), it sends the selected ids in the body with
 > `withChildren=true` instead of `viewId`, so the file holds them and everything inside them, to
 > edit offline and import back. Row-scope by `types` remains API-only.
