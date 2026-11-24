@@ -16,12 +16,15 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
   ChevronDown,
+  ChevronsUpDown,
   Eye,
   EyeOff,
+  FolderOpen,
   FolderTree,
   Maximize,
   Minimize,
   Minus,
+  PanelTop,
   Plus,
   RotateCcw,
   Rows3,
@@ -32,6 +35,7 @@ import {
   MemoryStick,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useSchemaStore } from '@/store/schema'
 import {
   usePreferencesStore,
@@ -39,6 +43,8 @@ import {
   CANVAS_ZOOM_MIN,
   CANVAS_ZOOM_STEP,
   type CanvasDensity,
+  type CanvasHeaderSize,
+  type EmptyLayerMessage,
 } from '@/store/preferences'
 
 interface DisplaySettingsPopoverProps {
@@ -67,6 +73,18 @@ const DENSITY_OPTIONS: DensityOption[] = [
   { mode: 'spacious', label: 'Spacious', description: 'Larger rows and icons for readability (default)', icon: Maximize },
 ]
 
+const HEADER_SIZE_OPTIONS: { size: CanvasHeaderSize; label: string; tip: string; band: number }[] = [
+  { size: 'compact', label: 'Compact', tip: 'A slim header, with the name on one line', band: 5 },
+  { size: 'comfortable', label: 'Comfortable', tip: 'The name on up to two lines (default)', band: 8 },
+  { size: 'spacious', label: 'Spacious', tip: 'A larger name and icon, on up to two lines', band: 11 },
+]
+
+const EMPTY_LAYER_OPTIONS: { mode: EmptyLayerMessage; label: string; description: string }[] = [
+  { mode: 'always', label: 'Always', description: 'An empty layer says it has nothing in it (default)' },
+  { mode: 'tracing-hidden', label: 'Not while tracing', description: 'Left blank during a trace, when most layers hold none of its lineage' },
+  { mode: 'never', label: 'Never', description: 'An empty layer is left blank' },
+]
+
 const POPOVER_WIDTH = 320
 
 function formatZoom(z: number): string {
@@ -84,6 +102,12 @@ export function isDefaultState(props: {
   showEntityIds?: boolean
   /** Absent reads as the default (off). */
   showMemoryUsage?: boolean
+  /** Absent reads as the default (comfortable). */
+  headerSize?: CanvasHeaderSize
+  /** Absent reads as the default (shown). */
+  showOffscreenLineMarkers?: boolean
+  /** Absent reads as the default (always). */
+  emptyLayerMessage?: EmptyLayerMessage
 }): boolean {
   return (
     Math.abs(props.canvasZoom - 1) < 0.001 &&
@@ -92,7 +116,10 @@ export function isDefaultState(props: {
     props.subtleTreeLines === false &&
     props.showEntityIcons !== false &&
     props.showEntityIds !== false &&
-    props.showMemoryUsage !== true
+    props.showMemoryUsage !== true &&
+    (props.headerSize ?? 'comfortable') === 'comfortable' &&
+    props.showOffscreenLineMarkers !== false &&
+    (props.emptyLayerMessage ?? 'always') === 'always'
   )
 }
 
@@ -303,8 +330,14 @@ export function DisplaySettingsSections({
   const subsetView = useSchemaStore((s) => { const v = s.getActiveView(); return !!v?.search || !!v?.membership })
   const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
   const toggleWhereTheySit = usePreferencesStore((s) => s.toggleWhereTheySit)
-  const togglesOn = [showEntityIcons, !simple && showEntityIds, showTypeBadge, subtleTreeLines, showMemoryUsage,
-    subsetView && showWhereTheySit].filter(Boolean).length
+  const headerSize = usePreferencesStore((s) => s.canvasHeaderSize) ?? 'comfortable'
+  const setHeaderSize = usePreferencesStore((s) => s.setCanvasHeaderSize)
+  const showOffscreenMarkers = usePreferencesStore((s) => s.showOffscreenLineMarkers) ?? true
+  const toggleOffscreenMarkers = usePreferencesStore((s) => s.toggleOffscreenLineMarkers)
+  const emptyLayerMessage = usePreferencesStore((s) => s.emptyLayerMessage) ?? 'always'
+  const setEmptyLayerMessage = usePreferencesStore((s) => s.setEmptyLayerMessage)
+  const togglesOn = [showEntityIcons, !simple && showEntityIds, showTypeBadge, showOffscreenMarkers, subtleTreeLines,
+    showMemoryUsage, subsetView && showWhereTheySit].filter(Boolean).length
 
   return (
     <>
@@ -405,6 +438,44 @@ export function DisplaySettingsSections({
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
+      {/* Header size — each layer's header: its height, name and icon. */}
+      <CollapsibleSection
+        id="header-size"
+        icon={PanelTop}
+        title="Header size"
+        summary={HEADER_SIZE_OPTIONS.find(o => o.size === headerSize)?.label ?? 'Comfortable'}
+      >
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          How tall each layer&rsquo;s header is, with its name and icon.
+        </p>
+        <div role="radiogroup" aria-label="Header size" className="grid grid-cols-3 gap-1.5">
+          {HEADER_SIZE_OPTIONS.map(opt => {
+            const active = headerSize === opt.size
+            return (
+              <HoverTip key={opt.size} className="flex" label={opt.tip}>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setHeaderSize(opt.size)}
+                  className={cn(
+                    'flex-1 flex flex-col items-center gap-1.5 px-2 py-2 rounded-lg border text-[11px] font-medium transition-colors',
+                    active
+                      ? 'bg-accent-lineage/15 border-accent-lineage/40 text-accent-lineage shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                      : 'bg-black/[0.02] border-transparent text-ink-muted hover:bg-black/[0.05] hover:border-black/[0.08] hover:text-ink dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+                  )}
+                >
+                  <HeaderSizeGlyph band={opt.band} />
+                  <span>{opt.label}</span>
+                </button>
+              </HoverTip>
+            )
+          })}
+        </div>
+      </CollapsibleSection>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
       {/* Toggles */}
       <CollapsibleSection
         id="chrome"
@@ -451,6 +522,16 @@ export function DisplaySettingsSections({
           onClick={onToggleTypeBadge}
           accent="cyan"
         />
+        <ToggleRow
+          label="Show off-screen markers"
+          description={showOffscreenMarkers
+            ? 'How much more is past each column’s top and bottom, and the lines that lead there'
+            : 'No count at a column’s top or bottom'}
+          icon={ChevronsUpDown}
+          active={showOffscreenMarkers}
+          onClick={toggleOffscreenMarkers}
+          accent="cyan"
+        />
         {(!simple || showMemoryUsage) && (
           <ToggleRow
             label="Show memory usage"
@@ -471,7 +552,72 @@ export function DisplaySettingsSections({
         />
         </div>
       </CollapsibleSection>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Empty layers — what a column with nothing in it says. */}
+      <CollapsibleSection
+        id="empty-layers"
+        icon={FolderOpen}
+        title="Empty layers"
+        summary={EMPTY_LAYER_OPTIONS.find(o => o.mode === emptyLayerMessage)?.label ?? 'Always'}
+      >
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          When a layer with nothing in it says so.
+          <span className="block mt-0.5">A column built around an entity that is gone always says why.</span>
+        </p>
+        <div role="radiogroup" aria-label="Empty layers" className="flex flex-col gap-1">
+          {EMPTY_LAYER_OPTIONS.map(opt => {
+            const active = emptyLayerMessage === opt.mode
+            return (
+              <button
+                key={opt.mode}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => setEmptyLayerMessage(opt.mode)}
+                className={cn(
+                  'flex items-start gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors',
+                  active
+                    ? 'bg-accent-lineage/15 border-accent-lineage/40 shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                    : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+                )}
+              >
+                <div
+                  className={cn(
+                    'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                    active && 'border-accent-lineage',
+                  )}
+                >
+                  {active && <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className={cn('text-[12px] font-medium leading-tight', active ? 'text-accent-lineage' : 'text-ink')}>
+                    {opt.label}
+                  </div>
+                  <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">{opt.description}</div>
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </CollapsibleSection>
     </>
+  )
+}
+
+/** A column in miniature for Header size: its header band at the size it is
+ *  drawn — icon tile and name — over two rows. */
+function HeaderSizeGlyph({ band }: { band: number }) {
+  const tile = band - 2
+  return (
+    <svg aria-hidden width="32" height="22" viewBox="0 0 32 22">
+      <rect x="0" y="0" width="32" height={band} rx="2" fill="currentColor" fillOpacity={0.18} />
+      <rect x="2" y={(band - tile) / 2} width={tile} height={tile} rx="1" fill="currentColor" />
+      <rect x={tile + 5} y={band / 2 - 1} width="13" height="2" rx="1" fill="currentColor" fillOpacity={0.75} />
+      <rect x="0" y={band + 2} width="32" height="3" rx="1.5" fill="currentColor" fillOpacity={0.12} />
+      <rect x="0" y={band + 7} width="32" height="3" rx="1.5" fill="currentColor" fillOpacity={0.12} />
+    </svg>
   )
 }
 
