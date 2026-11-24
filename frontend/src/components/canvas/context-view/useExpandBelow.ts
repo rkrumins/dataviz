@@ -20,8 +20,16 @@
  * graph should never have.
  *
  * Progress is one toast, keyed per run, updated in place: the level it is on
- * and what has loaded, with Cancel — or Continue at a checkpoint. Cancel stops
- * the loop and the pages still on their way; what already loaded stays.
+ * and what has loaded, with Cancel. Cancel stops the loop and the pages still
+ * on their way; what already loaded stays — and the next "All levels" starts
+ * at the shallowest level still closed, which is where this one stopped.
+ *
+ * At a checkpoint the toast is the run's question: Load 2,000 more, Load
+ * everything (no more checkpoints — the depth limit and Cancel still stop it),
+ * or Stop here, saying how many containers are still closed at the next
+ * level. Closing it leaves the run paused, not stopped: `paused` says so, and
+ * the canvas offers the same choices (`resume`, `cancel`) where the run was
+ * started. A new expand replaces a paused run, as it does a running one.
  *
  * The same hook runs a trace, where the canvas hands it the overlay's tree:
  * it then opens only the cards the trace already holds, and fetches nothing.
@@ -30,8 +38,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useNotificationStore } from '@/components/ui/notifications'
 
+import type { ContextMenuAction } from '../CanvasContextMenu'
+
 /** Newly loaded entities between checkpoints in an "All levels" run. */
 export const CHECKPOINT_EVERY = 2_000
+/** A paused run's choices, by the same names wherever they are offered. */
+export const RESUME_LABELS = {
+  more: `Load ${CHECKPOINT_EVERY.toLocaleString()} more`,
+  all: 'Load everything',
+  stop: 'Stop here',
+} as const
 /** No containment is this deep; a run that gets here is walking a cycle. */
 export const MAX_EXPAND_DEPTH = 50
 
@@ -109,10 +125,38 @@ export interface ExpandBelowDeps extends ExpandTree {
   labelOf: (id: string) => string
 }
 
+/** A run waiting at a checkpoint: what its prompt says, for the canvas's own controls. */
+export interface PausedRun {
+  /** The rows it opens what is inside of (the outermost of those asked). */
+  roots: readonly string[]
+  /** "Paused opening “Warehouse” · 2,032 loaded so far" */
+  message: string
+  /** "312 containers still to open at level 4" */
+  detail: string
+}
+
+/** Whether `paused` is the run these rows' Expand would start: the same roots. */
+export function isPausedOn(paused: PausedRun | null, roots: readonly string[]): boolean {
+  if (!paused || paused.roots.length !== roots.length) return false
+  const own = new Set(paused.roots)
+  return roots.every((id) => own.has(id))
+}
+
+/** A paused run's choices as the rows of a right-click menu. */
+export function pausedMenuActions(paused: PausedRun, resume: (how: 'more' | 'all') => void, stop: () => void): ContextMenuAction[] {
+  return [
+    { id: 'expand-more', label: RESUME_LABELS.more, icon: 'ChevronsDown', hint: paused.detail, onClick: () => resume('more') },
+    { id: 'expand-everything', label: RESUME_LABELS.all, icon: 'ArrowDownToLine', onClick: () => resume('all') },
+    { id: 'expand-stop', label: RESUME_LABELS.stop, icon: 'CircleStop', onClick: stop },
+  ]
+}
+
 interface Run {
   key: string
   roots: string[]
   all: boolean
+  /** Load everything was chosen: no more checkpoints. */
+  everything: boolean
   subject: string
   /** Levels opened so far. */
   levels: number
@@ -142,18 +186,20 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
   useEffect(() => { depsRef.current = deps })
   const runRef = useRef<Run | null>(null)
   const [running, setRunning] = useState(false)
+  const [paused, setPaused] = useState<PausedRun | null>(null)
   // A level's pages settled: re-render, so the check below reads the tree
   // they produced.
   const [tick, setTick] = useState(0)
 
-  const toast = useCallback((run: Run, message: string, action: { label: string; onClick: () => void }, secondary?: { label: string; onClick: () => void }) => {
-    useNotificationStore.getState().add({ type: 'loading', key: run.key, message, action, ...(secondary ? { secondaryAction: secondary } : {}) })
+  const toast = useCallback((run: Run, message: string, action: { label: string; onClick: () => void }) => {
+    useNotificationStore.getState().add({ type: 'loading', key: run.key, message, action })
   }, [])
 
   const finish = useCallback((run: Run, message: string, type: 'success' | 'info' = 'success') => {
     if (runRef.current !== run) return
     runRef.current = null
     setRunning(false)
+    setPaused(null)
     const store = useNotificationStore.getState()
     store.removeByKey(run.key)
     store.add({ type, message })
@@ -188,7 +234,7 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
     // "All levels": no more of a wide level at once than fits before the next
     // checkpoint — the rest is still the shallowest closed level next time.
     let ids = level.ids
-    if (run.all) {
+    if (run.all && !run.everything) {
       let budget = CHECKPOINT_EVERY - (d.loadedCount() - run.checkpointBase)
       const batch: string[] = []
       for (const id of level.ids) {
@@ -216,6 +262,17 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
     })
   }, [cancel, finish, toast])
 
+  /** Go on from a checkpoint: to the next one, or — 'all' — with no more of them. */
+  const resume = useCallback((how: 'more' | 'all') => {
+    const run = runRef.current
+    if (!run?.paused) return
+    run.paused = false
+    run.everything = how === 'all'
+    run.checkpointBase = depsRef.current.loadedCount()
+    setPaused(null)
+    step(run)
+  }, [step])
+
   // A level landed (its pages settled and none is still on its way): one
   // level is done; "All levels" goes on, or stops at a checkpoint.
   useEffect(() => {
@@ -228,25 +285,30 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
       finish(run, `Opened level ${(run.depth + 1).toLocaleString()} inside ${run.subject}${loadedSoFar(d, run)}`)
       return
     }
-    const sinceCheckpoint = d.loadedCount() - run.checkpointBase
-    if (sinceCheckpoint >= CHECKPOINT_EVERY) {
+    // A checkpoint — unless the reader chose everything, or nothing is left to ask about.
+    const level = !run.everything && d.loadedCount() - run.checkpointBase >= CHECKPOINT_EVERY
+      ? nextLevel(run.roots, d)
+      : null
+    if (level && level.ids.length > 0) {
       run.paused = true
-      const total = d.loadedCount() - run.startCount
-      toast(run, `Paused opening ${run.subject} · ${total.toLocaleString()} loaded so far. Keep going?`,
-        {
-          label: 'Continue',
-          onClick: () => {
-            if (runRef.current !== run) return
-            run.paused = false
-            run.checkpointBase = depsRef.current.loadedCount()
-            step(run)
-          },
-        },
-        { label: 'Stop', onClick: cancel })
+      const left = level.ids.length
+      const prompt: PausedRun = {
+        roots: run.roots,
+        // The separator holds to what it follows: a line may break after it, never before.
+        message: `Paused opening ${run.subject}\u00a0· ${(d.loadedCount() - run.startCount).toLocaleString()} loaded so far`,
+        detail: `${left.toLocaleString()} ${left === 1 ? 'container' : 'containers'} still to open at level ${(level.depth + 1).toLocaleString()}`,
+      }
+      setPaused(prompt)
+      useNotificationStore.getState().add({
+        type: 'loading', paused: true, key: run.key, message: prompt.message, detail: prompt.detail,
+        action: { label: RESUME_LABELS.more, onClick: () => resume('more') },
+        secondaryAction: { label: RESUME_LABELS.all, onClick: () => resume('all') },
+        tertiaryAction: { label: RESUME_LABELS.stop, onClick: cancel },
+      })
       return
     }
     step(run)
-  }, [tick, deps.loading, finish, step, toast, cancel])
+  }, [tick, deps.loading, finish, step, cancel, resume])
 
   // Unmounting mid-run (a view switch) leaves no toast behind.
   useEffect(() => () => {
@@ -274,15 +336,17 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
       startCount: count,
       checkpointBase: count,
       paused: false,
+      everything: false,
     }
     runRef.current = run
     setRunning(true)
     step(run)
   }, [cancel, step])
 
-  /** Whether a run is going, read at the moment it is asked (`running` is as of
-   *  the last render). */
+  /** Whether a run is going (or paused), read at the moment it is asked
+   *  (`running` is as of the last render). */
   const isRunning = useCallback(() => runRef.current !== null, [])
 
-  return { expand, cancel, running, isRunning }
+  /** `running`: a run is going or paused; `paused`: it waits at a checkpoint. */
+  return { expand, cancel, resume, running, paused, isRunning }
 }
