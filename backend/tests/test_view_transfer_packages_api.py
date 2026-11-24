@@ -278,19 +278,26 @@ async def test_what_a_package_refuses(test_client, db_session, graph, services, 
 
 
 _DATA = b'{"kind":"node","urn":"urn:a","entityType":"dataset"}\n{"kind":"node","urn":"urn:new","entityType":"dataset"}\n'
+#: The same data, each node saying where it sits, as an export asked for that writes it.
+_PLACED_DATA = (b'{"kind":"node","urn":"urn:a","entityType":"dataset","parentUrn":"urn:anchor","parentName":"Finance",'
+                b'"parentType":"domain","path":["Finance"],"pathUrns":["urn:anchor"]}\n'
+                b'{"kind":"node","urn":"urn:new","entityType":"dataset","parentUrn":null,"parentName":null,'
+                b'"parentType":null,"path":[],"pathUrns":[]}\n')
 
 
-async def _package_file(test_client, view_id) -> bytes:
-    """A package of the view: the real bundle, with some graph data, as an export job writes one."""
+async def _package_file(test_client, view_id, placed=False) -> bytes:
+    """A package of the view: the real bundle, with some graph data, as an export job writes one;
+    ``placed``, as one asked for with where each entity sits."""
     async def data():
-        yield _DATA
+        yield _PLACED_DATA if placed else _DATA
 
     def manifest_of(found):
         return {"format": "view-package", "formatVersion": 1, "scope": "view",
                 "data": {"version": "published", "nodes": 2, "edges": 0}, "parts": found}
 
-    bundle = await _export(test_client, view_id)
-    return b"".join([c async for c in package.write_package(bundle, data(), manifest_of)])
+    resp = await test_client.post(f"{_TRANSFER}/export", json={"views": [{"viewId": view_id}], "withPath": placed})
+    assert resp.status_code == 200, resp.text
+    return b"".join([c async for c in package.write_package(resp.content, data(), manifest_of)])
 
 
 async def _upload(client, raw: bytes, *, complete: bool = True) -> str:
@@ -360,6 +367,37 @@ async def test_a_package_is_uploaded_in_parts_checked_by_a_job_and_described(
     assert body["ontologyMatch"] == {"s1": {"exact": None, "drift": False, "sameEnvironment": False}}
     assert all("versioned" in s for items in body["targetSuggestions"].values() for s in items)
     assert body["identityMatches"] is not None
+
+
+async def test_a_package_that_says_where_its_entities_sat_is_described_as_one_that_does_not(
+        test_client, db_session, graph, services, monkeypatch):
+    """Two packages of one view, one with where each entity sat (its views' manifest and its data)
+    and one without: checked and described alike — the same views, the same data by type."""
+    from backend.tests.test_view_transfer_import import _PlacingEngine, _without_places
+
+    async def _engine_for(session, workspace_id, data_source_id):
+        return _PlacingEngine(graph)
+
+    monkeypatch.setattr("backend.app.services.view_transfer.export.engine_for", _engine_for)
+    versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    versioning.track(uat, await _data_source(db_session, uat))
+    view_id = await _view(test_client, dev)
+    described = {}
+    for placed in (True, False):
+        upload = await _upload(test_client, await _package_file(test_client, view_id, placed))
+        await jobs.inspect_queued()
+        resp = await test_client.get(f"{_TRANSFER}/packages/{upload}")
+        assert resp.status_code == 200, resp.text
+        described[placed] = resp.json()
+    assert described[True]["views"][0]["manifest"]["entities"]["urn:a"]["parentName"] == "Finance"
+
+    def what(body):
+        return _without_places({"integrity": body["package"]["integrity"], "data": body["package"]["data"],
+                                **{k: body[k] for k in ("views", "identityMatches", "targetSuggestions",
+                                                        "ontologyMatch")}})
+    assert what(described[True]) == what(described[False])
+    assert described[True]["package"]["data"]["typeStats"]["entityTypeCounts"] == {"dataset": 2}
 
 
 async def test_a_completion_that_died_half_way_is_finished_by_the_next(

@@ -53,6 +53,13 @@ class _Engine:
         )
 
 
+class _PlacingEngine(_Engine):
+    """The graph, saying where its entities sit too: everything under the anchor."""
+
+    async def get_ancestor_chains(self, urns):
+        return {u: [] if u == "urn:anchor" else ["urn:anchor"] for u in urns if u in self.provider.known}
+
+
 @pytest.fixture
 def graph(monkeypatch):
     provider = _Provider()
@@ -657,3 +664,59 @@ async def test_a_view_checked_against_a_draft_finds_what_its_data_was_imported_a
     [plain] = (await importing.reconcile_items(db_session, [item(importing.Target("ws", "ds"))]))["views"]
     assert "urn:gone" in _assignments(plain["effectiveDefinition"])
     assert plain["report"]["summary"]["entities"]["missing"] == 1
+
+
+# ── Where each entity sat: with it or without, the same import ───────────────
+
+def _without_places(value):
+    """``value`` with every entity's parent and path taken out, wherever it is."""
+    from backend.common.ancestry_columns import ANCESTRY_COLUMNS
+
+    if isinstance(value, dict):
+        return {k: _without_places(v) for k, v in value.items() if k not in ANCESTRY_COLUMNS}
+    if isinstance(value, list):
+        return [_without_places(v) for v in value]
+    return value
+
+
+async def test_a_file_that_says_where_its_entities_sat_imports_as_one_that_does_not(test_client, graph, monkeypatch):
+    """The same view exported with where each entity sat (``withPath``) and without: inspected,
+    reconciled and imported alike — the same matches, the same design written, the same version.
+    Only a report's echo of what the file said of an entity it lists (``exported``) repeats it."""
+    async def _engine_for(session, workspace_id, data_source_id, *, branch_id=None, actor=None):
+        return _PlacingEngine(graph)
+
+    for module in ("export", "inspect", "importing"):
+        monkeypatch.setattr(f"backend.app.services.view_transfer.{module}.engine_for", _engine_for)
+    view_id = await _view(test_client, await _workspace(test_client, "Dev"))
+    files = {}
+    for placed in (True, False):
+        resp = await test_client.post("/api/v1/views/transfer/export",
+                                      json={"views": [{"viewId": view_id}], "withPath": placed})
+        assert resp.status_code == 200, resp.text
+        files[placed] = (await _inspect(test_client, resp.content)).json()
+    entities = {placed: f["views"][0]["manifest"]["entities"] for placed, f in files.items()}
+    assert entities[True]["urn:b"]["path"] == ["Finance"] and entities[False]["urn:b"]["path"] is None
+
+    def inspected(f):
+        return {k: _without_places(f[k]) for k in ("integrity", "notices", "views", "identityMatches",
+                                                   "targetSuggestions")}
+    assert inspected(files[True]) == inspected(files[False])
+
+    graph.known["urn:b"] = {**graph.known["urn:b"], "name": "b renamed"}   # drifted here since
+    reports, written = {}, {}
+    for placed, f in files.items():
+        target = {"workspaceId": await _workspace(test_client, f"UAT {placed}")}
+        resp = await _reconcile(test_client, f["views"][0], target)
+        assert resp.status_code == 200, resp.text
+        [reports[placed]] = resp.json()["views"]
+        imported = await _import(test_client, f, target, definition=reports[placed]["effectiveDefinition"])
+        assert imported.status_code == 200, imported.text
+        body = imported.json()
+        written[placed] = (body["integrity"], body["version"]["version"], body["version"]["source"],
+                           body["version"]["provenance"]["report"])
+    assert _without_places(reports[True]) == _without_places(reports[False])
+    assert written[True] == written[False] and written[True][0]["verified"] is True
+    echo = {placed: next(e["exported"] for e in r["report"]["entities"] if e["urn"] == "urn:b")
+            for placed, r in reports.items()}
+    assert echo[True]["parentName"] == "Finance" and echo[False]["parentName"] is None
