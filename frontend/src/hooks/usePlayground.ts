@@ -59,7 +59,8 @@ function useGraphMade(workspaceId: string) {
     const queryClient = useQueryClient()
     return async () => {
         void queryClient.invalidateQueries({ queryKey: ['workspace', workspaceId] })
-        void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', workspaceId] })
+        void queryClient.invalidateQueries({ queryKey: ['workspace-detail', workspaceId] })
+        void queryClient.invalidateQueries({ queryKey: ['views', 'counts'] })
         void queryClient.invalidateQueries({ queryKey: KEY })
         await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
     }

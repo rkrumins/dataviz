@@ -16,7 +16,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Check, Database, Loader2, MessageCircleQuestion, Send, Sparkles, Users, UsersRound } from 'lucide-react'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { listViews } from '@/services/viewApiService'
+import { getViewCounts } from '@/services/viewApiService'
 import {
     nameTakenSuggestion, type WorkspaceRequest, type WorkspaceRequestDraft,
 } from '@/services/workspaceRequestsService'
@@ -121,15 +121,18 @@ export function RequestWorkspaceWizard({ editing, preselectedSourceIds = [], onC
         () => (pgWorkspace?.dataSources ?? []).filter(ds => !!meId && ds.createdBy === meId),
         [pgWorkspace, meId],
     )
-    const pgViews = useQuery({
-        queryKey: ['workspace-request', 'playground-views', pgWorkspace?.id],
-        queryFn: () => listViews({ workspaceIds: [pgWorkspace!.id], limit: 200 }),
-        enabled: !!pgWorkspace && myGraphs.length > 0,
+    // Counted by the server: tallying a page of the Playground's views (everyone's)
+    // stopped at its 200 rows.
+    const myGraphIds = myGraphs.map(ds => ds.id)
+    const viewsOn = useQuery({
+        queryKey: ['views', 'counts', { dataSourceIds: myGraphIds }],
+        queryFn: () => getViewCounts({ dataSourceIds: myGraphIds }),
+        enabled: myGraphIds.length > 0,
         staleTime: 60_000,
-    }).data?.items ?? []
+    }).data?.byDataSource ?? {}
     const graphs: GraphOption[] = myGraphs.map(ds => ({
         id: ds.id, label: ds.label || ds.graphName || 'Untitled graph',
-        viewCount: pgViews.filter(v => v.dataSourceId === ds.id).length,
+        viewCount: viewsOn[ds.id] ?? 0,
     }))
 
     const index = STEPS.indexOf(step)

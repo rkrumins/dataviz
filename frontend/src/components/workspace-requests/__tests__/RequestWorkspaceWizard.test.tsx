@@ -20,7 +20,8 @@ vi.mock('@/services/workspaceGroupsService', () => ({
     idpGroupsService: { suggestions: vi.fn().mockResolvedValue([{ idpGroup: 'ML-Engineers' }]), preview: vi.fn() },
 }))
 vi.mock('@/services/viewApiService', () => ({
-    listViews: vi.fn().mockResolvedValue({ items: [{ id: 'v1', dataSourceId: 'ds_mine' }, { id: 'v2', dataSourceId: 'ds_mine' }] }),
+    // Past the 200 a page of the Playground's views used to stop at.
+    getViewCounts: vi.fn().mockResolvedValue({ total: 240, byWorkspace: { ws_play: 240 }, byDataSource: { ds_mine: 240 } }),
 }))
 // Steps swap at once (framer-motion's exit never finishes under jsdom).
 vi.mock('framer-motion', async (orig) => ({
@@ -91,12 +92,12 @@ describe('RequestWorkspaceWizard', () => {
 
         const mine = await screen.findByRole('checkbox', { name: /Supply chain sketch/ })
         expect(screen.queryByText('Not mine')).toBeNull()             // only the reader's own graphs
-        expect(await within(mine).findByText(/2 views/)).toBeInTheDocument()
+        expect(await within(mine).findByText(/240 views/)).toBeInTheDocument()
         await user.click(mine)
         await next()
 
         expect(screen.getByRole('heading', { name: 'Ready to send?' })).toBeInTheDocument()
-        expect(screen.getByText(/Supply chain sketch \(2 views\)/)).toBeInTheDocument()
+        expect(screen.getByText(/Supply chain sketch \(240 views\)/)).toBeInTheDocument()
         await user.click(screen.getByRole('button', { name: /Send request/ }))
         expect(api.submit).toHaveBeenCalledWith(expect.objectContaining({
             name: 'ML lineage', purpose: 'poc', teammateIds: ['usr_ada'], playgroundSourceIds: ['ds_mine'],

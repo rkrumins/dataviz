@@ -38,6 +38,7 @@ import { useReviewInboxCounts, useDraftsWhoseOwnerLeft } from '@/features/versio
 import { useWorkspaceTransfers } from '@/features/data-source-transfer/useDataSourceTransfers'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { AttentionCard, type AttentionItem } from './AttentionCard'
 import { SetupChecklist, type SetupStep } from './SetupChecklist'
 import { OverviewViewGrid } from './OverviewViewGrid'
@@ -51,10 +52,17 @@ import type { DataSection, WorkspaceTab } from '../workspaceTabs'
 
 interface WorkspaceOverviewProps {
     workspace: WorkspaceResponse
-    /** Every view in the workspace the reader can open (the page's own list). */
+    /** The workspace's latest views the reader can open (the page's first page). */
     views: View[]
+    /** How many views the reader can open here, exactly; null while counting. */
+    viewTotal: number | null
+    /** The same per data source; null while counting. */
+    viewCountByDs: Record<string, number> | null
+    /** Which of the page's reads are still on their way: each part shows its
+     *  own placeholder until its answer lands. */
+    pending: { stats: boolean; readiness: boolean; views: boolean; viewCounts: boolean }
     readinessMap: Record<string, DataSourceReadinessResponse>
-    aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number }
+    aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number | null }
     canManageSources: boolean
     canManageMembers: boolean
     canAddMembers: boolean
@@ -86,12 +94,16 @@ const ATTENTION_ICONS = {
 }
 
 export function WorkspaceOverview({
-    workspace, views, readinessMap, aggregateStats, canManageSources, canManageMembers, canAddMembers,
-    versioningEnabled, showActivity, onGoTo, onNewView, onAddSource, onNewGraph, onOpenGraph, onMoveGraph,
+    workspace, views, viewTotal, viewCountByDs, pending, readinessMap, aggregateStats, canManageSources,
+    canManageMembers, canAddMembers, versioningEnabled, showActivity, onGoTo, onNewView, onAddSource, onNewGraph,
+    onOpenGraph, onMoveGraph,
 }: WorkspaceOverviewProps) {
     const wsId = workspace.id
     const isPlayground = workspace.kind === 'playground'
     const sources = workspace.dataSources
+    // Whether there are any views, from the exact count; the latest views stand in
+    // only if the count could not be read.
+    const hasViews = viewTotal !== null ? viewTotal > 0 : views.length > 0
 
     // ── What waits on the reader ────────────────────────────────────────
     const reviewCounts = useReviewInboxCounts(wsId, versioningEnabled).data?.counts
@@ -175,7 +187,7 @@ export function WorkspaceOverview({
             actionLabel: 'Open processing', onAction: () => onGoTo('data', 'processing'),
         },
         {
-            id: 'view', label: 'Create the first view', done: views.length > 0,
+            id: 'view', label: 'Create the first view', done: hasViews,
             description: 'A view is what people open: a graph, a hierarchy or a context view of your data.',
             actionLabel: 'New view', onAction: onNewView,
         },
@@ -197,12 +209,15 @@ export function WorkspaceOverview({
     const [layout, setLayout] = useOverviewLayout()
 
     const popularQ = useQuery({
-        queryKey: ['workspace-overview', 'popular', wsId, jumpBackIn.length],
-        // In the Playground it is everyone's newest work; elsewhere, what is opened most.
+        queryKey: ['workspace-overview', 'popular', wsId],
+        // In the Playground it is everyone's newest work; elsewhere, what is opened most —
+        // enough to fill the shelf past what Jump back in shows (at most four). Asked at
+        // once, beside the page's own reads, rather than after its views list arrives;
+        // only a workspace known to be empty is not asked.
         queryFn: () => listViews(isPlayground
             ? { workspaceIds: [wsId], sort: 'recently-modified', limit: 12 }
-            : { workspaceIds: [wsId], sort: 'most-opened', limit: 4 + jumpBackIn.length }),
-        enabled: views.length > 0,
+            : { workspaceIds: [wsId], sort: 'most-opened', limit: 8 }),
+        enabled: viewTotal !== 0,
         staleTime: 60_000,
     })
     // In the Playground the reader's own work has its panel: this shelf is everyone else's.
@@ -229,7 +244,7 @@ export function WorkspaceOverview({
                 {isPlayground
                     ? (
                         <>
-                            <PlaygroundExperiments workspace={workspace} views={views} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} onMoveGraph={onMoveGraph} />
+                            <PlaygroundExperiments workspace={workspace} viewCountByDs={viewCountByDs} countsPending={pending.viewCounts} layout={layout} onNewGraph={onNewGraph} onOpenGraph={onOpenGraph ?? (() => onGoTo('data', 'sources'))} onMoveGraph={onMoveGraph} />
                             {/* Found their feet? The way to a workspace of their own, bringing their graphs. */}
                             <WorkspaceRequestPrompt preselectedSourceIds={sources.filter(ds => !!me && ds.createdBy === me).map(ds => ds.id)} />
                         </>
@@ -238,7 +253,7 @@ export function WorkspaceOverview({
                 {/* Nothing connected yet: the way to ask for it (nothing in the Playground, or while off). */}
                 {sources.length === 0 && <AskForDataPrompt workspace={workspace} canAddSources={canManageSources} />}
 
-                {views.length === 0 ? (isPlayground ? null : (
+                {viewTotal === null && pending.views ? <ShelfSkeleton /> : !hasViews ? (isPlayground ? null : (
                     <section className="rounded-3xl border border-dashed border-glass-border bg-canvas-elevated">
                         <EmptyState
                             icon={Eye}
@@ -256,7 +271,7 @@ export function WorkspaceOverview({
                             icon={History} tone="text-indigo-500 bg-indigo-500/10"
                             extra={<span data-tour="overview-layout" className="inline-flex"><Segmented label="Show views as" options={LAYOUTS} value={layout} onChange={setLayout} /></span>}
                         >
-                            {jumpBackIn.length === 0 ? (
+                            {pending.views ? <ShelfSkeleton /> : jumpBackIn.length === 0 ? (
                                 <p className="rounded-2xl border border-dashed border-glass-border px-4 py-6 text-center text-sm text-ink-muted">
                                     Views you open or favourite in this workspace will wait for you here.
                                 </p>
@@ -272,7 +287,7 @@ export function WorkspaceOverview({
                                 subtitle="The latest from people in the Playground — open one for ideas"
                                 onSeeAll={() => onGoTo('views')} icon={Users} tone="text-fuchsia-500 bg-fuchsia-500/10"
                             >
-                                {popular.length === 0 ? (
+                                {popularQ.isPending ? <ShelfSkeleton /> : popular.length === 0 ? (
                                     <p className="rounded-2xl border border-dashed border-glass-border px-4 py-6 text-center text-sm text-ink-muted">
                                         Nobody else has shared anything here yet. What you make is shared with everyone — be the first.
                                     </p>
@@ -286,7 +301,7 @@ export function WorkspaceOverview({
                                 title="Popular here" subtitle="What people in this workspace open most"
                                 onSeeAll={() => onGoTo('views')} icon={Flame} tone="text-amber-500 bg-amber-500/10"
                             >
-                                <OverviewViewGrid wsId={wsId} views={popular} layout={layout} />
+                                {popularQ.isPending ? <ShelfSkeleton /> : <OverviewViewGrid wsId={wsId} views={popular} layout={layout} />}
                             </Shelf>
                         )}
                     </>
@@ -299,16 +314,19 @@ export function WorkspaceOverview({
                 <section aria-labelledby="glance-title" className="rounded-3xl border border-glass-border bg-canvas-elevated p-5">
                     <SectionTitle id="glance-title" icon={Gauge} tone="text-violet-500 bg-violet-500/10" title="At a glance" className="mb-4" />
                     <div className="grid grid-cols-2 gap-3">
-                        <Fact icon={Eye} tone="text-cyan-500 bg-cyan-500/10" label="Views" value={String(views.length)} onClick={() => onGoTo('views')} />
+                        <Fact icon={Eye} tone="text-cyan-500 bg-cyan-500/10" label="Views" onClick={() => onGoTo('views')}
+                            value={viewTotal !== null ? viewTotal.toLocaleString() : pending.viewCounts ? undefined : '\u2014'} />
                         <Fact icon={Database} tone="text-indigo-500 bg-indigo-500/10" label="Connected sources" value={String(sources.length)} onClick={() => onGoTo('data', 'sources')} />
-                        <Fact icon={Shapes} tone="text-violet-500 bg-violet-500/10" label="Things tracked" value={compact(aggregateStats.totalNodes)}
+                        <Fact icon={Shapes} tone="text-violet-500 bg-violet-500/10" label="Things tracked" value={pending.stats ? undefined : compact(aggregateStats.totalNodes)}
                             hint="Every entity across this workspace’s data — tables, columns, systems, people…" />
-                        <Fact icon={Network} tone="text-emerald-500 bg-emerald-500/10" label="Connections" value={compact(aggregateStats.totalEdges)}
+                        <Fact icon={Network} tone="text-emerald-500 bg-emerald-500/10" label="Connections" value={pending.stats ? undefined : compact(aggregateStats.totalEdges)}
                             hint="Every relationship between them — lineage, containment, ownership…" />
                     </div>
                     <p className="mt-3 flex items-center gap-1.5 text-xs text-ink-muted">
                         <Clock className="w-3.5 h-3.5" aria-hidden />
-                        {lastRefreshed ? `Connections last refreshed ${timeAgo(lastRefreshed)}` : 'Connections not built yet'}
+                        {lastRefreshed ? `Connections last refreshed ${timeAgo(lastRefreshed)}`
+                            : pending.readiness ? <Skeleton className="h-3 w-40" />
+                                : 'Connections not built yet'}
                     </p>
                 </section>
 
@@ -355,11 +373,21 @@ function Shelf({ title, subtitle, onSeeAll, icon, tone, extra, children, 'data-t
     )
 }
 
+/** A shelf's views still on their way: the shape of the tiles, not an empty box. */
+function ShelfSkeleton() {
+    return (
+        <div className="grid gap-3 sm:grid-cols-2" role="status" aria-label="Loading views">
+            {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-16 rounded-2xl" />)}
+        </div>
+    )
+}
+
 function Fact({ icon: Icon, tone, label, value, hint, onClick }: {
     icon: ComponentType<{ className?: string }>
     tone: string
     label: string
-    value: string
+    /** Undefined while it is still being counted. */
+    value: string | undefined
     hint?: string
     onClick?: () => void
 }) {
@@ -367,7 +395,9 @@ function Fact({ icon: Icon, tone, label, value, hint, onClick }: {
         <>
             <span className={cn('w-8 h-8 rounded-xl flex items-center justify-center shrink-0', tone)}><Icon className="w-4 h-4" aria-hidden /></span>
             <span className="min-w-0 text-left">
-                <span className="block text-lg font-bold tabular-nums leading-tight text-ink">{value}</span>
+                {value === undefined
+                    ? <Skeleton className="h-6 w-12 mb-0.5" />
+                    : <span className="block text-lg font-bold tabular-nums leading-tight text-ink">{value}</span>}
                 <span className="block text-[11px] text-ink-muted">{label}</span>
             </span>
         </>

@@ -31,7 +31,8 @@ vi.mock('@/components/admin/workspace/useWorkspaceDetailData', async () => {
     }, [workspace])
     return {
         workspace, catalogItems: [], providers: [], ontologies: [], ontologyMap: {},
-        dsStatsMap: {}, dsProviderMap: {}, viewsByDs: {}, allWorkspaceViews: [], readinessMap: {},
+        dsStatsMap: {}, dsProviderMap: {}, allWorkspaceViews: [], viewTotal: 0, viewCountByDs: {}, readinessMap: {},
+        pending: { stats: false, readiness: false, views: false, viewCounts: false },
         healthStatus: 'healthy', aggregateStats: { totalNodes: 0, totalEdges: 0, totalTypes: 0, totalViews: 0 },
         isLoading: !workspace, isRefreshing: false, error: null, reload: vi.fn(),
     }

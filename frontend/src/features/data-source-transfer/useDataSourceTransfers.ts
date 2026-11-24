@@ -27,7 +27,7 @@ export const TRANSFERS_KEY = ['data-source-transfers'] as const
 export function invalidateAfterTransfer(queryClient: QueryClient, workspaceIds: string[]) {
     for (const ws of new Set(workspaceIds)) {
         void queryClient.invalidateQueries({ queryKey: ['workspace', ws] })
-        void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', ws] })
+        void queryClient.invalidateQueries({ queryKey: ['workspace-detail', ws] })
         void queryClient.invalidateQueries({ queryKey: ['workspaces', ws, 'data-sources'] })
     }
     for (const queryKey of [

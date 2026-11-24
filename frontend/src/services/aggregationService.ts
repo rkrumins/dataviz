@@ -884,6 +884,18 @@ class AggregationService {
   }
 
   /**
+   * Every data source of a workspace's readiness, in one request, keyed by id.
+   * A source whose readiness can't be read is `null` — the rest still answer.
+   */
+  async getWorkspaceReadiness(
+    workspaceId: string,
+  ): Promise<Record<string, DataSourceReadinessResponse | null>> {
+    return authFetch<Record<string, DataSourceReadinessResponse | null>>(
+      `/api/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/data-sources/readiness`
+    );
+  }
+
+  /**
    * Just "is this source's projection behind, and by how much".
    *
    * The canvas's catch-up notice used to read these two fields off

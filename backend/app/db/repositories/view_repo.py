@@ -2698,6 +2698,41 @@ async def count_views_grouped(
     return {value: int(n) for value, n in rows.all()}
 
 
+async def count_views_by_scope(
+    session: AsyncSession,
+    *,
+    readable=None,
+    workspace_ids: Optional[Sequence[str]] = None,
+    data_source_ids: Optional[Sequence[str]] = None,
+) -> Tuple[int, Dict[str, int], Dict[str, int]]:
+    """Live views the caller can read: ``(total, by workspace, by data source)``.
+
+    One GROUP BY over (workspace, data source), counted through
+    ``_apply_view_filters`` like ``count_views_grouped``, and summed both ways
+    here: a view has one of each, so the sums are exact. ``workspace_ids`` /
+    ``data_source_ids`` narrow what is counted — all three numbers.
+    """
+    query = select(
+        ViewORM.workspace_id, ViewORM.data_source_id, func.count(func.distinct(ViewORM.id)),
+    )
+    for column, ids in ((ViewORM.workspace_id, workspace_ids), (ViewORM.data_source_id, data_source_ids)):
+        if ids is not None:
+            if not ids:
+                return 0, {}, {}
+            query = query.where(column.in_(list(ids)))
+    rows = await session.execute(_apply_view_filters(
+        query.group_by(ViewORM.workspace_id, ViewORM.data_source_id), readable=readable,
+    ))
+    total, by_ws, by_ds = 0, {}, {}
+    for ws_id, ds_id, n in rows.all():
+        total += n
+        if ws_id:
+            by_ws[ws_id] = by_ws.get(ws_id, 0) + n
+        if ds_id:
+            by_ds[ds_id] = by_ds.get(ds_id, 0) + n
+    return total, by_ws, by_ds
+
+
 
 async def set_context_model_version(
     session: AsyncSession, view_id: str, version: int, *, user_id: Optional[str] = None,
