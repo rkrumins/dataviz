@@ -2022,6 +2022,8 @@ def _children_cache_params(
 #: Parents one /children-batch request may name, and rows per parent.
 CHILDREN_BATCH_MAX_PARENTS = 50
 CHILDREN_BATCH_MAX_LIMIT = 200
+#: How long a batch's cache misses wait for its other parents before they are read.
+_CHILDREN_BATCH_GATHER_S = 0.1
 
 
 class _ChildrenBatchRequest(BaseModel):
@@ -2088,15 +2090,19 @@ async def get_children_batch(
             return ChildrenBatchResult(results=await read(parents))
 
         # Every parent asks the cache; the misses wait here, and are read together
-        # once no parent is still being answered.
+        # once no parent is still being answered — or after a short wait, whichever
+        # comes first. A parent can be riding another request's read of it, and that
+        # request may be waiting on a parent THIS one is reading: holding our misses
+        # for it would hold both requests, and every later read of those parents.
         loop = asyncio.get_running_loop()
-        missed: Dict[str, asyncio.Future] = {}
+        waiting: Dict[str, asyncio.Future] = {}
         unsettled = len(parents)
         reading: List[asyncio.Task] = []
+        timer: Optional[asyncio.TimerHandle] = None
         over = False
 
-        async def read_missed() -> None:
-            asked = [p for p in parents if p.urn in missed]
+        async def read_missed(missed: Dict[str, asyncio.Future]) -> None:
+            asked = [firsts[urn] for urn in missed]
             try:
                 pages = await read(asked)
             except asyncio.CancelledError:
@@ -2110,24 +2116,36 @@ async def get_children_batch(
                     if not f.done():
                         f.set_exception(exc)
                 return
-            for p in asked:
-                missed[p.urn].set_result(pages[p.urn])
+            for urn, f in missed.items():
+                if not f.done():
+                    f.set_result(pages[urn])
+
+        def flush() -> None:
+            nonlocal timer
+            if timer is not None:
+                timer.cancel()
+                timer = None
+            if waiting and not over:
+                reading.append(asyncio.ensure_future(read_missed(dict(waiting))))
+                waiting.clear()
 
         def settled() -> None:
             nonlocal unsettled
             unsettled -= 1
-            if unsettled == 0 and missed and not over:
-                reading.append(asyncio.ensure_future(read_missed()))
+            if unsettled == 0:
+                flush()
 
         async def one(p: ChildrenBatchParent):
             asked = False
 
             async def compute() -> ChildrenWithEdgesResult:
-                nonlocal asked
+                nonlocal asked, timer
                 asked = True
-                missed[p.urn] = loop.create_future()
+                page = waiting[p.urn] = loop.create_future()
                 settled()
-                return await missed[p.urn]
+                if waiting and timer is None and not over:
+                    timer = loop.call_later(_CHILDREN_BATCH_GATHER_S, flush)
+                return await page
 
             try:
                 return p.urn, await get_graph_cache().get_or_compute(
@@ -2155,6 +2173,8 @@ async def get_children_batch(
             # A parent that failed (a shed, a bad cursor) fails the batch: stop the
             # rest, and start no read for them.
             over = True
+            if timer is not None:
+                timer.cancel()
             for t in tasks + reading:
                 t.cancel()
     except CursorMismatchError as exc:

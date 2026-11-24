@@ -241,6 +241,58 @@ async def test_each_parent_is_cached_under_the_single_endpoints_key(batch_client
     assert len(engine.batches) == 1
 
 
+class _SingleflightCache:
+    """GraphCache's in-process singleflight: a caller that finds a key being computed
+    waits on that compute, with no deadline. The first to ask for P leads it, and the
+    second to ask for Q — so two batches naming both each lead one and follow the other."""
+
+    def __init__(self):
+        self.store, self.inflight, self.asked = {}, {}, {}
+
+    async def get_or_compute(self, *, scope, endpoint, params, compute, model_cls, on_stale=None, expected_compute_s=None):
+        urn = params["urn"]
+        self.asked[urn] = self.asked.get(urn, 0) + 1
+        leads_now = (urn == "urn:x:P") == (self.asked[urn] == 1)
+        await asyncio.sleep(0 if leads_now else 0.05)
+        if urn in self.store:
+            return self.store[urn]
+        if urn in self.inflight:
+            return await asyncio.shield(self.inflight[urn])
+        fut = asyncio.get_running_loop().create_future()
+        self.inflight[urn] = fut
+        try:
+            value = await compute()
+        except BaseException as exc:
+            fut.set_exception(exc)
+            fut.exception()
+            raise
+        finally:
+            self.inflight.pop(urn, None)
+        self.store[urn] = value
+        fut.set_result(value)
+        return value
+
+
+async def test_two_batches_that_each_wait_on_the_other_both_answer(batch_client, monkeypatch):
+    # Two people open the same level at once: each batch leads one parent's read and
+    # rides the other's. Waiting for every parent to settle first would hold both
+    # batches — and every later read of those parents — forever.
+    from backend.app.api.v1.endpoints import graph as graph_mod
+
+    client, engine = batch_client
+    cache = _SingleflightCache()
+    monkeypatch.setattr(graph_mod, "get_graph_cache", lambda: cache)
+    monkeypatch.setattr(graph_mod, "_cache_scope", lambda _engine: object())
+
+    one, two = await asyncio.wait_for(asyncio.gather(
+        client.post(URL, json=_body("urn:x:P", "urn:x:Q")),
+        client.post(URL, json=_body("urn:x:Q", "urn:x:P")),
+    ), timeout=5)
+    assert one.status_code == two.status_code == 200
+    assert one.json()["results"] == two.json()["results"]
+    assert sorted(u for urns, _ in engine.batches for u in urns) == ["urn:x:P", "urn:x:Q"]
+
+
 # ── the provider default ─────────────────────────────────────────────────
 
 class _OneByOne:
