@@ -65,12 +65,13 @@ export function PlaygroundExperiments({
     const graphs = workspace.dataSources.filter(ds => !!me && ds.createdBy === me)
     // The reader's own views, asked for as such: the Playground's newest views are
     // everyone's, and in a busy Playground the reader's fell past that first page.
-    const mine = useQuery({
+    const mineQ = useQuery({
         queryKey: ['workspace-detail', workspace.id, 'mine', me],
         queryFn: () => listViews({ workspaceId: workspace.id, createdBy: me! }),
         enabled: !!me,
         staleTime: 60_000,
-    }).data?.items ?? []
+    })
+    const mine = mineQ.data?.items ?? []
     // Each graph's Context View, whoever made it — looked up per graph for the same
     // reason. A reader has only a handful of graphs (the quota), asked at once.
     const contextViews = useQueries({
@@ -217,13 +218,20 @@ export function PlaygroundExperiments({
                                 </li>
                             ))}
                         </ul>
-                        {mine.length > 0 && (
+                        {/* Someone with graphs almost always has views on them: their place is held meanwhile. */}
+                        {(mineQ.isLoading || mine.length > 0) && (
                             <div>
                                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-ink-secondary">
                                     <Sparkles className="w-3.5 h-3.5 text-fuchsia-500" aria-hidden /> Your views
                                 </p>
-                                <OverviewViewGrid wsId={workspace.id} views={mine.slice(0, 4)} layout={layout}
-                                    meta={v => v.visibility === 'private' ? 'Only you' : 'Shared with everyone here'} />
+                                {mineQ.isLoading ? (
+                                    <div className="grid gap-3 sm:grid-cols-2" role="status" aria-label="Loading your views">
+                                        {[0, 1].map(i => <Skeleton key={i} className="h-40 rounded-2xl" />)}
+                                    </div>
+                                ) : (
+                                    <OverviewViewGrid wsId={workspace.id} views={mine.slice(0, 4)} layout={layout}
+                                        meta={v => v.visibility === 'private' ? 'Only you' : 'Shared with everyone here'} />
+                                )}
                             </div>
                         )}
                         {starts('border-t border-glass-border pt-4')}

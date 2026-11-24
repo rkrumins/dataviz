@@ -273,7 +273,10 @@ describe('In the Playground', () => {
         }
         listViews.mockImplementation(async (p: { createdBy?: string }) => ({ items: p.createdBy === 'usr_me' ? [mineView] : [] }))
         renderOverview({ workspace: playground(), views: [] })
+        // Their place is held until they land.
+        expect(screen.getByRole('status', { name: 'Loading your views' })).toBeInTheDocument()
         expect(await screen.findByRole('button', { name: /My lineage/ })).toBeInTheDocument()
+        expect(screen.queryByRole('status', { name: 'Loading your views' })).toBeNull()
         expect(listViews).toHaveBeenCalledWith({ workspaceId: 'ws_play', createdBy: 'usr_me' })
     })
 })
