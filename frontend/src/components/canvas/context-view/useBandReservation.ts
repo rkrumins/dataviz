@@ -15,16 +15,20 @@ export const BAND_GAP_PX = 8
  * `[data-canvas-body]` while `ref` is mounted; withdraw it on unmount.
  * `measure` defaults to the element's own `offsetHeight`; pass one to
  * reserve only part of the element (a legend's header, not its opened body).
+ * `shown`, for an element that mounts after the hook's component does (one
+ * inside an AnimatePresence), or a slot that is empty at times: the
+ * reservation follows it in and out.
  */
 export function useBandReservation(
   ref: RefObject<HTMLElement | null>,
   varName: `--${string}`,
   measure?: (el: HTMLElement) => number,
+  shown = true,
 ): void {
   useLayoutEffect(() => {
     const el = ref.current
     const body = el?.closest<HTMLElement>('[data-canvas-body]')
-    if (!el || !body) return
+    if (!shown || !el || !body) return
     const publish = () => {
       const height = measure ? measure(el) : el.offsetHeight
       body.style.setProperty(varName, `${height + BAND_GAP_PX}px`)
@@ -39,7 +43,7 @@ export function useBandReservation(
     // `measure` is a stable per-call-site function; re-running on identity
     // churn would only republish the same number.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ref, varName])
+  }, [ref, varName, shown])
 }
 
 /**

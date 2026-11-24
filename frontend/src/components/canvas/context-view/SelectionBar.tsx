@@ -35,6 +35,12 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useBandReservation } from './useBandReservation'
 import { RESUME_LABELS, type PausedRun } from './useExpandBelow'
 
+/** How far the Context View's lane floats above the chrome under it (the
+ *  trace dock, the layer strip). Part of the band the bar reserves: rows that
+ *  stop at the bar's own height still end under it by this much. */
+const LANE_LIFT_PX = 12
+const reserveLane = (el: HTMLElement) => el.offsetHeight + LANE_LIFT_PX
+
 /** Entities named in full before the rest are summarised. Four fits the bar
  *  at a narrow canvas width without wrapping; beyond that the count carries
  *  the meaning and the names stop earning their room. */
@@ -119,11 +125,13 @@ export function SelectionBar({
   hint,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
-  useBandReservation(ref, '--selection-bar-height')
 
   const count = nodeIds.length
   const single = count === 1
   const shown = count > 1 || (single && (!!onOpenDetails || offerForOne))
+  // The bar mounts with the selection, after this component: `shown` keeps
+  // the reservation with it, or a bar that appeared later reserved nothing.
+  useBandReservation(ref, '--selection-bar-height', reserveLane, shown)
   const named = nodeIds.slice(0, NAMED_LIMIT)
   const rest = count - named.length
   const showLineage = !!lineage && lineage.upstream + lineage.downstream > 0
@@ -148,7 +156,7 @@ export function SelectionBar({
           className={cn('absolute z-50 pointer-events-none flex justify-center', placementClassName ?? 'left-4')}
           style={placementClassName ? undefined : {
             right: 'calc(20rem + 1.75rem)',
-            bottom: 'calc(0.75rem + var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px))',
+            bottom: `calc(${LANE_LIFT_PX}px + var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px))`,
           }}
         >
         <div

@@ -19,13 +19,25 @@ describe('groupAnchorProxies', () => {
     expect(groups.get('L1')!.proxies.map(p => p.nodeId)).toEqual(['a', 'm', 'z'])
   })
 
-  it('caps per layer and reports the overflow as moreCount', () => {
+  it('caps per layer and reports the overflow by the side it lies on', () => {
     const many = Array.from({ length: ANCHOR_RAIL_CAP + 4 }, (_, i) => cand(`n${i}`, 'L1', i + 1))
     const groups = groupAnchorProxies(many)
     expect(groups.get('L1')!.proxies).toHaveLength(ANCHOR_RAIL_CAP)
-    expect(groups.get('L1')!.moreCount).toBe(4)
+    expect(groups.get('L1')!.moreUp).toBe(4)
+    expect(groups.get('L1')!.moreDown).toBe(0)
     // strongest flows earn the slots
     expect(groups.get('L1')!.proxies[0].count).toBe(ANCHOR_RAIL_CAP + 4)
+  })
+
+  it('counts what the cap leaves out above apart from below', () => {
+    // The strongest flows are all below; the weaker ones beyond the cap are
+    // above, and say so there rather than in the bottom tray.
+    const below = Array.from({ length: ANCHOR_RAIL_CAP }, (_, i) => cand(`d${i}`, 'L1', 10 + i, 'down'))
+    const above = [cand('u0', 'L1', 2, 'up'), cand('u1', 'L1', 1, 'up')]
+    const g = groupAnchorProxies([...above, ...below, cand('d9', 'L1', 1, 'down')]).get('L1')!
+    expect(g.proxies.every(p => p.direction === 'down')).toBe(true)
+    expect(g.moreUp).toBe(2)
+    expect(g.moreDown).toBe(1)
   })
 
   it('strips layerId from the emitted proxies', () => {
