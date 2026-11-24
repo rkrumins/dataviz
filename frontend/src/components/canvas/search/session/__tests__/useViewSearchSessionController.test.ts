@@ -686,6 +686,67 @@ describe('useViewSearchSessionController — resultMatchesQuick', () => {
 })
 
 
+// The box shows its own search as its words and anyone else's as a token,
+// so it has to know which is which — and keep knowing it while the next
+// word is being typed, which `resultMatchesQuick` does not.
+describe('useViewSearchSessionController — resultFromBox', () => {
+    it('is the box\'s while its run stands, through the next keystroke', () => {
+        const { result, rerender } = renderSession()
+        expect(result.current.resultFromBox).toBe(false)
+
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        act(() => { vi.advanceTimersByTime(300) })
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+        expect(result.current.resultFromBox).toBe(true)
+
+        act(() => { result.current.setQuick({ text: 'custo' }) })
+        expect(result.current.resultMatchesQuick).toBe(false)
+        expect(result.current.resultFromBox).toBe(true)
+        expect(result.current.quick.text).toBe('custo')
+    })
+
+    it('a search run from elsewhere is not the box\'s, and takes the box\'s words with it', () => {
+        const { result, rerender } = renderSession()
+        act(() => { result.current.setQuick({ text: 'cust', match: 'prefix' }) })
+        act(() => { vi.advanceTimersByTime(300) })
+        mocks.state.runState = { hash: 'from-the-panel', status: 'done' }
+        rerender()
+
+        expect(result.current.resultFromBox).toBe(false)
+        // Its words described the box's search, not this one. Where it looks
+        // and how it matches are the box's settings, and stay.
+        expect(result.current.quick.text).toBe('')
+        expect(result.current.quick.match).toBe('prefix')
+    })
+
+    it('leaves what is being typed over another search alone until the box runs it', () => {
+        mocks.state.runState = { hash: 'from-the-panel', status: 'done' }
+        const { result, rerender } = renderSession()
+
+        act(() => { result.current.setQuick({ text: 'cu' }) })
+        rerender()
+        expect(result.current.quick.text).toBe('cu')
+        expect(result.current.resultFromBox).toBe(false)
+    })
+
+    it('a Clear forgets whose search it was', () => {
+        const { result, rerender } = renderSession()
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        act(() => { vi.advanceTimersByTime(300) })
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+
+        act(() => { result.current.clearQuery() })
+        // The pipeline would run the same predicate again from the panel —
+        // a recipe, say — and that run is not the box's.
+        rerender()
+        expect(result.current.resultFromBox).toBe(false)
+    })
+})
+
+
 // A layer column is not a search surface. It renders a row box, filters
 // its own children by whatever that box holds, and splices in the hits
 // found inside it — all of which is dead weight while the search is

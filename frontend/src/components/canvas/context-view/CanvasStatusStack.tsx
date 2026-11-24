@@ -18,9 +18,10 @@
  *   * BANNERS (children), full width, in normal flow: the columns are pushed
  *     down rather than covered, as each banner always has been.
  *   * NOTICES — what the canvas is SHOWING (a load that came back short, a
- *     narrowing, a search filtering rows). In flow too, centred under the
- *     banners: they stay up for as long as the state does, and a notice that
- *     floated would sit on the column headers for all of that time.
+ *     narrowing). In flow too, centred under the banners: they stay up for
+ *     as long as the state does, and a notice that floated would sit on the
+ *     column headers for all of that time. A search shaping the canvas says
+ *     so in the header's search box instead, so it covers nothing at all.
  *   * ACTIVITY — what the canvas is DOING right now (a trace walking, a link
  *     being drawn). Floats just below the rest, over the top of the columns:
  *     it comes and goes with the gesture, and in flow it would move the board

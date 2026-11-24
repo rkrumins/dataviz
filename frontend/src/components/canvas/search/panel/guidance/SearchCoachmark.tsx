@@ -14,7 +14,7 @@ import { createPortal } from 'react-dom'
 
 import { DocsLink } from '@/components/help/DocsLink'
 import { Kbd } from '@/components/ui/Kbd'
-import { useIsSearchSpotlightActive, useSearchStore } from '@/store/searchStore'
+import { useSearchStore } from '@/store/searchStore'
 
 import { useHostRect } from '../../studio/useHostRect'
 import { markSearchIntroSeen, useSearchIntroSeen } from './searchIntro'
@@ -30,11 +30,7 @@ export function SearchCoachmark({ anchor }: {
     useEffect(() => {
         if (studioOpen) markSearchIntroSeen()
     }, [studioOpen])
-    // While a search is lit on the canvas, its chip says so under the toolbar
-    // and offers "Open search"; this card, opening over the same spot, covered
-    // it. One notice at a time: it waits until the search is cleared.
-    const searchShowing = useIsSearchSpotlightActive()
-    const hidden = seen || studioOpen || searchShowing
+    const hidden = seen || studioOpen
     const rect = useHostRect(hidden ? null : anchor)
     // A control hidden at this width has nothing to point from.
     if (hidden || !rect || rect.width === 0) return null

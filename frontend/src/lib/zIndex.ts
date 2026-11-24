@@ -23,9 +23,9 @@ export const Z_INDEX = {
    *  pills. */
   chrome: 40,
   /** The status stack at the top of the canvas: what the canvas is doing or
-   *  showing (a trace running, a narrowing, a search filtering rows, a load
-   *  that came back incomplete). Above the columns and the chrome — a notice
-   *  the reader cannot see might as well not be there. */
+   *  showing (a trace running, a narrowing, a load that came back
+   *  incomplete). Above the columns and the chrome — a notice the reader
+   *  cannot see might as well not be there. */
   status: 45,
   /** First-run coachmarks, portaled and fixed to the viewport. */
   coach: 50,

@@ -107,7 +107,7 @@ import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
 } from '@/hooks/useRevealSearchHit'
-import { useIsSearchSpotlightActive, useMatchUrnSet, useSearchStore, type MatchedEdge } from '@/store/searchStore'
+import { useMatchUrnSet, useSearchStore, type MatchedEdge } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { renderedAggregationTargets, unparentedRows } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
@@ -172,7 +172,6 @@ import { CanvasStatusStack } from './CanvasStatusStack'
 import { selectableIdsInLayer } from './layerSelection'
 import { isPausedOn, nextLevel, outermost, pausedMenuActions, useExpandBelow, type ExpandTree } from './useExpandBelow'
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
-import { SearchActiveChip, type SearchChipUnit } from '../search/SearchActiveChip'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
@@ -6573,36 +6572,6 @@ export function ContextViewCanvas({
     [sortedLayers],
   )
 
-  // A search still shaping the canvas once its panel is closed says so
-  // (SearchActiveChip): how many it found, of what, and in which layers — as
-  // far as the page of hits in hand says.
-  const searchOnCanvas = useIsSearchSpotlightActive()
-  const searchView = search.advanced.view
-  const { resolveLayer: resolveSearchLayer } = search
-  const searchChip = useMemo(() => {
-    const result = searchView.kind === 'results' ? searchView.result : null
-    const unit: SearchChipUnit = result?.paths ? 'path' : result?.edges ? 'connection' : 'match'
-    const layers = new Set<string>()
-    for (const hit of result?.hits ?? []) {
-      const layerId = resolveSearchLayer(hit)
-      if (layerId) layers.add(layerId)
-    }
-    return {
-      count: result?.totalCount ?? advancedMatchUrns.size,
-      unit,
-      layerNames: sortedLayers.filter((l) => layers.has(l.id)).map((l) => l.name),
-    }
-  }, [searchView, resolveSearchLayer, advancedMatchUrns, sortedLayers])
-  // The chip's stepper moves the search's focus; with the panel closed there is
-  // nothing else to show it, so the chip shows it on the canvas.
-  const revealFocusedSearchMatch = useCallback(() => {
-    const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
-    const urn = focusedMatchIndex === null ? undefined : orderedMatchUrns[focusedMatchIndex]
-    if (!urn) return
-    const hit = searchView.kind === 'results' ? searchView.result.hits?.find((h) => h.node.urn === urn) : undefined
-    void revealSearchHit(urn, hit?.ancestorPath ?? [])
-  }, [searchView, revealSearchHit])
-
   // Selecting a card draws its lines, and a line needs a row at its far end.
   // A partner that is a row of an anchored column past its loaded page — or,
   // in a view open to its whole data source, past its type column's page —
@@ -7728,21 +7697,6 @@ export function ContextViewCanvas({
                 onSaveAsView={canSaveAsView
                   ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
                   : undefined}
-              />
-            )}
-
-            {/* A search still shaping the canvas, its panel closed: what it is
-                highlighting or hiding, and the way to step, reopen or clear it.
-                With the panel open, the panel says all of this itself. */}
-            {searchOnCanvas && !search.panelOpen && activeView && (
-              <SearchActiveChip
-                count={searchChip.count}
-                unit={searchChip.unit}
-                layerNames={searchChip.layerNames}
-                viewId={activeView.id}
-                onReveal={revealFocusedSearchMatch}
-                onOpen={search.openPanel}
-                onClear={search.clearQuery}
               />
             )}
           </>}
