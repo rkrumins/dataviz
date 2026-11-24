@@ -301,11 +301,19 @@ interface LayerColumnProps {
   onFoldChange?: (layerId: string, folded: boolean) => void
 }
 
-/** Where an open column's first row starts: below its header (measured
- *  74px in Chromium, the header's `py-3` around the title and the count).
- *  A folded layer's lines land at the heights its rows WOULD have, so a
- *  line does not jump when the layer folds or unfolds. */
-const FOLD_LIST_TOP_PX = 74
+/** An open column's title row, whatever its name: the tallest thing in it is a
+ *  name at its two lines (`text-sm leading-snug`, 38.5px), taller than the
+ *  36px icon. Every column's row is this height, so their headers' edges, and
+ *  the rows below them, line up. */
+const LAYER_HEADER_ROW_PX = 39
+/** That header: the row, its `py-3` and its bottom border. (A column drilled
+ *  into a node adds its breadcrumb under the row.) */
+const LAYER_HEADER_HEIGHT_PX = LAYER_HEADER_ROW_PX + 24 + 1
+
+/** Where an open column's first row starts: right below its header. A folded
+ *  layer's lines land at the heights its rows WOULD have, so a line does not
+ *  jump when the layer folds or unfolds. */
+const FOLD_LIST_TOP_PX = LAYER_HEADER_HEIGHT_PX
 
 /** A spine narrower than this drops to its compact type and padding. */
 const NARROW_SPINE_PX = 36
@@ -1938,7 +1946,9 @@ export const LayerColumn = React.memo(function LayerColumn({
             onResizeLayer?.(layer.id, null)
           }}
           title={`${customWidth !== null ? 'Your personal width' : "This view's authored width"} (${effectiveWidth}px). Click to reset to the default — or double-click the drag handle on the column edge.`}
-          className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
+          // On the header's bottom edge.
+          style={{ top: LAYER_HEADER_HEIGHT_PX - 9 }}
+          className="absolute right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
           <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
           Reset width · {effectiveWidth}px
@@ -2059,10 +2069,13 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           </div>
         )}
-        <div className={cn(
-          "flex items-center",
-          isCollapsed ? "flex-col gap-2.5 h-full" : "relative gap-3"
-        )}>
+        <div
+          className={cn(
+            "flex items-center",
+            isCollapsed ? "flex-col gap-2.5 h-full" : "relative gap-3"
+          )}
+          style={isCollapsed ? undefined : { height: LAYER_HEADER_ROW_PX }}
+        >
           {/* Fold Toggle + Icon Container */}
           <div className="flex items-center gap-2">
             {!isCollapsed && onFoldChange && (
@@ -2181,13 +2194,13 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           ) : (
             <>
-              {/* The title. The name has the row to itself beside the fold toggle and the icon,
-                  wrapping to two lines: it used to share one shrinking row with the count, the
-                  sort and every edit button, so a draft's name came down to "Transformat", or to
-                  nothing at all. What must stay on screen at rest sits beside the name while there
-                  is room, and wraps under it, never squeezing it, when there is not — so a short
-                  name keeps the header its old height. The actions wait in the tray. */}
-              <div ref={titleBoxRef} className="flex-1 min-w-0 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              {/* The title: the name, up to two lines and then an ellipsis, and at the row's
+                  right end what must stay on screen at rest — the count and the order marks,
+                  compact so the name keeps the width. It used to share one shrinking row with
+                  the sort and every edit button, so a draft's name came down to "Transformat",
+                  or to nothing at all; the actions wait in the tray now. One row, one height:
+                  every column's header is the same, long name or short. */}
+              <div ref={titleBoxRef} className="flex-1 min-w-0 flex items-center gap-2">
                 {isNamingGroup && onCreateGroup ? (
                   <input
                     autoFocus
@@ -2206,7 +2219,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     }}
                     onBlur={() => { if (draftGroupName.trim() && !headerNameTaken) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
                     className={cn(
-                      "w-full px-2 py-1 rounded-lg bg-canvas-overlay border text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal",
+                      "flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal",
                       headerNameTaken ? "border-red-400" : "border-violet-400/60",
                     )}
                   />
@@ -2223,7 +2236,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       if (e.key === 'Escape') { setDraftName(layer.name); setIsRenaming(false) }
                     }}
                     onBlur={() => { onRenameLayer(layer.id, draftName); setIsRenaming(false) }}
-                    className="w-full px-2 py-1 rounded-lg bg-canvas-overlay border border-accent-lineage/60 text-sm font-semibold text-ink outline-none"
+                    className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-accent-lineage/60 text-sm font-semibold text-ink outline-none"
                   />
                 ) : (
                   <LayerHeaderTitle
@@ -2234,7 +2247,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     coverRight={trayWidth}
                   />
                 )}
-                <div className="flex items-center gap-1.5">
+                <div className="flex-shrink-0 flex items-center gap-1.5">
                   {/* Loading pill — replaces the entity-count pill while this
                       layer is hydrating with no entities yet. Premium spinner +
                       layer-tinted background makes the loading state legible at
@@ -2295,29 +2308,33 @@ export const LayerColumn = React.memo(function LayerColumn({
                     </div>
                   )}
                   {/* Curated-order signal — always visible (never hover-gated) so
-                      read-only consumers know the arrangement is deliberate. */}
+                      read-only consumers know the arrangement is deliberate. A mark, not
+                      a worded pill, so it takes none of the name's width. */}
                   {sortMode === 'custom' && (
-                    <div
-                      className="flex items-center gap-1 px-1.5 py-px rounded-full"
-                      style={{ backgroundColor: `${layer.color}1a`, color: layer.color }}
-                      title="This layer uses a curated custom order"
-                    >
-                      <LucideIcons.ListOrdered className="w-3 h-3" />
-                      <span className="text-[10px] font-semibold">Custom</span>
-                    </div>
+                    <HoverTip label="Custom order" detail="Arranged by hand — this layer's own order, not the view default">
+                      <span
+                        role="img"
+                        aria-label="Custom order"
+                        className="grid place-items-center w-[18px] h-[18px] rounded-full"
+                        style={{ backgroundColor: `${layer.color}1a`, color: layer.color }}
+                      >
+                        <LucideIcons.ListOrdered className="w-3 h-3" aria-hidden />
+                      </span>
+                    </HoverTip>
                   )}
                   {/* A sort of the layer's own. The sort control waits in the tray now,
                       so its at-rest mark (full strength, with a dot) is kept here. */}
                   {sortIsOverride && sortMode !== 'custom' && (
-                    <span
-                      role="img"
-                      aria-label={`Sorted ${SORT_MODE_LABELS[sortMode]}`}
-                      title={`Sorted ${SORT_MODE_LABELS[sortMode]} — this layer's own order, not the view default`}
-                      className="flex items-center"
-                      style={{ color: layer.color }}
-                    >
-                      <OverrideSortIcon className="w-3 h-3" aria-hidden />
-                    </span>
+                    <HoverTip label={`Sorted ${SORT_MODE_LABELS[sortMode]}`} detail="This layer's own order, not the view default">
+                      <span
+                        role="img"
+                        aria-label={`Sorted ${SORT_MODE_LABELS[sortMode]}`}
+                        className="flex items-center"
+                        style={{ color: layer.color }}
+                      >
+                        <OverrideSortIcon className="w-3 h-3" aria-hidden />
+                      </span>
+                    </HoverTip>
                   )}
                 </div>
               </div>
@@ -3457,11 +3474,13 @@ function TrayButton({ label, detail, onClick, menuHasIt, autoFocus, className, c
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LayerHeaderTitle — name + description block for an expanded layer column.
+// LayerHeaderTitle — the name of an expanded layer column.
 //
-// Wraps the title in a 2-line clamp so long names wrap legibly and a hover
-// popover that materialises ONLY when text is actually cut short (clamped, or
-// under the header's actions tray). The
+// Wraps the title in a 2-line clamp so long names wrap legibly, and a hover
+// popover that materialises when there is more to read: the name cut short
+// (clamped, or under the header's actions tray), the layer's description —
+// which the header never prints, so every header is one height — or its
+// properties. The
 // popover (createPortal + framer-motion) mirrors LineageDisplayPopover's
 // pattern so the two header surfaces feel like a matched set.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3495,7 +3514,6 @@ function LayerHeaderTitle({
   const containerRef = useRef<HTMLDivElement>(null)
   const nameRef = useRef<HTMLHeadingElement>(null)
   const nameTextRef = useRef<HTMLSpanElement>(null)
-  const descRef = useRef<HTMLParagraphElement>(null)
   const coverRightRef = useRef(coverRight)
   const [isTruncated, setIsTruncated] = useState(false)
   const [open, setOpen] = useState(false)
@@ -3503,26 +3521,23 @@ function LayerHeaderTitle({
   const openTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  // Is any of it cut short? Clamped, or — the name — running on under the
-  // actions tray, which covers the end of a long name while the header is
+  // Is the name cut short? Clamped, or running on under the actions tray, which covers the end of a long name while the header is
   // hovered: hidden there as surely as past the clamp. Reads refs only. The
   // tray covers the right of the ROW; this box is only as wide as its words,
   // so the row's edge is read off the box it sits in.
   const measureCut = useCallback(() => {
     const nameOverflow = nameRef.current ? nameRef.current.scrollHeight > nameRef.current.clientHeight + 1 : false
-    const descOverflow = descRef.current ? descRef.current.scrollHeight > descRef.current.clientHeight + 1 : false
     const box = containerRef.current?.parentElement?.getBoundingClientRect()
     const underTray = !!box && coverRightRef.current > 0
       && Array.from(nameTextRef.current?.getClientRects() ?? []).some((line) => line.right > box.right - coverRightRef.current)
-    setIsTruncated(nameOverflow || descOverflow || underTray)
+    setIsTruncated(nameOverflow || underTray)
   }, [])
 
-  // Detect overflow after layout / on every name/description change. The
-  // popover only opens when there's actually more text to show.
+  // Detect overflow after layout / on every name change.
   useLayoutEffect(() => {
     coverRightRef.current = coverRight
     measureCut()
-  }, [measureCut, name, description, coverRight])
+  }, [measureCut, name, coverRight])
 
   // Re-check on container resize (column width can change as users open
   // the right-rail drawer or toggle adjacent layers) — and on the row's: a
@@ -3564,9 +3579,9 @@ function LayerHeaderTitle({
   }, [])
 
   const scheduleOpen = () => {
-    // The card opens when the header cuts something short — or the layer has
-    // properties to read.
-    if (!isTruncated && !hasProperties) return
+    // The card opens when the header cuts the name short — or the layer has
+    // a description or properties to read.
+    if (!isTruncated && !description && !hasProperties) return
     clearTimeout(closeTimerRef.current)
     clearTimeout(openTimerRef.current)
     openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
@@ -3580,9 +3595,8 @@ function LayerHeaderTitle({
   return (
     <div
       ref={containerRef}
-      // Its own width, not the row's: the status beside it wraps under only
-      // when the name needs the room.
-      className="min-w-0"
+      // The row's width, less the count at its end.
+      className="flex-1 min-w-0 flex items-center gap-1.5"
       onMouseEnter={scheduleOpen}
       onMouseLeave={scheduleClose}
       onFocus={scheduleOpen}
@@ -3592,30 +3606,33 @@ function LayerHeaderTitle({
         ref={nameRef}
         // A name with no spaces still breaks, inside its two lines, rather
         // than running out of the box with no ellipsis.
-        className="text-sm font-semibold tracking-tight line-clamp-2 leading-snug break-words"
+        className="min-w-0 text-sm font-semibold tracking-tight line-clamp-2 leading-snug break-words"
         style={{ color: resolvedColor }}
-        title={isTruncated || hasProperties ? undefined : name}
+        title={isTruncated || description || hasProperties ? undefined : name}
       >
         <span ref={nameTextRef}>{name}</span>
-        {hasProperties && (
-          <span
-            className="ml-1.5 inline-flex items-center gap-0.5 align-middle text-[10px] font-medium text-ink-muted"
-            role="img"
-            aria-label={`${propertyEntries.length} ${propertyEntries.length === 1 ? 'property' : 'properties'}`}
-          >
-            <LucideIcons.Tags className="w-3 h-3" aria-hidden />
-            {propertyEntries.length}
-          </span>
-        )}
       </h3>
-      {description && (
-        <p
-          ref={descRef}
-          className="text-[10px] text-ink-muted/70 line-clamp-2 mt-0.5 leading-snug"
-        >
-          {description}
-        </p>
+      {/* What the card holds besides the name. Beside the name, never inside
+          its clamp, so a long name's ellipsis cannot take them away. */}
+      {(description || hasProperties) && (
+        <span className="flex-shrink-0 flex items-center gap-1.5 text-ink-muted">
+          {description && (
+            <LucideIcons.AlignLeft className="w-3 h-3" role="img" aria-label="Has a description" />
+          )}
+          {hasProperties && (
+            <span
+              className="inline-flex items-center gap-0.5 text-[10px] font-medium tabular-nums"
+              role="img"
+              aria-label={`${propertyEntries.length} ${propertyEntries.length === 1 ? 'property' : 'properties'}`}
+            >
+              <LucideIcons.Tags className="w-3 h-3" aria-hidden />
+              {propertyEntries.length}
+            </span>
+          )}
+        </span>
       )}
+      {/* Read out after the name; seen in the card. */}
+      {description && <p className="sr-only">{description}</p>}
 
       {/* No AnimatePresence: the tooltip unmounts instantly on close so an
           interrupted exit can never strand an invisible click-blocker at

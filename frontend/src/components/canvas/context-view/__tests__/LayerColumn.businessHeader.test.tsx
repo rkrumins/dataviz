@@ -111,7 +111,8 @@ describe('LayerColumn header', () => {
   it('says a layer has properties, and its card lists them', async () => {
     renderHeader()
     const badge = screen.getByRole('img', { name: '2 properties' })
-    fireEvent.mouseEnter(badge.closest('h3')!.parentElement!)
+    // The badge sits beside the name, in the title the card opens from.
+    fireEvent.mouseEnter(badge.closest('[class*="flex-1"]')!)
     const card = await screen.findByRole('tooltip')
     expect(card).toHaveTextContent('Owner')
     expect(card).toHaveTextContent('data-eng')
