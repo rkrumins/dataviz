@@ -59,6 +59,8 @@ export interface LayerMenuModel {
      *  once — for wherever its actions tray does not show them: the Business
      *  view's, and a column too narrow for the tray's icons (its ⋯ opens this). */
     onAddEntity?: () => void
+    /** The entity the layer is mapped to, which Add entity adds inside — named in its label. */
+    addInside?: string
     onNewGroup?: () => void
     onBuild?: () => void
     /** Select everything the layer shows (layerSelection.ts) — in both views, and
@@ -119,6 +121,8 @@ export interface CanvasContextMenuProps {
     onReverseEdge?: (id: string) => void
     /** Canvas actions */
     onCreateNode?: (position: { x: number; y: number }, layerId?: string) => void
+    /** The entity Create Entity Here adds inside (a column mapped to it) — named in its label. */
+    createNodeInside?: string
     onPaste?: (position: { x: number; y: number }) => void
     onSelectAll?: () => void
     /** Additional custom actions */
@@ -180,6 +184,7 @@ export function CanvasContextMenu({
     onDeleteEdge,
     onReverseEdge,
     onCreateNode,
+    createNodeInside,
     onPaste,
     onSelectAll,
     customActions = [],
@@ -463,7 +468,7 @@ export function CanvasContextMenu({
             if (onCreateNode) {
                 result.push({
                     id: 'create-node',
-                    label: 'Create Entity Here',
+                    label: createNodeInside ? `Add inside ${createNodeInside}` : 'Create Entity Here',
                     icon: 'Plus',
                     shortcut: 'N',
                     onClick: () => { onCreateNode(target.position, target.layerId); onClose() }
@@ -510,7 +515,7 @@ export function CanvasContextMenu({
             }
             if (m.canEdit) {
                 const adds: ContextMenuAction[] = []
-                if (m.onAddEntity) adds.push({ id: 'layer-add-entity', label: 'Add entity', icon: 'Plus', onClick: () => { m.onAddEntity?.(); onClose() } })
+                if (m.onAddEntity) adds.push({ id: 'layer-add-entity', label: m.addInside ? `Add inside ${m.addInside}` : 'Add entity', icon: 'Plus', onClick: () => { m.onAddEntity?.(); onClose() } })
                 if (m.onNewGroup) adds.push({ id: 'layer-new-group', label: 'New group', icon: 'FolderPlus', onClick: () => { m.onNewGroup?.(); onClose() } })
                 if (m.onBuild) adds.push({ id: 'layer-build', label: 'Build a lot at once', icon: 'LayoutGrid', onClick: () => { m.onBuild?.(); onClose() } })
                 if (adds.length > 0) adds[adds.length - 1] = { ...adds[adds.length - 1], dividerAfter: true }
@@ -604,7 +609,7 @@ export function CanvasContextMenu({
 
         return result
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
-        onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
+        onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, createNodeInside, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical,
         viewOnly, trace, selectLayer, selectAllIn, expandActions])
 

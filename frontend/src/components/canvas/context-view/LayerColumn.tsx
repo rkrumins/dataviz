@@ -86,6 +86,8 @@ interface LayerColumnProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onAddToLayer?: (layerId: string) => void
+  /** The entity the column is mapped to, which its "+" adds inside — named by the "+" and the empty hint. */
+  addInsideName?: string
   /**
    * True only for a `kind === 'blank'` model — one authored from nothing.
    *
@@ -386,6 +388,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDoubleClick,
   onAddChild,
   onAddToLayer,
+  addInsideName,
   isBlankModel = false,
   onBuildToLayer,
   onBeginConnect,
@@ -2396,7 +2399,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   )}
                   {trayHas('add') && onAddToLayer && (
                     <TrayButton
-                      label={`Add entity to ${layer.name}`}
+                      label={addInsideName ? `Add inside ${addInsideName}` : `Add entity to ${layer.name}`}
                       onClick={() => onAddToLayer(layer.id)}
                       menuHasIt={!!onHeaderContextMenu}
                       className="bg-green-500/10 hover:bg-green-500/20 text-green-500 hover:scale-110 active:scale-95"
@@ -3094,7 +3097,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       small lie in the corner of the page. */}
                   {onAddToLayer && !anchorIssue && (
                     <p className="text-xs text-ink-muted/40 mt-1">
-                      {isBlankModel ? 'Click + to add entities' : 'Click + to assign entities'}
+                      {addInsideName ? `Click + to add inside ${addInsideName}` : isBlankModel ? 'Click + to add entities' : 'Click + to assign entities'}
                     </p>
                   )}
                 </motion.div>

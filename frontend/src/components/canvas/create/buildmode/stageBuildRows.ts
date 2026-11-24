@@ -215,17 +215,18 @@ export function useStageBuildRows(): {
         : ''
 
       // Ontology-authoritative: the containment relationship for a parent→child pairing is whatever
-      // the ONTOLOGY allows (deriveContainmentEdges walks relationship endpoint constraints), taking
-      // the first allowed in ontology order — no bias toward any specific edge name, no fabricated
-      // default. Falls back to the graph's first containment type when the pairing isn't explicitly
-      // constrained; returns `undefined` when the ontology defines no containment at all (⇒ the child
-      // is created at the root rather than under a synthesized edge the ontology never declared).
+      // the ONTOLOGY allows (deriveContainmentEdges walks relationship endpoint constraints) — CONTAINS
+      // when it is among them, as the rail picks, else the first allowed in ontology order; no
+      // fabricated default. Falls back to the graph's first containment type when the pairing isn't
+      // explicitly constrained; returns `undefined` when the ontology defines no containment at all
+      // (⇒ the child is created at the root rather than under a synthesized edge the ontology never
+      // declared).
       const containmentEdgeTypeFor = (parentType: string, childType: string): string | undefined => {
         const pt = parentType || rootParentType
         const allowed = deriveContainmentEdges(pt, childType, relationshipTypes, containmentEdgeTypes).filter(
           (e) => e.allowed,
         )
-        return allowed[0]?.edgeType ?? containmentEdgeTypes[0]
+        return (allowed.find((e) => e.edgeType.toUpperCase() === 'CONTAINS') ?? allowed[0])?.edgeType ?? containmentEdgeTypes[0]
       }
 
       const plan = planBuildStaging(rows, {
