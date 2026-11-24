@@ -39,7 +39,7 @@ const NODES = [node('Payments'), node('Ledger')]
 
 function renderColumn(
     anchorMore?: { anchorUrn: string; remaining: number },
-    opts: { nodes?: HierarchyNode[]; anchorIssue?: 'missing' | 'duplicate'; failedNodes?: Set<string> } = {},
+    opts: { nodes?: HierarchyNode[]; anchorIssue?: 'missing' | 'duplicate'; failedNodes?: Set<string>; isTracing?: boolean } = {},
 ) {
     installJsdomLayout()
     const onLoadMore = vi.fn()
@@ -63,7 +63,7 @@ function renderColumn(
                     onContextMenu={vi.fn()}
                     onDoubleClick={vi.fn()}
                     onLoadMore={onLoadMore}
-                    isTracing={false}
+                    isTracing={opts.isTracing ?? false}
                     traceFocusId={null}
                     traceNodes={new Set<string>()}
                     traceContextSet={new Set<string>()}
@@ -86,6 +86,11 @@ describe('LayerColumn — paging an anchored column', () => {
     it('offers the remainder, which the anchor row can no longer do', () => {
         renderColumn({ anchorUrn: ANCHOR, remaining: 4998 })
         expect(screen.getByRole('button', { name: /Load 100 more of 4,998 remaining/ })).toBeInTheDocument()
+    })
+
+    it('offers none of it during a trace, which has nothing to page in', () => {
+        renderColumn({ anchorUrn: ANCHOR, remaining: 4998 }, { isTracing: true })
+        expect(screen.queryByRole('button', { name: /Load 100 more/ })).not.toBeInTheDocument()
     })
 
     it('asks the ANCHOR for the next page, not one of the rows', () => {

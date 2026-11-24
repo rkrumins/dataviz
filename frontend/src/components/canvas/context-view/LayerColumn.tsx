@@ -692,9 +692,13 @@ export const LayerColumn = React.memo(function LayerColumn({
           rows: InlineSearchHitRow[]; overflow: number; endsTheGroup: boolean }
 
     const stack: FrameItem[] = []
+    // Neither column-level "Load more" belongs to a trace: the walk has
+    // already brought every row the trace draws, and a page loaded under it
+    // has nowhere to go (the canvas ignores the click while tracing) — the
+    // per-parent rows below stand down the same way.
     // Open scope: the column's type feeds have more. Pushed FIRST so the LIFO
     // stack emits it LAST — the very foot of the column, below any anchor row.
-    if (feedMore && !localFocusId) {
+    if (feedMore && !localFocusId && !isTracing) {
       stack.push({
         kind: 'loadMore',
         parent: {
@@ -720,7 +724,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     // `node.id`, so handing it the anchor's id routes the click into exactly
     // the same paged `loadChildren(anchorUrn)` every expandable row uses.
     // Pushed first, so the LIFO stack emits it last — at the foot of the column.
-    if (anchorMore && !localFocusId) {
+    if (anchorMore && !localFocusId && !isTracing) {
       stack.push({
         kind: 'loadMore',
         // A COMPLETE stand-in, not a two-field cast: the row pipeline walks
@@ -1733,9 +1737,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   nodeToFlatIndexMapRef.current = nodeToFlatIndexMap
   useEffect(() => {
     if (!geometryRegistry) return
-    // Matches the `py-2` on the totalSize wrapper below — virtualizer
-    // offsets are relative to the padded content box.
-    const LIST_PAD_TOP = 8
+    // Virtualizer offsets are from the top of the totalSize wrapper below:
+    // its rows are absolutely positioned at `top: 0`, so its `py-2` padding
+    // does not move them.
     const api: ColumnGeometryApi = {
       hasNode: (nodeId) => nodeToFlatIndexMapRef.current.has(nodeId),
       getNodeRect: (nodeId) => {
@@ -1750,12 +1754,13 @@ export const LayerColumn = React.memo(function LayerColumn({
         // px while getBoundingClientRect returns scaled viewport px.
         const scale = el.clientHeight > 0 ? rect.height / el.clientHeight : 1
         return {
-          top: rect.top + (LIST_PAD_TOP + m.start - el.scrollTop) * scale,
+          top: rect.top + (m.start - el.scrollTop) * scale,
           height: m.size * scale,
           left: rect.left,
           right: rect.right,
         }
       },
+      getListRect: () => scrollContainerRef.current?.getBoundingClientRect() ?? null,
     }
     geometryRegistry.set(layer.id, api)
     return () => { geometryRegistry.delete(layer.id) }
@@ -2791,20 +2796,24 @@ export const LayerColumn = React.memo(function LayerColumn({
                   </button>
                 )
               }
-              const moreEntry = anchorProxies.moreCount > 0 && onProxyMore && (
+              // What the rail's cap leaves out, in the tray on the side it lies.
+              const moreOf = (direction: 'up' | 'down') =>
+                onProxyMore ? (direction === 'up' ? anchorProxies.moreUp : anchorProxies.moreDown) : 0
+              const moreEntry = (more: number) => more > 0 && (
                 <button
                   key="anchor-more"
                   type="button"
                   data-canvas-interactive
-                  onClick={(e) => { e.stopPropagation(); onProxyMore() }}
+                  onClick={(e) => { e.stopPropagation(); onProxyMore?.() }}
                   title="Every flow of the focused entity, grouped and searchable"
                   className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
-                  {anchorProxies.moreCount.toLocaleString()} more in the lens
+                  {more.toLocaleString()} more in the lens
                 </button>
               )
-              const tray = (direction: 'up' | 'down', entries: typeof upProxies, withMore: boolean) => {
+              const tray = (direction: 'up' | 'down', entries: typeof upProxies) => {
+                const more = moreOf(direction)
                 const where = direction === 'up' ? 'above' : 'below'
                 // The selection itself, scrolled out of this column: its
                 // partners still on screen dock to it here.
@@ -2814,7 +2823,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                 // dock to, until a click opens the tray. The tray itself is the
                 // default. The selection's own pill takes the reader back to it.
                 if (!trayOpen(direction)) {
-                  const count = entries.reduce((n, p) => n + (p.partners ?? 1), 0) + (withMore ? anchorProxies.moreCount : 0)
+                  const count = entries.reduce((n, p) => n + (p.partners ?? 1), 0) + more
                   const label = focusEntry
                     ? `${focusName}${focusIsSelection ? ', selected' : ''}, off-screen ${where} — back to it`
                     : `${count.toLocaleString()} connected to ${focusName}, ${where} — show them`
@@ -2890,7 +2899,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       </button>
                     </p>
                     {entries.map(renderEntry)}
-                    {withMore && moreEntry}
+                    {moreEntry(more)}
                   </div>
                 )
               }
@@ -2903,9 +2912,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                   transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                   className="pointer-events-none"
                 >
-                  {(upProxies.length > 0 || (downProxies.length === 0 && moreEntry)) &&
-                    tray('up', upProxies, downProxies.length === 0)}
-                  {downProxies.length > 0 && tray('down', downProxies, true)}
+                  {(upProxies.length > 0 || moreOf('up') > 0) && tray('up', upProxies)}
+                  {(downProxies.length > 0 || moreOf('down') > 0) && tray('down', downProxies)}
                 </motion.div>
               )
             })()}
@@ -3411,8 +3419,9 @@ export const LayerColumn = React.memo(function LayerColumn({
           )}
 
           {/* A capped subset layer: the canvas lists its first rows; the rest are
-              found by searching in the layer, or exported. */}
-          {subsetFeed?.capped && (
+              found by searching in the layer, or exported. Not under a trace,
+              which lists the rows its walk reached, not the layer's first ones. */}
+          {subsetFeed?.capped && !isTracing && (
             <div className="mx-2 mt-1 mb-3 rounded-xl border border-glass-border/70 bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2.5">
               <p className="text-[11.5px] font-semibold text-ink tabular-nums">{cappedText(subsetFeed.delivered, subsetFeed.total)}</p>
               <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">The canvas lists the first {subsetFeed.delivered.toLocaleString()}. For the rest:</p>

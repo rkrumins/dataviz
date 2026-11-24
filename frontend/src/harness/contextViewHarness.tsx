@@ -11,6 +11,9 @@
  *   fixture   `top`    every notice the top of the canvas can show at once
  *                      (`searchMode=isolate|hide` for the header search token's others)
  *             `trace`  a trace walking (its capsule), with the provider pill
+ *             `tracelong` a trace whose walk lands: the Data Lake feeds 64
+ *                      of 80 dashboards, so a long trace column can be
+ *                      scrolled end to end with its lines on
  *             `scale`  a warehouse of `containers` schemas × `children` tables
  *                      (default 500 × 200), to expand a level at a time
  *   theme     `dark` for the dark palette
@@ -70,10 +73,13 @@ document.body.style.margin = '0'
 const COLUMNS = 3
 const node = (urn: string, displayName: string, entityType: string, childCount: number): GraphNode =>
   ({ urn, displayName, entityType, childCount, properties: {} }) as unknown as GraphNode
+const DASHBOARDS = fixture === 'tracelong' ? 80 : 4
+const DASHBOARD_NAMES = ['Revenue', 'Churn', 'Pipeline', 'Retention']
 const ROOTS: GraphNode[] = [
   node('wh', 'Warehouse', 'warehouse', CONTAINERS),
   node('lake', 'Data Lake', 'warehouse', 4),
-  ...['Revenue', 'Churn', 'Pipeline', 'Retention'].map((name, i) => node(`d${i}`, `${name} dashboard`, 'dashboard', 0)),
+  ...Array.from({ length: DASHBOARDS }, (_, i) =>
+    node(`d${i}`, `${DASHBOARD_NAMES[i % 4]} dashboard${i < 4 ? '' : ` ${Math.floor(i / 4) + 1}`}`, 'dashboard', 0)),
 ]
 function childrenOf(urn: string): GraphNode[] {
   if (urn === 'wh') return Array.from({ length: CONTAINERS }, (_, i) => node(`s${i}`, `schema_${String(i).padStart(3, '0')}`, 'schema', CHILDREN))
@@ -105,7 +111,27 @@ const LAYERS = [
 ]
 const ASSIGNMENTS: Record<string, { layerId: string }> = {
   wh: { layerId: 'sources' }, lake: { layerId: 'sources' },
-  d0: { layerId: 'reports' }, d1: { layerId: 'reports' }, d2: { layerId: 'reports' }, d3: { layerId: 'reports' },
+  ...Object.fromEntries(Array.from({ length: DASHBOARDS }, (_, i) => [`d${i}`, { layerId: 'reports' }])),
+}
+
+// `tracelong`'s walk: the Data Lake feeds the first 64 dashboards, in the
+// closure's wire shape. Every line ends on the focus, so every line moves.
+// The coarse leg has no roll-ups to offer, so it answers with the focus alone.
+const LONG_FED = 64
+function longWalk(coarse: boolean) {
+  const fed = coarse ? [] : ROOTS.filter((n) => /^d\d+$/.test(n.urn)).slice(0, LONG_FED)
+  return {
+    focus: { urn: 'lake', level: 0, entityType: 'warehouse' },
+    nodes: [lookup('lake')!, ...fed],
+    edges: fed.map((d) => ({ id: `r:lake>${d.urn}`, sourceUrn: 'lake', targetUrn: d.urn, edgeType: 'TRANSFORMS', properties: {} })),
+    containmentEdges: [],
+    upstreamUrns: new Set<string>(),
+    downstreamUrns: new Set(fed.map((d) => d.urn)),
+    effectiveLevel: 0, isInherited: false, inheritedFromUrn: null,
+    truncated: false, truncationReason: null,
+    frontierUp: [], frontierDown: [], seedTruncated: false,
+    grain: coarse ? 'coarse' : 'fine',
+  }
 }
 
 // ── The network ───────────────────────────────────────────────────────────
@@ -164,8 +190,11 @@ const provider = {
     for (let p = parentOf(u); p; p = parentOf(p)) chain.push(p)
     return [u, chain]
   })),
-  // A walk that never lands: the capsule stays up, narrating.
-  traceClosure: () => new Promise<never>(() => {}),
+  // `trace`: a walk that never lands, so the capsule stays up, narrating.
+  // `tracelong`: one that lands at once, with the whole flow.
+  traceClosure: fixture === 'tracelong'
+    ? async (req?: { grain?: string }) => (req?.grain === 'coarse' ? longWalk(true) : longWalk(false))
+    : () => new Promise<never>(() => {}),
   computeLayerAssignments: async () => ({
     assignments: new Map(Object.entries(ASSIGNMENTS).map(([entityId, a]) => [entityId, { entityId, layerId: a.layerId, isInherited: false }])),
     parentMap: new Map(),
@@ -287,10 +316,10 @@ createRoot(document.getElementById('root')!).render(
   </MemoryRouter>,
 )
 
-if (fixture === 'trace') {
-  // Select a dashboard and press the header's Trace, as a reader does.
+if (fixture === 'trace' || fixture === 'tracelong') {
+  // Select an entity and press the header's Trace, as a reader does.
   setTimeout(() => {
-    useCanvasStore.getState().selectNode('d0')
+    useCanvasStore.getState().selectNode(fixture === 'trace' ? 'd0' : 'lake')
     setTimeout(() => {
       const button = [...document.querySelectorAll('button')].find((b) => /trace lineage/i.test(b.getAttribute('aria-label') ?? b.textContent ?? ''))
       button?.click()

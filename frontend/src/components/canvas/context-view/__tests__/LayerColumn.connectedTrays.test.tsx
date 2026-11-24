@@ -45,8 +45,8 @@ function seedNames(names: Record<string, string>) {
   )))
 }
 
-function publish(proxies: AnchorProxy[], focusId = 'a') {
-  useAnchorRailStore.getState().publish(new Map([['L1', { proxies, moreCount: 0 }]]), focusId)
+function publish(proxies: AnchorProxy[], focusId = 'a', more = { moreUp: 0, moreDown: 0 }) {
+  useAnchorRailStore.getState().publish(new Map([['L1', { proxies, ...more }]]), focusId)
 }
 
 afterEach(() => {
@@ -90,7 +90,7 @@ describe('LayerColumn — connected trays', () => {
   it('opening a tray from its hint, or switching trays, redraws the lines', () => {
     usePreferencesStore.setState({ showConnectedTrays: false })
     useAnchorRailStore.getState().publish(new Map([
-      ['L1', { proxies: [{ nodeId: 'far', count: 3, color: '#888', direction: 'down', flow: 'in' }], moreCount: 0 }],
+      ['L1', { proxies: [{ nodeId: 'far', count: 3, color: '#888', direction: 'down', flow: 'in' }], moreUp: 0, moreDown: 0 }],
     ]), 'a')
     const redraw = vi.fn()
     renderColumn(redraw)
@@ -162,6 +162,19 @@ describe('LayerColumn — a tray entry says who, which way and where', () => {
     fireEvent.click(entry)
     expect(onProxyRevealMany).toHaveBeenCalledWith(['x', 'y', 'z'])
     expect(onProxyReveal).not.toHaveBeenCalled()
+  })
+
+  it('what the cap leaves out is offered in the tray on its own side', () => {
+    // The strongest flows are below; the three the cap left out are above —
+    // so the "more" belongs to the tray above, not the one below.
+    seedNames({ a: 'base_pay' })
+    publish([{ nodeId: 'b', flow: 'out', count: 4, color: '#888', direction: 'down' }], 'a', { moreUp: 3, moreDown: 0 })
+    renderColumn(vi.fn(), { nodes: [node('a', 'base_pay'), node('b', 'SILVER')], onProxyMore: vi.fn() })
+
+    const above = document.getElementById('anchor-tray-L1-up')!
+    const below = document.getElementById('anchor-tray-L1-down')!
+    expect(above).toHaveTextContent('3 more in the lens')
+    expect(below).not.toHaveTextContent('more in the lens')
   })
 
   it('in hint mode, the pill counts the entities, not the entries', () => {
