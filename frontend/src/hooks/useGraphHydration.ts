@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { CREATED_ROOTS_LOADED, useCanvasStore, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
+import { CREATED_ROOTS_LOADED, useCanvasStore, type ChildPageLanding, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
 import { featureEnabled } from '@/store/features'
 import type { ViewFeedPage } from '@/types/searchView'
 import { httpStatusOf } from '@/services/graphRequestFailure'
@@ -131,6 +131,29 @@ const CHILD_LOAD_CONCURRENCY = (() => {
     const fromEnv = Number(import.meta.env?.VITE_CHILD_LOAD_CONCURRENCY)
     return Number.isFinite(fromEnv) && fromEnv >= 1 ? fromEnv : 6
 })()
+
+/** The longest a landed child page waits for others to land with it (see the
+ *  landing buffer in useGraphHydration). */
+export const LANDING_WINDOW_MS = 100
+
+/** Landed rows whose lineage is read per call, and calls at once, once the
+ *  loads that brought them have settled (see `primeSettled`). */
+const PRIME_CHUNK = 500
+const PRIME_CONCURRENCY = 2
+
+/** What waits in useGraphHydration's landing buffer to commit as one update. */
+interface Landings {
+    pages: Array<ChildPageLanding & { generation: number; signal: AbortSignal }>
+    /** Flows read for rows already landed, and the rows they were read for. */
+    flows: Array<{ edges: LineageEdge[]; rows: ReadonlySet<string>; generation: number; partial: { in: string[]; out: string[] } }>
+    /** Containers whose load starts (true) or ends (false): the last word wins. */
+    loading: Map<string, boolean>
+    /** Callers waiting for their page to be in the store. */
+    waiters: Array<() => void>
+    timer: ReturnType<typeof setTimeout> | null
+}
+
+const noLandings = (): Landings => ({ pages: [], flows: [], loading: new Map(), waiters: [], timer: null })
 
 /**
  * Cap on parallel node batches during the INITIAL load of a view. A curated
@@ -590,6 +613,117 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // calls at CHILD_LOAD_CONCURRENCY and exposes per-key cancellation
     // (used by the canvas when a user collapses a node mid-load).
     const queueRef = useRef<BoundedQueue>(new BoundedQueue(CHILD_LOAD_CONCURRENCY))
+
+    // ── Child pages land together ────────────────────────────────────
+    // Every store update re-renders the whole canvas, and with thousands of
+    // rows that render costs more than the page did. Opening a level of 100
+    // containers landed 100 pages one render each: the main thread fell behind
+    // the network (a level it could serve in 2 s took 10) and scrolling
+    // stuttered until the last page was in. So a landed page waits, at most
+    // LANDING_WINDOW_MS, for the pages landing with it, and they commit as ONE
+    // update, together with their containers' loading state, so no container
+    // reads as loaded before its rows are in the store. When nothing else is
+    // on its way the buffer lands at once: a single expand waits for nothing.
+    //
+    // The window stretches to twice what the last landing took to render, so
+    // landing holds at most a third of the main thread: with 10,000 rows one
+    // render of the canvas outlasts a fixed window, and renders back to back
+    // left scrolling no frames at all.
+    const landingRef = useRef<Landings>(noLandings())
+    const landingCostRef = useRef(0)
+    const flushLandingsRef = useRef<() => void>(() => {})
+    const scheduleLanding = useCallback(() => {
+        const l = landingRef.current
+        l.timer ??= setTimeout(() => flushLandingsRef.current(), Math.max(LANDING_WINDOW_MS, 2 * landingCostRef.current))
+    }, [])
+    /** A container's load has started: said at once when nothing waits to land,
+     *  else with the next landing, so a load that starts as another lands (the
+     *  queue moving on) costs no render of its own. */
+    const markLoading = useCallback((ids: readonly string[]) => {
+        const l = landingRef.current
+        if (l.timer === null) setLoadingNodes(prev => new Set([...prev, ...ids]))
+        else for (const id of ids) l.loading.set(id, true)
+    }, [])
+
+    // The landed rows' lineage to the REST of the canvas. The server answers a
+    // child page with cross-child lineage only — edges between the children it
+    // returned, deliberately, to keep that query O(pageSize²) — so a row from
+    // "Load 13 more" arrived with no flow to anything already on screen.
+    //
+    // Read once the loads that brought the rows have settled, PRIME_CONCURRENCY
+    // reads at a time, rather than one chain of reads per page as it lands:
+    // opening a level of 100 containers started 100 such chains at once, each
+    // competing with the pages themselves for the browser's six connections.
+    // Its flows land like a page does. A failure costs those rows their flows,
+    // not the page.
+    const unprimedRef = useRef<{ generation: number; ids: string[]; running: boolean }>({ generation: -1, ids: [], running: false })
+    const primeWithRef = useRef({ provider, lineageEdgeTypes, containmentEdgeTypes })
+    useEffect(() => { primeWithRef.current = { provider, lineageEdgeTypes, containmentEdgeTypes } })
+    const primeSettled = useCallback(() => {
+        const u = unprimedRef.current
+        if (u.running || u.ids.length === 0) return
+        u.running = true
+        void (async () => {
+            try {
+                while (u.ids.length > 0) {
+                    const { generation, ids } = u
+                    u.ids = []
+                    const { provider: from, lineageEdgeTypes: lineage, containmentEdgeTypes: containment } = primeWithRef.current
+                    const chunks: string[][] = []
+                    for (let i = 0; i < ids.length; i += PRIME_CHUNK) chunks.push(ids.slice(i, i + PRIME_CHUNK))
+                    let left = chunks.length
+                    await mapWithConcurrency(chunks, PRIME_CONCURRENCY, async (rows) => {
+                        try {
+                            const { edges, partial } = await primeLineageFor(from, rows, lineage, containment)
+                            landingRef.current.flows.push({ edges, rows: new Set(rows), generation, partial })
+                        } catch (e) {
+                            console.warn('[children] lineage priming failed', e)
+                        }
+                        // The last read, with nothing else on its way, lands at once.
+                        if (--left === 0 && u.ids.length === 0 && queueRef.current.size() === 0) flushLandingsRef.current()
+                        else scheduleLanding()
+                    })
+                }
+            } finally {
+                u.running = false
+            }
+        })()
+    }, [scheduleLanding])
+
+    const flushLandings = useCallback(() => {
+        const l = landingRef.current
+        if (l.timer !== null) clearTimeout(l.timer)
+        landingRef.current = noLandings()
+        // The render this update causes runs before the next task.
+        const began = performance.now()
+        setTimeout(() => { landingCostRef.current = performance.now() - began }, 0)
+        const store = useCanvasStore.getState()
+        const generation = store.graphGeneration
+        // A page whose load was cancelled meanwhile (a collapse), or read for a
+        // graph since replaced, does not land.
+        const pages = l.pages.filter(p => !p.signal.aborted && p.generation === generation)
+        // A flow keeps only while its end among the rows it was read for is
+        // still held (a sort flip refetches the page, a collapse prunes it).
+        const flows = l.flows.filter(f => f.generation === generation)
+        const flowEdges = flows.flatMap(f => f.edges.filter(e =>
+            [e.source, e.target].every(end => !f.rows.has(end) || store._nodeIndex.has(end))))
+        if (pages.length > 0 || flowEdges.length > 0) store.addChildPages(pages, flowEdges)
+        // Rows whose read came back at its cap: more flows than arrived.
+        if (flows.length > 0) store.markLineagePartial({
+            in: flows.flatMap(f => f.partial.in), out: flows.flatMap(f => f.partial.out),
+        })
+        if (l.loading.size > 0) setLoadingNodes(prev => {
+            const next = new Set(prev)
+            l.loading.forEach((on, id) => { if (on) next.add(id); else next.delete(id) })
+            return next
+        })
+        const u = unprimedRef.current
+        if (u.generation !== generation) Object.assign(u, { generation, ids: [] })
+        for (const p of pages) for (const n of p.nodes) u.ids.push(n.id)
+        if (queueRef.current.size() === 0) primeSettled()
+        for (const resolve of l.waiters) resolve()
+    }, [primeSettled])
+    useEffect(() => { flushLandingsRef.current = flushLandings })
 
     // Reset when provider changes (e.g. workspace/datasource switch)
     useEffect(() => {
@@ -1759,17 +1893,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // ─── loadChildren ───────────────────────────────────────────────────
 
     const loadChildren = useCallback(async (parentId: string, options?: LoadChildrenOptions) => {
-        /** Land a page (nodes, edges, position) as ONE store update. Another
-         *  instance of this hook may have paged this parent further meanwhile —
-         *  then the rows land but the position stays where that one left it. */
-        const commit = (pos: ChildPageState, nodesToAdd: LineageNode[], edgesToAdd: LineageEdge[]) => {
-            const store = useCanvasStore.getState()
-            const cur = store.childPaging[parentId]
-            const further = !!cur && cur.direction === pos.direction && cur.childCount === pos.childCount
-                && cur.offset > pos.offset
-            if (further) store.addGraph(nodesToAdd, edgesToAdd)
-            else store.addChildPage(parentId, pos, nodesToAdd, edgesToAdd)
-        }
         // ── Handle root loading (empty parentId) ────────────────────
         if (!parentId) {
             if (loadingNodes.has('ROOT')) return
@@ -1862,9 +1985,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const start = resumeFor()
             if (!start) return
             const { parentNode, childCount } = start
-            setFailedNodes(prev => { const next = new Set(prev); next.delete(parentId); return next })
-            setLoadingNodes(prev => new Set(prev).add(parentId))
+            setFailedNodes(prev => { if (!prev.has(parentId)) return prev; const next = new Set(prev); next.delete(parentId); return next })
+            markLoading([parentId])
             const stale = () => signal.aborted || useCanvasStore.getState().graphGeneration !== generation
+            /** Land a page (nodes, edges, position) with those landing beside it,
+             *  as ONE store update (see the landing buffer). */
+            const commit = (pos: ChildPageState, nodesToAdd: LineageNode[], edgesToAdd: LineageEdge[]) => {
+                landingRef.current.pages.push({ parentId, page: pos, nodes: nodesToAdd, edges: edgesToAdd, generation, signal })
+                scheduleLanding()
+            }
             let pos = start.at
             // A position reached by pages that brought nothing new is committed ONCE,
             // not per page: every store update re-renders the whole canvas.
@@ -1942,39 +2071,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         uncommitted = true
                     }
                     added += nodesToAdd.length
-
-                    // The page's lineage to the REST of the canvas. The server
-                    // answers this request with cross-child lineage only —
-                    // edges between the children it returned, deliberately, to
-                    // keep that query O(pageSize²) — so a row from "Load 13
-                    // more" arrived with no flow to anything already on screen.
-                    // Fired after the commit so the rows paint immediately and
-                    // their wires follow; a failure costs those rows their
-                    // flows, not the page.
-                    if (nodesToAdd.length > 0) {
-                        const pageIds = new Set(nodesToAdd.map((n) => n.id))
-                        void primeLineageFor(
-                            provider,
-                            [...pageIds],
-                            lineageEdgeTypes,
-                            containmentEdgeTypes,
-                        ).then(({ edges: extra, partial }) => {
-                            // stale(), not only the signal: flows read for a graph
-                            // that has since been replaced do not belong in the new one.
-                            if (stale()) return
-                            // Nor on rows removed while they were read (a sort flip
-                            // refetches the page, a collapse prunes it): a flow
-                            // keeps only while its end on this page is still held.
-                            const held = useCanvasStore.getState()._nodeIndex
-                            const kept = extra.filter((e) =>
-                                [e.source, e.target].every((end) => !pageIds.has(end) || held.has(end)))
-                            if (kept.length > 0) useCanvasStore.getState().addGraph([], kept)
-                            // Rows whose read came back at its cap: more flows than arrived.
-                            useCanvasStore.getState().markLineagePartial(partial)
-                        }).catch((e) => {
-                            console.warn('[children] lineage priming failed', e)
-                        })
-                    }
+                    // (Its rows' lineage to the rest of the canvas is read once
+                    // they land: see primeSettled.)
 
                     // A revealed child this page actually delivered is now a
                     // normal loaded child — clear the flag.
@@ -2010,18 +2108,23 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             } finally {
                 // Keep the ground covered, so the next ask resumes past it.
                 if (uncommitted && !stale()) commit(pos, [], [])
-                setLoadingNodes(prev => {
-                    const next = new Set(prev)
-                    next.delete(parentId)
-                    return next
-                })
+                // No longer loading once the page is in the store, not before.
+                landingRef.current.loading.set(parentId, false)
+                scheduleLanding()
             }
         })
+        // Nothing else on its way: land now, not at the end of the window.
+        // Otherwise this load's page (or the one it joined) is in the store
+        // once the landing holding it commits.
+        if (queueRef.current.size() === 0) flushLandings()
+        else if (landingRef.current.loading.get(parentId) === false) {
+            await new Promise<void>(resolve => landingRef.current.waiters.push(resolve))
+        }
         // Undefined when the queue collapsed this call onto an in-flight one
         // with the same key (the task never ran), and when the load aborted
         // or failed — in every one of those cases there is nothing to report.
         return summary
-    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes, submitRootPage])
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes, submitRootPage, markLoading, scheduleLanding, flushLandings])
 
     /**
      * Cancel a queued or in-flight load for `parentId`. Aborts the
@@ -2042,6 +2145,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
     const cancelChildLoad = useCallback((parentId: string) => {
         queueRef.current.cancel(parentId)
+        // A page that has landed but not yet committed is dropped with it.
+        const l = landingRef.current
+        l.pages = l.pages.filter(p => p.parentId !== parentId)
     }, [])
 
     return {
