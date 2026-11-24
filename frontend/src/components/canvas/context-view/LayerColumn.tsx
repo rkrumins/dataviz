@@ -1812,8 +1812,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   // another column, is a problem with the data to fix, not an empty layer: it
   // says why whatever this is.
   const emptyLayerMessage = usePreferencesStore(s => s.emptyLayerMessage) ?? 'always'
-  const showEmptyMessage = !!anchorIssue || emptyLayerMessage === 'always'
-    || (emptyLayerMessage === 'tracing-hidden' && !isTracing)
+  const showEmptyMessage = !!anchorIssue
+    || !(emptyLayerMessage === 'never' || (emptyLayerMessage === 'tracing-hidden' && isTracing))
 
   return (
     <motion.div
