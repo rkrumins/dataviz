@@ -1745,6 +1745,21 @@ async def lifespan(_app: FastAPI):
             name="analytics-warmer",
         )
 
+    # People indexer — backfills People analytics' join and first/last-activity
+    # index from history, and attributes usage signals to workspaces, then keeps
+    # both current. Same owner role; nothing on a request path waits for it.
+    _app.state._people_indexer_shutdown = asyncio.Event()
+    _app.state._people_indexer_task = None
+    if runs_scheduler():
+        from .services.people_activity_indexer import run_indexer as _run_people_indexer
+        _app.state._people_indexer_task = asyncio.create_task(
+            _run_people_indexer(
+                get_jobs_session,
+                _app.state._people_indexer_shutdown,
+            ),
+            name="people-indexer",
+        )
+
     # IdP reachability → idp_provider_reachability, the evidence the
     # automatic password fallback and the SSO session ride-through act on
     # (see ``services/idp_reachability.py``). Same owner role as the relay:
@@ -1987,6 +2002,21 @@ async def lifespan(_app: FastAPI):
             _warm_task.cancel()
             try:
                 await _warm_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the people indexer before DB pool teardown, same shape.
+    _pi_shutdown = getattr(_app.state, "_people_indexer_shutdown", None)
+    _pi_task = getattr(_app.state, "_people_indexer_task", None)
+    if _pi_shutdown is not None:
+        _pi_shutdown.set()
+    if _pi_task is not None and not _pi_task.done():
+        try:
+            await asyncio.wait_for(_pi_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _pi_task.cancel()
+            try:
+                await _pi_task
             except (asyncio.CancelledError, Exception):
                 pass
 

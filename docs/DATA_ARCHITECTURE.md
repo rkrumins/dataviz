@@ -40,6 +40,7 @@ The ORM maps 99 tables across four PostgreSQL schemas. This page details the cor
 | Aggregation and freshness | `public` | 2 | `data_source_polling_configs`, `refresh_events` |
 | Platform settings | `public` | 11 | `feature_flags`, `feature_definitions`, `platform_settings`, `application_branding`, `announcements` |
 | Events and audit | `public` | 4 | `outbox_events`, `auth_audit_log`, `product_events`, `notifications` |
+| People analytics index | `public` | 2 | `person_workspace_activity` (when each person joined each workspace, and was first and last active in it), `people_index_cursors` (how far its indexer has got) |
 | Legacy | `public` | 1 | `graph_connections` — do not write to it |
 | Aggregation jobs | `aggregation` | 6 | `aggregation_jobs`, `data_source_state`, `reconcile_runs`, `job_event_log` |
 | Version store | `graphver` (`GRAPHVER_SCHEMA`) | 14 | `graphs`, `branches`, `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merge_requests` |

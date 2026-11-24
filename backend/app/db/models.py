@@ -1861,6 +1861,9 @@ class ViewActivityLogORM(Base):
         Index("idx_val_view", "view_id"),
         Index("idx_val_view_created", "view_id", "created_at"),
         Index("idx_val_created", "created_at"),
+        # One person's edits, as a range scan: People analytics.
+        # Alembic 20261202_1000_pev_actor_ws.
+        Index("idx_val_actor_created", "actor", "created_at"),
         CheckConstraint(
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
@@ -1898,6 +1901,10 @@ class ProductEventORM(Base):
     # docs vote, a finished tour), which is why it is nullable rather than a
     # second required field on every signal.
     subject_id = Column(Text, nullable=True)
+    # Where a usage signal happened — a trace, a search, an export. NULL when
+    # the client sent none, for rows from before it was recorded, and for
+    # ``view.opened``, whose workspace is its view's (``subject_id``).
+    workspace_id = Column(Text, nullable=True)
     payload = Column(Text, nullable=True)        # JSON string
     created_at = Column(Text, nullable=False, default=_now)
 
@@ -1908,10 +1915,56 @@ class ProductEventORM(Base):
         # window" (equality on type, group on subject) and "this one view's
         # opens" (equality on both, range on created_at).
         Index("idx_product_events_subject", "event_type", "subject_id", "created_at"),
+        # One person's activity, as a range scan: People analytics.
+        # Alembic 20261202_1000_pev_actor_ws.
+        Index("idx_product_events_actor", "actor_id", "created_at"),
+        # One workspace's usage signals. Partial: most rows carry no workspace.
+        Index("idx_product_events_ws", "workspace_id", "created_at",
+              postgresql_where=text("workspace_id IS NOT NULL"),
+              sqlite_where=text("workspace_id IS NOT NULL")),
     )
 
     def __repr__(self) -> str:
         return f"<ProductEvent id={self.id!r} type={self.event_type!r}>"
+
+
+class PersonWorkspaceActivityORM(Base):
+    """When one person joined one workspace, and was first and last active in it.
+
+    One row per (person, workspace), and one per person with ``workspace_id = ''`` for the
+    platform as a whole. Maintained by ``services/people_activity_indexer`` from the stores
+    that record what people do — never written on a request path — and backfilled from all
+    of their history, so it outlives ``product_events`` retention.
+
+    Every column only ever moves one way: ``joined_at`` and ``first_active_at`` earlier,
+    ``last_active_at`` later. That makes each indexer pass an idempotent min/max upsert, and
+    a pass that runs twice, or overlaps another, harmless.
+    """
+    __tablename__ = "person_workspace_activity"
+
+    user_id = Column(Text, primary_key=True)
+    workspace_id = Column(Text, primary_key=True)        # '' = the platform as a whole
+    joined_at = Column(Text, nullable=True)              # first known access, NULL if never bound
+    first_active_at = Column(Text, nullable=True)
+    last_active_at = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # A workspace's people, most recently active first: the roster's read.
+        Index("idx_pwa_workspace_last", "workspace_id", "last_active_at"),
+    )
+
+
+class PeopleIndexCursorORM(Base):
+    """How far the people indexer has got through one source: a restart resumes from here,
+    and the page reports how much of history is indexed while a backfill runs."""
+    __tablename__ = "people_index_cursors"
+
+    name = Column(Text, primary_key=True)
+    through = Column(Text, nullable=True)        # ISO instant processed up to, inclusive
+    through_id = Column(Text, nullable=True)     # tie-break for row-keyed cursors
+    started_at = Column(Text, nullable=True)     # the first row this cursor ever processed
+    updated_at = Column(Text, nullable=False, default=_now)
 
 
 # ------------------------------------------------------------------ #

@@ -43,6 +43,7 @@ from .endpoints import (
     branding,
     telemetry,
     analytics,
+    people_activity,
     content_insights,
     api_keys,
     service_accounts,
@@ -177,6 +178,13 @@ api_router.include_router(
 # Gated inside the module on system:audit:read OR system:org-admin.
 api_router.include_router(
     analytics.router, prefix="/admin/analytics", tags=["admin:analytics"],
+)
+
+# People analytics — each person's activity, per workspace and per day. Its own
+# access rule (services/people_scope): analytics administrators see everyone,
+# workspace admins their workspace's people, everyone themselves.
+api_router.include_router(
+    people_activity.router, prefix="/admin/analytics/people", tags=["admin:analytics"],
 )
 
 # Usage figures ON the content, for whoever can already see it. Deliberately

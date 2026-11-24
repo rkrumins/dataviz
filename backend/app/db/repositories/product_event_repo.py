@@ -30,16 +30,24 @@ async def record(
     event_type: str,
     actor_id: str | None,
     payload: dict[str, Any] | None,
+    subject_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     """Append one telemetry row. The caller owns the transaction/commit.
 
     Also the actor's "last activity" for Admin → Users: these are the rows
     Activity analytics counts as someone being active.
+
+    ``subject_id`` and ``workspace_id`` are real columns so People analytics
+    can group on them in SQL; the caller has already decided both are safe to
+    record.
     """
     session.add(
         ProductEventORM(
             event_type=event_type,
             actor_id=actor_id,
+            subject_id=subject_id,
+            workspace_id=workspace_id,
             payload=json.dumps(payload) if payload else None,
         )
     )
