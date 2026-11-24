@@ -319,6 +319,17 @@ interface PreferencesState {
   syncTechnicalDetailsOpen: boolean
   setSyncTechnicalDetailsOpen: (open: boolean) => void
 
+  /** Whether a data, search or view export says where each entity sits: its parent and path, the
+   *  five informational columns (`lib/ancestryColumns`). Off, so a file reads as it always has to
+   *  whatever consumes it, until the person turns it on; then remembered for their next export.
+   *  One choice for every export of data and of views. */
+  exportWithPath: boolean
+  setExportWithPath: (on: boolean) => void
+  /** The same for a lineage download ("Everything it reaches"), whose file has always said where
+   *  each entity sits: on until the person turns it off, then remembered. */
+  traceExportWithPath: boolean
+  setTraceExportWithPath: (on: boolean) => void
+
   // Context View display settings — control canvas-side rendering density,
   // zoom, and visual chrome from the header's Display Settings popover.
   canvasZoom: number
@@ -613,6 +624,11 @@ export const usePreferencesStore = create<PreferencesState>()(
 
       syncTechnicalDetailsOpen: false,
       setSyncTechnicalDetailsOpen: (syncTechnicalDetailsOpen) => set({ syncTechnicalDetailsOpen }),
+
+      exportWithPath: false,
+      setExportWithPath: (exportWithPath) => set({ exportWithPath }),
+      traceExportWithPath: true,
+      setTraceExportWithPath: (traceExportWithPath) => set({ traceExportWithPath }),
 
       // Context View display settings
       canvasZoom: 1,

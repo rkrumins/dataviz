@@ -19,6 +19,8 @@ import type {
     SearchQuery,
 } from '@/types/search'
 
+import { usePreferencesStore } from '@/store/preferences'
+
 import { ExportMatchesDialog } from '../ExportMatchesDialog'
 
 
@@ -90,6 +92,7 @@ const rowNames = () => rows().map((r) => r.querySelector('.font-mono')?.textCont
 
 
 beforeEach(() => {
+    usePreferencesStore.setState({ exportWithPath: false })
     triggerBrowserDownload.mockReset()
     provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
 })
@@ -139,7 +142,7 @@ describe('ExportMatchesDialog', () => {
         const bodies = searchExport.mock.calls.map(([body]) => body as SearchExportRequest)
         expect(bodies[0]).toEqual({
             scope: QUERY.scope, predicate: QUERY.predicate, format: 'ndjson',
-            columns: ['description', 'owner', 'legacyCode'], withPath: true, waitMs: 2000,
+            columns: ['description', 'owner', 'legacyCode'], waitMs: 2000,
         })
         expect(bodies[1].sessionId).toBe('exp-1')
 
@@ -159,20 +162,21 @@ describe('ExportMatchesDialog', () => {
         expect(triggerBrowserDownload).toHaveBeenCalledTimes(2)
     })
 
-    it('says where each match sits unless that is switched off', async () => {
+    it('says where each match sits only once switched on, the choice every export remembers', async () => {
         const user = userEvent.setup()
         const searchExport = vi.spyOn(provider, 'searchExport')
             .mockResolvedValue(answer({ status: 'complete', downloadToken: 't' }))
         renderDialog()
 
         const option = screen.getByRole('checkbox', { name: /Parent and path/ })
-        expect(option).toHaveAttribute('aria-checked', 'true')
-        expect(screen.getByText('11 columns')).toBeInTheDocument()      // 4 + parent and path + 2
+        expect(option).toHaveAttribute('aria-checked', 'false')
+        expect(screen.getByText('6 columns')).toBeInTheDocument()       // 4 + description and tags
         await user.click(option)
-        expect(screen.getByText('6 columns')).toBeInTheDocument()
+        expect(screen.getByText('11 columns')).toBeInTheDocument()      // and parent and path
         await user.click(screen.getByRole('button', { name: /^Export$/ }))
 
-        expect(searchExport.mock.calls[0][0]).not.toHaveProperty('withPath')
+        expect(searchExport.mock.calls[0][0]).toMatchObject({ withPath: true })
+        expect(usePreferencesStore.getState().exportWithPath).toBe(true)
     })
 
     it("adds a property the catalog doesn't list, by name", async () => {

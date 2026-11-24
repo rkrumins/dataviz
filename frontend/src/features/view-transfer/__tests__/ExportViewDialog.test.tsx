@@ -7,7 +7,9 @@
  *     as is read in one request too, with the file's totals and an estimated size;
  *   - someone who can't edit a view exports its latest version: their export saves nothing;
  *   - the result shows the file's name and fingerprint; a failure says why and can be retried;
- *   - a selection over the server's per-file cap can't be sent.
+ *   - a selection over the server's per-file cap can't be sent;
+ *   - the file says where each entity sits only once that is switched on, the same remembered
+ *     choice the data export makes.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -27,6 +29,7 @@ vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
 
 import { exportViews, previewExport } from '@/services/viewTransferApiService'
 import { listViewVersions } from '@/services/viewVersionsApiService'
+import { usePreferencesStore } from '@/store/preferences'
 import { ExportViewDialog } from '../ExportViewDialog'
 
 function preview(viewId: string, extra: Partial<ExportPreview> = {}): ExportPreview {
@@ -73,6 +76,7 @@ function renderDialog(views = [{ id: 'view_1', name: 'Finance lineage' }], onClo
 
 describe('ExportViewDialog', () => {
   beforeEach(() => {
+    usePreferencesStore.setState({ exportWithPath: false })
     vi.mocked(exportViews).mockReset()
     vi.mocked(listViewVersions).mockReset()
     vi.mocked(previewExport).mockReset()
@@ -93,7 +97,7 @@ describe('ExportViewDialog', () => {
     await userEvent.type(screen.getByPlaceholderText(/Note for v4/), 'For UAT')
     await userEvent.click(screen.getByRole('button', { name: /Download/ }))
 
-    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: null }], 'For UAT')
+    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: null }], 'For UAT', { withPath: false })
     expect(await screen.findByText('Downloaded')).toBeInTheDocument()
     expect(screen.getByText('finance-lineage.v4.view.json')).toBeInTheDocument()
     expect(screen.getByText('abcdef0123456789')).toBeInTheDocument()
@@ -112,7 +116,7 @@ describe('ExportViewDialog', () => {
     expect(screen.getByText('finance-lineage.v1.view.json')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Download/ }))
 
-    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: 1 }], undefined)
+    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: 1 }], undefined, { withPath: false })
   })
 
   it('sends several views in one file, each at its current design', async () => {
@@ -133,7 +137,8 @@ describe('ExportViewDialog', () => {
     expect(screen.getByText('240')).toBeInTheDocument()
     expect(screen.getByText('about 40.0 KB')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Download/ }))
-    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'a', version: null }, { viewId: 'b', version: null }], undefined)
+    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'a', version: null }, { viewId: 'b', version: null }], undefined,
+      { withPath: false })
     expect(await screen.findByText('Downloaded')).toBeInTheDocument()
   })
 
@@ -149,6 +154,24 @@ describe('ExportViewDialog', () => {
     })
     await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
     await waitFor(() => expect(exportViews).toHaveBeenCalledTimes(2))
+  })
+
+  it('says where each entity sits only once switched on, remembered with the data export’s choice', async () => {
+    vi.mocked(listViewVersions).mockResolvedValue(page(false))
+    vi.mocked(exportViews).mockResolvedValue({
+      filename: 'finance-lineage.v3.view.json', bytes: 100, bundleHash: null, definitionHash: 'sha256:3', version: 3,
+    })
+    renderDialog()
+
+    const option = await screen.findByRole('switch', { name: /Include where each entity sits \(parent and path\)/ })
+    expect(option).toHaveAttribute('aria-checked', 'false')
+    expect(screen.queryByText('Where each entity sits')).not.toBeInTheDocument()
+    await userEvent.click(option)
+    expect(screen.getByText('Where each entity sits')).toBeInTheDocument()      // what's in the file
+    await userEvent.click(screen.getByRole('button', { name: /Download/ }))
+
+    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: null }], undefined, { withPath: true })
+    expect(usePreferencesStore.getState().exportWithPath).toBe(true)
   })
 
   it('says saved queries stay behind, and what takes them', () => {
@@ -178,6 +201,6 @@ describe('ExportViewDialog', () => {
     expect(screen.getByText('finance-lineage.v3.view.json')).toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/Note for/)).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Download/ }))
-    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: null }], undefined)
+    expect(exportViews).toHaveBeenCalledWith([{ viewId: 'view_1', version: null }], undefined, { withPath: false })
   })
 })

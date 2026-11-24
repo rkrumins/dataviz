@@ -7,9 +7,8 @@ connection between pages and memory stays flat. What a set knows about each memb
 its rows. Where each sits — its parent and its path, unless the download is asked
 without them — is the graph's containment chains, read ``LOOKUP`` members to a
 statement as the page goes out (two short statements a thousand rows), and so are
-any other ``columns``: each statement under
-its own admission and never held across a yield, so a client that reads slowly
-holds no graph slot.
+any other ``columns``: each statement under its own admission and never held across
+a yield, so a client that reads slowly holds no graph slot.
 
 Formats: ``csv`` (a header, then every value as text: exact digits for an integer,
 a path as the trace dock's file writes one (``A / B``; its URNs ``a; b``), JSON for

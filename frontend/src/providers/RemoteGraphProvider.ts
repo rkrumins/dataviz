@@ -790,13 +790,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
-    /** Where a complete set downloads from: its members, or the flows between them. */
+    /** Where a complete set downloads from: its members, or the flows between them. Its members
+     *  say where each sits unless `withPath` is false. */
     memberSetDownloadUrl(
         setId: string, token: string, format: MemberSetFormat,
-        part: 'nodes' | 'edges' = 'nodes', columns: readonly string[] = [],
+        part: 'nodes' | 'edges' = 'nodes', columns: readonly string[] = [], withPath = true,
     ): string {
         return this.buildUrl(`/member-sets/${encodeURIComponent(setId)}/download`, {
             token, format, part, ...(columns.length ? { columns: columns.join(',') } : {}),
+            ...(withPath ? {} : { withPath: 'false' }),
         })
     }
 

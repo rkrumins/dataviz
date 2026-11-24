@@ -1,7 +1,9 @@
 /**
  * Everything it reaches — the server works it out, the dialog follows it and
  * downloads it. The trace's question is said, not changed; a search's matches
- * take the reach the reader picks; flows come as a file of their own.
+ * take the reach the reader picks; flows come as a file of their own. Each
+ * entity says where it sits, as this file always has, unless the reader
+ * switches it off — remembered for the next one.
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,6 +20,7 @@ let current: unknown = null
 vi.mock('@/providers/GraphProviderContext', () => ({ useGraphProvider: () => current }))
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { usePreferencesStore } from '@/store/preferences'
 import { ExportLineageDialog } from '../ExportLineageDialog'
 
 const done = (over: Partial<MemberSetStatus> = {}): MemberSetStatus => ({
@@ -31,7 +34,8 @@ let bodies: MemberSetRequest[] = []
 function provider(answers: MemberSetStatus[]) {
   const p = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
   p.memberSet = vi.fn(async (_v: string | null, body: MemberSetRequest) => { bodies.push(body); return answers.shift() ?? done() })
-  p.memberSetDownloadUrl = (setId, token, format, part = 'nodes') => `/dl/${setId}?token=${token}&format=${format}&part=${part}`
+  p.memberSetDownloadUrl = (setId, token, format, part = 'nodes', _columns = [], withPath = true) =>
+    `/dl/${setId}?token=${token}&format=${format}&part=${part}${withPath ? '' : '&withPath=false'}`
   return p
 }
 
@@ -45,7 +49,7 @@ const mount = (p: RemoteGraphProvider, props: Partial<React.ComponentProps<typeo
   return render(<ExportLineageDialog viewId="v1" spec={TRACE_SPEC} seedsLabel="2 entities" onClose={() => {}} {...props} />)
 }
 
-beforeEach(() => { bodies = []; downloads.length = 0 })
+beforeEach(() => { bodies = []; downloads.length = 0; usePreferencesStore.setState({ traceExportWithPath: true }) })
 afterEach(() => vi.restoreAllMocks())
 
 describe('ExportLineageDialog', () => {
@@ -81,6 +85,23 @@ describe('ExportLineageDialog', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Export$/ })) })
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]!.spec).toMatchObject({ within: 'dataSource', expand: { upstream: 'all', downstream: 1, partnerChildren: 1 } })
+  })
+
+  it('says where each entity sits unless switched off, and remembers that for the next one', async () => {
+    const first = mount(provider([done()]))
+    const option = document.querySelector<HTMLInputElement>('[data-include-path]')!
+    expect(option.checked).toBe(true)
+    expect(screen.getByText(/and where it sits — its parent and every container down to it/)).toBeTruthy()
+    fireEvent.click(option)
+    expect(screen.queryByText(/where it sits/)).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Export$/ })) })
+    await waitFor(() => expect(downloads).toHaveLength(1))
+    expect(downloads[0]!.url).toContain('withPath=false')
+    expect(usePreferencesStore.getState().traceExportWithPath).toBe(false)
+
+    first.unmount()
+    mount(provider([done()]))
+    expect(document.querySelector<HTMLInputElement>('[data-include-path]')!.checked).toBe(false)
   })
 
   it('every limit the server reached is said', async () => {
