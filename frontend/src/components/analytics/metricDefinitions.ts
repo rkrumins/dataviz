@@ -388,4 +388,53 @@ export const METRICS: Record<string, MetricDefinition> = {
         how: 'For requests decided in the range: when it was decided, minus when it was first submitted — so any back-and-forth over requested changes is included. The middle value is shown.',
         why: 'The wait before a new team can start. A long one usually means nobody is watching the queue.',
     },
+    peopleActive: {
+        title: 'Active people',
+        what: 'People who did something in this scope and period — opened a view, traced, searched, edited, ran an operation. Signing in alone does not count.',
+        how: 'Distinct people with at least one action in the period, from view opens and other usage signals, the view edit log and the activity ledger, each counted once. Service accounts are left out.',
+        why: 'The size of the audience that is actually using this. Falling while sign-ins hold steady means people arrive and leave without doing anything.',
+    },
+    peopleSignedIn: {
+        title: 'Signed in',
+        what: 'Distinct people who signed in during the period, by password or single sign-on.',
+        how: 'People with a sign-in recorded in the activity ledger in the period. A token being renewed is not a sign-in.',
+        why: 'Compare it with active people: the gap is everyone who came and left without using anything.',
+        caveat: 'Comes from the activity ledger, which is filled on the scheduler role. Shown only to analytics administrators.',
+    },
+    peopleActions: {
+        title: 'Actions',
+        what: 'Everything people did in the period, except signing in.',
+        how: 'One per view open, trace, search, export, view edit or ledger event a person performed. Moves between sections of the app are not counted.',
+        why: 'Volume, not reach — read it beside active people. More actions from the same people is depth; more people is breadth.',
+    },
+    activeDays: {
+        title: 'Active days',
+        what: 'On how many days a person did something, out of the days in the period.',
+        how: 'Distinct UTC days with at least one action. The tile is the average across everyone active.',
+        why: 'Habit. Someone active on 12 of 14 days relies on the platform; someone with 1 of 14 visited.',
+    },
+    idleSignIns: {
+        title: 'Idle sign-ins',
+        what: 'The share of sign-in days on which the person did nothing else.',
+        how: 'Days with a sign-in and no action, divided by all days with a sign-in, across everyone.',
+        why: 'A high share means people log in and do not find what they came for. Look at where they land and what they search for.',
+    },
+    quietMembers: {
+        title: 'Quiet members',
+        what: 'People with access to this workspace who did nothing in it during the period.',
+        how: 'Current members, directly or through a group, with no action here in the period.',
+        why: 'The list to nudge, or to review: access nobody uses is still access.',
+    },
+    activityStreak: {
+        title: 'Streak',
+        what: 'The longest run of consecutive days with activity in the period, and the run they are on now.',
+        how: 'Consecutive UTC days with at least one action. Today not being over yet does not break a streak.',
+        why: 'A long streak is a habit; a broken one after a long run is worth a conversation.',
+    },
+    peopleStanding: {
+        title: 'Standing',
+        what: 'Where this person sits among everyone active in the same scope and period.',
+        how: 'The share of active people with fewer actions. Shown only when at least five people were active, so it never singles anyone out of a handful.',
+        why: 'Context for the raw numbers: 40 actions is a lot on a quiet workspace and little on a busy one.',
+    },
 }

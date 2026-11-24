@@ -23,6 +23,8 @@ export const PAGE_HELP: ReadonlyArray<{ path: string; slugs: readonly string[] }
   { path: '/ingestion', slugs: ['data-freshness', 'admin-setup'] },
   { path: '/datasources/:catalogId', slugs: ['data-freshness'] },
   { path: '/analytics', slugs: ['analytics'] },
+  { path: '/analytics/people/:userId', slugs: ['analytics'] },
+  { path: '/me/activity', slugs: ['analytics'] },
   { path: '/schema', slugs: ['semantic-layer'] },
   { path: '/schema/:ontologyId', slugs: ['semantic-layer'] },
   { path: '/my/access', slugs: ['requesting-access', 'users-access'] },

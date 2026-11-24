@@ -6,6 +6,7 @@
  * Everything deeper lives in its own tab; this one is the summary a business
  * reader can take in without scrolling twice.
  */
+import { useNavigate } from 'react-router-dom'
 import { useMemo } from 'react'
 import {
     Activity, ArrowRight, Boxes, Database, Eye, LayoutGrid, LayoutTemplate, MousePointerClick, TrendingUp, Users,
@@ -20,6 +21,7 @@ import type {
 import { HeroFigure, KpiCard } from './KpiCard'
 import { InsightStrip } from './InsightStrip'
 import { MetricInfo } from './MetricInfo'
+import { personActivityHref } from './people/peopleLinks'
 import { FirstRun, isFirstRun } from './FirstRun'
 import { WithheldPanel } from './Redacted'
 import { ViewLink, WorkspaceLink } from './EntityLink'
@@ -51,6 +53,7 @@ export function OverviewTab({
     data, range, isStale, onWorkspaceClick, onNavigateTab,
 }: Props) {
     const theme = useChartTheme()
+    const navigate = useNavigate()
     const conversations = useFeature('conversationsEnabled')
     // Findings about questions wait for questions to be on: the document is cached for every
     // reader, so the switch is applied here rather than where it is built.
@@ -271,6 +274,10 @@ export function OverviewTab({
                             value: u.events,
                             detail: `${compact(u.viewsOpened)} opened · ${compact(u.viewsCreated)} built`,
                         }))}
+                        // A privileged reader can open anyone's activity; for
+                        // everyone else a name here is as far as it goes.
+                        onRowClick={data.redaction ? undefined
+                            : (row) => navigate(personActivityHref(row.id, { range }))}
                     />
                 </ChartFrame>
                 )}

@@ -12,11 +12,11 @@
  */
 
 export type WorkspaceTab =
-    | 'overview' | 'views' | 'data' | 'reviews' | 'versioned-graphs' | 'members' | 'activity' | 'settings'
+    | 'overview' | 'views' | 'data' | 'reviews' | 'versioned-graphs' | 'members' | 'activity' | 'usage' | 'settings'
 
 export type DataSection = 'sources' | 'model' | 'processing' | 'trends'
 
-const TABS: readonly WorkspaceTab[] = ['overview', 'views', 'data', 'reviews', 'versioned-graphs', 'members', 'activity', 'settings']
+const TABS: readonly WorkspaceTab[] = ['overview', 'views', 'data', 'reviews', 'versioned-graphs', 'members', 'activity', 'usage', 'settings']
 const SECTIONS: readonly DataSection[] = ['sources', 'model', 'processing', 'trends']
 
 /** The old tabs that are now sections of Data. */

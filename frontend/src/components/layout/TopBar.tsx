@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal, UserRound, MessagesSquare } from 'lucide-react'
+import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal, UserRound, MessagesSquare, Activity } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
 import { PersonaIntroTip } from '@/components/persona/PersonaIntroTip'
@@ -363,6 +363,15 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                 >
                   <SlidersHorizontal className="w-4 h-4" />
                   <span>Preferences</span>
+                </DropdownMenu.Item>
+
+                {/* Your own activity — open to everyone, about themselves. */}
+                <DropdownMenu.Item
+                  className="flex items-center gap-2 px-3 py-2 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer outline-none focus:bg-accent-lineage/10 focus:text-accent-lineage transition-colors"
+                  onSelect={() => navigate('/me/activity')}
+                >
+                  <Activity className="w-4 h-4" />
+                  <span>Your activity</span>
                 </DropdownMenu.Item>
 
                 {/* "Change Avatar" used to sit here. The picker is still two

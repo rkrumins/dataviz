@@ -6,6 +6,7 @@
  * sort order and scroll position on the way back.
  */
 import { useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import {
     Activity, CheckCircle2, Hourglass, LayoutGrid, MessageCircleQuestion, MousePointerClick,
     Reply, Users, X,
@@ -235,6 +236,15 @@ export function WorkspaceInsightsPanel({
                                     title="Top contributors"
                                     isEmpty={data.topContributors.length === 0}
                                     emptyLabel="Nobody has contributed here in this range."
+                                    action={workspaceId ? (
+                                        <Link
+                                            to={`/analytics?tab=people&pws=${encodeURIComponent(workspaceId)}`}
+                                            onClick={onClose}
+                                            className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                        >
+                                            Everyone, day by day →
+                                        </Link>
+                                    ) : undefined}
                                 >
                                     <Leaderboard
                                         unit="actions"

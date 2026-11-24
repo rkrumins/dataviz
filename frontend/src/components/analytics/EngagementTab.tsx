@@ -1,6 +1,7 @@
 /**
  * EngagementTab — habit, activation, and what people actually do.
  */
+import { useNavigate } from 'react-router-dom'
 import { Activity, Flame, MousePointerClick, Repeat, Route, Search } from 'lucide-react'
 
 import { exact, percent, shortDate } from '@/lib/formatMetric'
@@ -21,6 +22,7 @@ import { FunnelStrip } from './charts/FunnelStrip'
 import { PunchcardGrid } from './charts/PunchcardGrid'
 import { punchcardTable } from './charts/punchcard'
 import { MetricInfo } from './MetricInfo'
+import { personActivityHref } from './people/peopleLinks'
 import { UsageSection } from './UsageSection'
 import { comparisonLabel, previousLabel, rangePhrase } from './RangePicker'
 import { useChartTheme } from './charts/chartTheme'
@@ -35,6 +37,7 @@ export function EngagementTab({
     usage?: AnalyticsUsageState
 }) {
     const theme = useChartTheme()
+    const navigate = useNavigate()
     const { totals, series, engagement, breakdowns, leaderboards, coverage } = data
     const value = data.valueMoments
     const vs = comparisonLabel(range)
@@ -325,6 +328,10 @@ export function EngagementTab({
                             value: u.events,
                             detail: `${exact(u.viewsOpened)} opened · ${exact(u.viewsCreated)} built`,
                         }))}
+                        // A privileged reader can open anyone's activity; for
+                        // everyone else a name here is as far as it goes.
+                        onRowClick={data.redaction ? undefined
+                            : (row) => navigate(personActivityHref(row.id, { range }))}
                     />
                 </ChartFrame>
                 )}
