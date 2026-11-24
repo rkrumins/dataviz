@@ -6,7 +6,7 @@
  * view — stores the weight lines are drawn at.
  */
 import { render, screen, fireEvent, within } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DisplayMenu } from '../header/DisplayMenu'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
@@ -48,7 +48,7 @@ describe('DisplayMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
     // Canvas section — set density to compact.
-    fireEvent.click(screen.getByRole('radio', { name: /compact/i }))
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Canvas density' })).getByRole('radio', { name: /compact/i }))
     expect(props.onSetCanvasDensity).toHaveBeenCalledWith('compact')
 
     // Lineage appearance section — toggle direction arrows.
@@ -90,8 +90,9 @@ describe('DisplayMenu', () => {
 
     const reset = screen.getByRole('button', { name: 'Reset' })
     fireEvent.focus(reset)
-    expect(await screen.findByText(
-      'Put zoom, density, icons, IDs, badges, tree lines and the memory gauge back to their defaults',
+    expect(await screen.findByText('Put the canvas settings back to their defaults')).toBeInTheDocument()
+    expect(screen.getByText(
+      'Zoom, density, header size, icons, IDs, badges, off-screen markers, tree lines, the memory gauge and empty layers',
     )).toBeInTheDocument()
     usePreferencesStore.setState({ showMemoryUsage: false })
   })
@@ -105,13 +106,13 @@ describe('DisplayMenu', () => {
     expect(ids).toHaveAttribute('aria-checked', 'true')
     expect(ids).toHaveTextContent('Each entity’s ID under its name — beside it at the minimal density.')
     // On by default, so it is counted among the options that are on, and offers no Reset.
-    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('3 on')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
     expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
 
     fireEvent.click(ids)
     expect(usePreferencesStore.getState().showCanvasEntityIds).toBe(false)
     expect(ids).toHaveAttribute('aria-checked', 'false')
-    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('2 on')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('3 on')
     // Hidden IDs are a change from the defaults: Reset offers itself.
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
     usePreferencesStore.setState({ showCanvasEntityIds: true })
@@ -343,5 +344,66 @@ describe('DisplayMenu — Line weight', () => {
     expect(usePreferencesStore.getState().lineWeight).toBe('thick')
     usePreferencesStore.setState({ lineWeight: 'regular' })
     usePersonaStore.setState({ mode: 'technical' })
+  })
+})
+
+describe('DisplayMenu — layer headers, off-screen markers and empty layers', () => {
+  afterEach(() => {
+    usePreferencesStore.getState().resetCanvasDisplaySettings()
+    usePersonaStore.setState({ mode: 'technical' })
+  })
+
+  it.each(['technical', 'business'] as const)('offers all three in the %s view, at today’s defaults, with no Reset', (mode) => {
+    usePersonaStore.setState({ mode })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const sizes = screen.getByRole('radiogroup', { name: 'Header size' })
+    expect(within(sizes).getAllByRole('radio').map((o) => o.textContent)).toEqual(['Compact', 'Comfortable', 'Spacious'])
+    expect(within(sizes).getByRole('radio', { name: 'Comfortable' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('switch', { name: /Show off-screen markers/ })).toHaveAttribute('aria-checked', 'true')
+    const empty = screen.getByRole('radiogroup', { name: 'Empty layers' })
+    expect(within(empty).getAllByRole('radio').map((o) => o.querySelector('.leading-tight')?.textContent))
+      .toEqual(['Always', 'Not while tracing', 'Never'])
+    expect(within(empty).getByRole('radio', { name: /^Always/ })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByText('A column built around an entity that is gone always says why.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
+  })
+
+  it('stores a header size, and says it in the section’s summary', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Header size' })).getByRole('radio', { name: 'Compact' }))
+    expect(usePreferencesStore.getState().canvasHeaderSize).toBe('compact')
+    expect(screen.getByRole('button', { name: /Header size/ })).toHaveTextContent('Compact')
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
+  })
+
+  it('turns the off-screen markers off, and counts them among the options that are on', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const markers = screen.getByRole('switch', { name: /Show off-screen markers/ })
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
+    fireEvent.click(markers)
+    expect(usePreferencesStore.getState().showOffscreenLineMarkers).toBe(false)
+    expect(markers).toHaveAttribute('aria-checked', 'false')
+    expect(markers).toHaveTextContent('No count at a column’s top or bottom')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('3 on')
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
+  })
+
+  it('stores when an empty layer says so', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const empty = screen.getByRole('radiogroup', { name: 'Empty layers' })
+    fireEvent.click(within(empty).getByRole('radio', { name: /^Not while tracing/ }))
+    expect(usePreferencesStore.getState().emptyLayerMessage).toBe('tracing-hidden')
+    expect(screen.getByRole('button', { name: /Empty layers/ })).toHaveTextContent('Not while tracing')
+    fireEvent.click(within(empty).getByRole('radio', { name: /^Never/ }))
+    expect(usePreferencesStore.getState().emptyLayerMessage).toBe('never')
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
   })
 })
