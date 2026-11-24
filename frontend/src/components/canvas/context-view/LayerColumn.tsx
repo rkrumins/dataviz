@@ -333,6 +333,10 @@ const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', max
 /** No Anchor Rail in a column: no one to name. */
 const NO_RAIL_IDS: readonly string[] = []
 
+/** Empty room past a column's last row: the height of its edge scrims, and of
+ *  the gap its bottom tray keeps from the edge (`h-12`, `bottom-12`). */
+const LIST_PAD_END_PX = 48
+
 /** A pin: where lines meet a folded layer's spine, half outside its edge. */
 const FOLD_PIN =
   'absolute top-1/2 -translate-y-1/2 w-1 h-2.5 rounded-full ring-[1.5px] ring-canvas'
@@ -1192,6 +1196,10 @@ export const LayerColumn = React.memo(function LayerColumn({
       return (item.depth === 0 ? rowHeights.root : rowHeights.child) + technicalExtra
     },
     overscan,
+    // Room past the last row, so it can always scroll clear of what sits on
+    // the column's foot: the edge scrims and trays (h-12), and the pills that
+    // float over the bottom of the canvas.
+    paddingEnd: LIST_PAD_END_PX,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
@@ -2998,10 +3006,6 @@ export const LayerColumn = React.memo(function LayerColumn({
             tabIndex={0}
             className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative outline-none focus-visible:ring-1 focus-visible:ring-accent-lineage/30 focus-visible:ring-inset"
           >
-          {/* Subtle top fade for scroll indication — slimmer now that the
-              floating chip handles the indicator role. */}
-          <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
-
           {/* First-use guidance for custom order — a dismissible caption in the
               ghost-stack style, shown only while the layer is reorderable and
               until the user dismisses it (preferences-flagged, once ever). */}
@@ -3442,9 +3446,6 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           )}
 
-          {/* Bottom fade — slimmer now that the floating chip handles the
-              indicator role. Sits beneath the bottom chip as a soft mask. */}
-          <div className="absolute bottom-0 left-0 right-0 h-3 bg-gradient-to-t from-canvas/80 to-transparent pointer-events-none z-10" />
           </div>
         </div>
       )}

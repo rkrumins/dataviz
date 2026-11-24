@@ -481,6 +481,13 @@ function siblingContext(
   }
 }
 
+/** The bottom-centre slot of the frame pill and the framed chrome: on top of
+ *  the stack below it — the dock, the layer strip, the selection bar — never
+ *  under any of them. */
+const FRAME_SLOT_BOTTOM = 'calc(var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px) + max(0.75rem, var(--selection-bar-height, 0px)))'
+/** The slot's band: what is in it, and its 0.75rem lift off the chrome below. */
+const reserveFrameSlot = (el: HTMLElement) => el.offsetHeight + 12
+
 /** `gap-1.5` on the dock column below — the space between two stacked headers. */
 const DOCK_GAP_PX = 6
 
@@ -7284,6 +7291,11 @@ export function ContextViewCanvas({
   // the shortcut becomes learnable. Dismissed automatically when the
   // framed selection changes or clears.
   const [framedContext, setFramedContext] = useState<{ nodeId: string; count: number } | null>(null)
+  const framedShown = !!framedContext && selectedNodeId === framedContext.nodeId
+  // Their slot, stacked on the chrome below it (FRAME_SLOT_BOTTOM), reserves
+  // its band while either shows.
+  const frameSlotRef = useRef<HTMLDivElement>(null)
+  useBandReservation(frameSlotRef, '--frame-slot-height', reserveFrameSlot, !!framePill || framedShown)
   useEffect(() => {
     if (!framedContext) return
     if (selectedNodeId === framedContext.nodeId) return
@@ -8126,6 +8138,8 @@ export function ContextViewCanvas({
           {canvasDockMinimized ? (
             <button
               type="button"
+              // The whole dock's footprint while minimized: the band reserves it.
+              data-dock-header
               onClick={() => setCanvasDockMinimized(false)}
               className="self-end flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-canvas-elevated border border-glass-border shadow-lg text-[11.5px] text-ink-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               title="Show Data loads and Flows"
@@ -8202,6 +8216,15 @@ export function ContextViewCanvas({
           }}
         />
 
+        {/* The bottom-centre slot: the frame pill, and the framed chrome it
+            morphs into. It floats over the columns' foot, so it reserves its
+            band as the chrome under it does, and a column's last rows — and
+            its "↓ N more" — stay clear of it. */}
+        <div
+          ref={frameSlotRef}
+          className="absolute left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 pointer-events-none"
+          style={{ bottom: FRAME_SLOT_BOTTOM }}
+        >
         {/* Frame pill — selection has off-screen neighbors; offer to frame
             them (never auto-scroll) or open the lens. */}
         <AnimatePresence>
@@ -8212,8 +8235,7 @@ export function ContextViewCanvas({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.18 }}
-              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
-              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
               data-canvas-interactive
             >
               <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
@@ -8247,15 +8269,14 @@ export function ContextViewCanvas({
             pill (above) morphs into, and teaches the Esc shortcut. Same
             bottom-center slot as the offer for spatial continuity. */}
         <AnimatePresence>
-          {framedContext && selectedNodeId === framedContext.nodeId && (
+          {framedShown && framedContext && (
             <motion.div
               key="framed-chrome"
               initial={{ opacity: 0, y: 8, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.18 }}
-              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
-              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+              className="flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
               data-canvas-interactive
             >
               <Crosshair className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
@@ -8281,6 +8302,7 @@ export function ContextViewCanvas({
             </motion.div>
           )}
         </AnimatePresence>
+        </div>
 
         {/* Layer Strip — docked horizontal navigator: you-are-here chips
             per layer, click-to-jump, add-layer (draft) and Fit. Frame-
@@ -8418,10 +8440,13 @@ export function ContextViewCanvas({
           data-frosted-cards={frostedCards || undefined}
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
-          // dock, layer strip, edge legend) so a column's last row can always scroll
-          // clear of it — and be clicked. Both variables are published by
-          // the chrome itself and are 0 when it is not rendered.
-          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px), var(--selection-bar-height, 0px)))' }}
+          // dock, layer strip, edge legend, selection bar) so a column's last
+          // row can always scroll clear of it — and be clicked. The variables
+          // are published by the chrome itself and are 0 when it is not
+          // rendered. The selection bar floats ABOVE the layer strip, and the
+          // frame slot above both, so the three stack; the legend sits beside
+          // them, on the dock.
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--edge-legend-height, 0px), var(--layer-strip-height, 0px) + var(--selection-bar-height, 0px) + var(--frame-slot-height, 0px)))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
