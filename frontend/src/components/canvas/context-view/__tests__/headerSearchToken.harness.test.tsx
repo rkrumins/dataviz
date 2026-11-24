@@ -1,9 +1,10 @@
 /**
- * A search still shaping the real canvas, its panel closed, says so — in the
- * status stack — and every way out of it works: the chip's Clear, the
- * header's ×, and Esc with nothing else open.
+ * A search still shaping the real canvas says so in the header's search box —
+ * not in the status stack over the columns, where it covered layer headers and
+ * rows for as long as it stood — and every way out of it works: the token's ×,
+ * its card's Clear, and Esc with nothing else open.
  */
-import { act, fireEvent, screen } from '@testing-library/react'
+import { act, fireEvent, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
@@ -19,42 +20,45 @@ const publish = (urns: string[]) => act(() => {
     focusedMatchIndex: null,
   } as never)
 })
-const chip = () => screen.queryByRole('status', { name: 'A search is shaping the canvas' })
+const token = () => screen.queryByRole('group', { name: 'Search on the canvas' })
+const stack = () => document.querySelector('[data-canvas-status-stack]') as HTMLElement
 
 afterEach(() => {
   useSearchStore.setState({ matchUrnSet: new Set(), orderedMatchUrns: [], canvasFilterMode: 'highlight' } as never)
 })
 
-describe('the search chip on the canvas', () => {
-  it('appears for a search left on the canvas, says when rows are hidden, and Clear ends it', async () => {
+describe('a search on the canvas, said in the header box', () => {
+  it('appears in the box, not over the columns, says when rows are hidden, and its × ends it', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
-    expect(chip()).toBeNull()
+    expect(token()).toBeNull()
 
     publish(['orders', 'aov'])
     await h.settle()
-    expect(chip()).toHaveTextContent('Highlighting 2 search matches')
-    // The header's × is there too, though nothing was typed in its box.
-    expect(screen.getByRole('button', { name: 'Clear search' })).toBeInTheDocument()
+    expect(token()).toHaveTextContent('Highlighting 2 matches')
+    expect(token()!.closest('[data-tour="canvas-search"]')).not.toBeNull()
+    expect(stack()).not.toHaveTextContent(/search/i)
 
     act(() => { useSearchStore.setState({ canvasFilterMode: 'isolate' } as never) })
     await h.settle()
-    expect(chip()).toHaveTextContent('Showing only 2 search matches')
-    expect(chip()).toHaveTextContent('Rows that don’t match are hidden from the canvas.')
+    expect(token()).toHaveTextContent('Showing only 2 matches')
 
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Clear$/ })) })
+    await act(async () => { fireEvent.click(within(token()!).getByRole('button', { name: 'Clear search' })) })
     await h.settle()
     expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
-    expect(chip()).toBeNull()
+    expect(token()).toBeNull()
     expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull()
   }, 30000)
 
-  it('steps aside while the search panel is open', async () => {
+  it('stays in the box while the panel is open, and leaves stepping to the panel', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
     publish(['orders'])
     await h.settle()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Open search/ })) })
+    expect(within(token()!).getByRole('button', { name: 'Next match' })).toBeInTheDocument()
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Edit this search' })) })
     await h.settle()
-    expect(chip()).toBeNull()
+    expect(token()).toHaveTextContent('Highlighting 1 match')
+    expect(within(token()!).queryByRole('button', { name: 'Next match' })).toBeNull()
     expect(useSearchStore.getState().matchUrnSet.size).toBe(1)
   }, 30000)
 
@@ -71,6 +75,6 @@ describe('the search chip on the canvas', () => {
     h.pressEscape()
     await h.settle()
     expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
-    expect(chip()).toBeNull()
+    expect(token()).toBeNull()
   }, 30000)
 })

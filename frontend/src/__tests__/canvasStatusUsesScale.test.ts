@@ -41,7 +41,6 @@ const NOTICES = [
   '<TraceWalkIndicator',
   '<ConnectModePill',
   '<NarrowChip',
-  '<SearchActiveChip',
   'data-testid="lineage-catching-up"',
   'data-testid="canvas-summaries-banner"',
   'data-testid="canvas-read-pressure-banner"',
@@ -113,7 +112,6 @@ describe('the top of the Context View is one status stack', () => {
       'components/canvas/context-view/CanvasStatusStack.tsx',
       'features/narrow/NarrowChip.tsx',
       'components/canvas/edge-create/ConnectModePill.tsx',
-      'components/canvas/search/SearchActiveChip.tsx',
     ]) {
       expect(selfPlaced(read(rel)), `${rel}: ${HOW_TO_FIX}`).toEqual([])
     }

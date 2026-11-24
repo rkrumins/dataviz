@@ -21,6 +21,11 @@
  * an answer that took over a whole rail for a question most often
  * settled by "that one". The panel is still there behind "See all".
  *
+ * And it says what search is shaping the canvas (`search/ActiveSearchToken`):
+ * a search typed here by its own words, with its count and step beside them;
+ * one run anywhere else by a token in the words' place. That used to be a
+ * chip over the top of the canvas, where it covered the columns.
+ *
  * The rules live HERE and the surface (`search/SearchDropdown`) draws
  * them: when the list is open, which row is active, what each key does,
  * what a pick means. That split is what makes the rules testable without
@@ -54,7 +59,9 @@ import { TEXT_MATCH_OPTIONS } from '../../search/panel/ConditionRow'
 import type { QuickLookIn, QuickMatch } from '../../search/session/quickPredicate'
 import { useViewSearchSession } from '../../search/session/ViewSearchSessionContext'
 import { hasReportableView } from '../../search/session/useViewSearchSessionController'
+import { ActiveSearchToken } from './search/ActiveSearchToken'
 import { SearchDropdown, optionId } from './search/SearchDropdown'
+import { useAnchoredPopover } from './search/useAnchoredPopover'
 import { listboxKind, topMatches } from './search/dropdownModel'
 
 const FIXED_LOOK_IN: { value: QuickLookIn; label: string }[] = [
@@ -69,9 +76,6 @@ const FIXED_LOOK_IN: { value: QuickLookIn; label: string }[] = [
 const MATCH_OPTIONS = TEXT_MATCH_OPTIONS
   .filter((o) => o.value !== 'wildcard')
   .map((o) => ({ value: o.value as QuickMatch, label: o.label }))
-
-/** What a click can move focus to on its own. */
-const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
 
 /** Long enough that arrowing THROUGH a row costs nothing, short enough
  *  that a row the user has actually stopped on is warm by the time they
@@ -143,7 +147,7 @@ function HeaderSearchBox() {
   // render trips the react-hooks lint.
   const {
     quick, setQuick, runNow, clearQuery, clearScope, refine, openPanel,
-    inputRef, viewId, resultMatchesQuick, advanced, resolveLayer, layers,
+    inputRef, viewId, resultMatchesQuick, resultFromBox, advanced, resolveLayer, layers,
     revealHit, prefetchHit,
   } = useViewSearchSession()
   // The Business view searches everything, by its words: its own Look in and
@@ -152,8 +156,10 @@ function HeaderSearchBox() {
   const technical = usePersonaMode() === 'technical'
   const scope = quick.scope
   const view = advanced.view
-  // A search can be shaping the canvas with nothing in the box — run from
-  // the panel, or from a right-click — and the × is the way to stop it.
+  // A search shaping the canvas is said in the box (ActiveSearchToken): by
+  // the words in it when they are the search, by a token in their place
+  // when it was run from the panel, a recipe or a right-click — or when the
+  // box has been emptied since.
   const searchOnCanvas = useIsSearchSpotlightActive()
 
   // The list's own state. All three are the box's, not the session's: a
@@ -188,6 +194,23 @@ function HeaderSearchBox() {
   const { recents, record } = useRecentSearches(`nexus.viewSearch.recent.${viewId}`)
 
   const trimmed = quick.text.trim()
+  const typedToken = searchOnCanvas && trimmed !== '' && (resultFromBox || resultMatchesQuick)
+  const advancedToken = searchOnCanvas && !typedToken
+
+  // The room the token and the input share, which decides how much of the
+  // token shows. Measured off their own track, which takes whatever the
+  // box's other controls leave — so it never depends on the token itself.
+  const middleRef = useRef<HTMLDivElement>(null)
+  const [room, setRoom] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    const el = middleRef.current
+    if (!el) return
+    const measure = () => setRoom(el.getBoundingClientRect().width || null)
+    measure()
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
+    ro?.observe(el)
+    return () => ro?.disconnect()
+  }, [])
 
   // The answer to what is in the box, or null while the standing result
   // belongs to something else. Memoised on the pipeline's own view
@@ -473,43 +496,58 @@ function HeaderSearchBox() {
             )}
             strokeWidth={2.2}
           />
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder="Search this view…"
-            value={quick.text}
-            onChange={(e) => {
-              // A new word is a new question — whatever the user put the
-              // list away for, they are asking again.
-              setDismissed(false)
-              setQuick({ text: e.target.value })
-            }}
-            onFocus={() => { setFocused(true); setDismissed(false) }}
-            onBlur={(e) => {
-              // Only a focus that went somewhere REAL and outside closes
-              // the list. Focus landing nowhere (a click on inert chrome)
-              // belongs to the mousedown handler above, and the two
-              // popovers take focus on purpose while the list stays.
-              const next = e.relatedTarget as HTMLElement | null
-              if (!next) return
-              if (boxRef.current?.contains(next)) return
-              if (next.closest?.(`[${DROPDOWN_MARK}]`)) return
-              if (next.closest?.(`[${POPOVER_MARK}]`)) return
-              setFocused(false)
-            }}
-            onKeyDown={onKeyDown}
-            aria-label="Search this view"
-            role="combobox"
-            aria-expanded={hasOptions}
-            aria-controls={hasOptions ? listId : undefined}
-            aria-autocomplete="list"
-            aria-activedescendant={hasOptions ? optionId(listId, active) : undefined}
-            className={cn(
-              "flex-1 min-w-0 bg-transparent border-0 px-2 py-2.5",
-              "text-[13.5px] text-ink placeholder:text-ink-muted/45",
-              "focus:outline-none",
+          <div ref={middleRef} className="flex-1 min-w-0 flex items-center gap-1">
+            {advancedToken && (
+              <ActiveSearchToken variant="advanced" room={room} onOpenCard={() => setDismissed(true)} />
             )}
-          />
+            <input
+              ref={inputRef}
+              type="text"
+              // Beside a search's token, what is typed here starts a new one.
+              placeholder={advancedToken ? 'New search…' : 'Search this view…'}
+              value={quick.text}
+              onChange={(e) => {
+                // A new word is a new question — whatever the user put the
+                // list away for, they are asking again.
+                setDismissed(false)
+                setQuick({ text: e.target.value })
+              }}
+              onFocus={() => { setFocused(true); setDismissed(false) }}
+              onBlur={(e) => {
+                // Only a focus that went somewhere REAL and outside closes
+                // the list. Focus landing nowhere (a click on inert chrome)
+                // belongs to the mousedown handler above, and the two
+                // popovers take focus on purpose while the list stays.
+                const next = e.relatedTarget as HTMLElement | null
+                if (!next) return
+                if (boxRef.current?.contains(next)) return
+                if (next.closest?.(`[${DROPDOWN_MARK}]`)) return
+                if (next.closest?.(`[${POPOVER_MARK}]`)) return
+                setFocused(false)
+              }}
+              onKeyDown={onKeyDown}
+              aria-label="Search this view"
+              role="combobox"
+              aria-expanded={hasOptions}
+              aria-controls={hasOptions ? listId : undefined}
+              aria-autocomplete="list"
+              aria-activedescendant={hasOptions ? optionId(listId, active) : undefined}
+              className={cn(
+                "flex-1 min-w-0 bg-transparent border-0 px-2 py-2.5",
+                "text-[13.5px] text-ink placeholder:text-ink-muted/45",
+                "focus:outline-none",
+                advancedToken && "text-ellipsis",
+              )}
+            />
+            {typedToken && (
+              <ActiveSearchToken
+                variant="typed"
+                room={room}
+                stale={!resultMatchesQuick}
+                onOpenCard={() => setDismissed(true)}
+              />
+            )}
+          </div>
 
           {scope !== 'view' && (
             <span
@@ -572,11 +610,16 @@ function HeaderSearchBox() {
             )}
           </AnchoredMenu>}
 
-          <HoverTip label="Refine — build this query out in the results panel">
+          {/* Beside a search's token it is that search's Edit: the same
+              builder, opened on it. */}
+          <HoverTip
+            label={advancedToken ? 'Edit this search' : 'Refine — build this query out in the results panel'}
+            detail={advancedToken ? 'Opens it in Advanced Search, with its results' : undefined}
+          >
             <button
               type="button"
               onClick={() => refine()}
-              aria-label="Refine this search"
+              aria-label={advancedToken ? 'Edit this search' : 'Refine this search'}
               className={cn(
                 'shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg',
                 'transition-all duration-200',
@@ -594,15 +637,14 @@ function HeaderSearchBox() {
 
           {/* Third control in a 40px stretch that had three treatments: a
               native pill, a HoverTip, and — here — nothing at all. Offered
-              whenever a search is on, typed here or not: with the panel
-              closed, this and the canvas's search chip are the ways out. */}
-          {(quick.text || searchOnCanvas) && (
+              for what is typed; a search with a token has its × in it. */}
+          {quick.text && !advancedToken && (
             <HoverTip
               className="inline-flex shrink-0"
-              label={quick.text ? 'Clear what you typed' : 'Clear the search'}
-              detail={quick.text
-                ? 'Keeps where you are looking and how it matches'
-                : 'Takes its highlights off the canvas'}
+              label={typedToken ? 'Clear the search' : 'Clear what you typed'}
+              detail={typedToken
+                ? 'Takes its highlights off the canvas'
+                : 'Keeps where you are looking and how it matches'}
             >
               <button
                 type="button"
@@ -647,7 +689,7 @@ function HeaderSearchBox() {
           />
         )}
       </div>
-      <StatusLine landingNote={landingNote?.text ?? null} />
+      <StatusLine landingNote={landingNote?.text ?? null} counted={searchOnCanvas} />
     </div>
   )
 }
@@ -659,8 +701,10 @@ function HeaderSearchBox() {
  *
  * A landing note outranks the count while it stands: "the reveal put you
  * somewhere other than where you aimed" is news, and the count is not.
+ * While the search's token is in the box the count is in the token, and the
+ * layers in its card, so a finished run has nothing left to add here.
  */
-function StatusLine({ landingNote }: { landingNote: string | null }) {
+function StatusLine({ landingNote, counted }: { landingNote: string | null; counted: boolean }) {
   const s = useViewSearchSession()
   const view = s.advanced.view
 
@@ -692,6 +736,7 @@ function StatusLine({ landingNote }: { landingNote: string | null }) {
       const pct = total > 0 ? Math.min(99, Math.floor((scanned / total) * 100)) : 0
       return `${count.toLocaleString()} found so far · scanning ${pct}%${inLayers}`
     }
+    if (counted) return null
     return `${count.toLocaleString()}${plus ? '+' : ''} ${matches}${inLayers}`
   })()
 
@@ -795,79 +840,7 @@ function AnchoredMenu({ icon: Icon, current, label, active, children }: {
   active: boolean
   children: (close: () => void) => ReactNode
 }) {
-  const [open, setOpen] = useState(false)
-  const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const listRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    if (!open) return
-    const update = () => {
-      const rect = triggerRef.current?.getBoundingClientRect()
-      if (!rect) return
-      setAnchor({ top: rect.bottom + 6, left: rect.left })
-    }
-    update()
-    window.addEventListener('resize', update)
-    window.addEventListener('scroll', update, true)
-    return () => {
-      window.removeEventListener('resize', update)
-      window.removeEventListener('scroll', update, true)
-    }
-  }, [open])
-
-  const close = useCallback(() => { setOpen(false) }, [])
-
-  // Whether this popover currently owns the page's focus. It decides who
-  // gets focus back when the popover closes, and it is the reason the two
-  // effects below can be the only places that touch a ref.
-  const holdsFocusRef = useRef(false)
-
-  // Focus the first row once per opening. `anchor` is measured in a layout
-  // effect, so the list is not yet in the DOM on the render that flips
-  // `open`; the flag also keeps a later anchor update (resize, scroll)
-  // from stealing focus back from wherever the user has since moved it.
-  useEffect(() => {
-    if (!open || holdsFocusRef.current) return
-    const first = listRef.current?.querySelector('button')
-    if (!first) return
-    holdsFocusRef.current = true
-    first.focus()
-  }, [open, anchor])
-
-  // Closing while still holding focus — Escape, a chosen row, a click on
-  // inert chrome — would otherwise drop it on <body>, and the list is
-  // portalled to the end of the document, so there is nothing sensible
-  // after it to tab to. A click on another control cleared the flag
-  // already: the user went there on purpose.
-  useEffect(() => {
-    if (open || !holdsFocusRef.current) return
-    holdsFocusRef.current = false
-    triggerRef.current?.focus()
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const onMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement
-      if (triggerRef.current?.contains(target)) return
-      if (listRef.current?.contains(target)) return
-      // Clicking a control means going there — taking focus back would
-      // fight the user. Clicking inert chrome leaves focus nowhere, so
-      // the trigger keeps its claim on it.
-      if (target.closest?.(FOCUSABLE)) holdsFocusRef.current = false
-      close()
-    }
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close()
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [open, close])
+  const { open, close, toggle, anchor, triggerRef, listRef } = useAnchoredPopover()
 
   return (
     <>
@@ -875,7 +848,7 @@ function AnchoredMenu({ icon: Icon, current, label, active, children }: {
         <button
           ref={triggerRef}
           type="button"
-          onClick={() => { if (open) close(); else setOpen(true) }}
+          onClick={toggle}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={`${label}: ${current}`}
