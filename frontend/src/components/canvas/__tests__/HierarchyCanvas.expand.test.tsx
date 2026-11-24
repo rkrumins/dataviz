@@ -20,6 +20,7 @@ import { useCanvasStore, type LineageEdge } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { useNotificationStore } from '@/components/ui/notifications'
+import { revealNodeOnCanvas } from '@/store/canvasReveal'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 
@@ -260,6 +261,18 @@ describe('HierarchyCanvas — the toolbar opens a level at a time', () => {
     await settle()
     expect(mounted()).toEqual(['lake', 'wh'])
     expect(inStore('t0_0')).toBe(false)
+  }, 30000)
+})
+
+describe('HierarchyCanvas — a row opened any other way', () => {
+  it('“Show on canvas” on a container that holds nothing yet opens it onto its first page', async () => {
+    await mount()
+    act(() => { revealNodeOnCanvas('wh') })
+    await waitFor(() => expect(mounted()).toEqual(['lake', 'wh', 's0', 's1', 's2']))
+    expect(fetched).toEqual(['wh'])
+    // Once: a later render does not ask again.
+    await settle()
+    expect(fetched).toEqual(['wh'])
   }, 30000)
 })
 

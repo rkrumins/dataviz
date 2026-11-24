@@ -96,6 +96,8 @@ const INDENT = 24
  *  measuring a row scrolled to moves nothing below it. Technical rows add the ID line. */
 const ROW_ESTIMATE = 74
 const TECHNICAL_LINE = 17
+/** The selection bar's lane over the foot of the list: its offset from the bottom and its height. */
+const SELECTION_BAR_ROOM = 128
 /** New rows that slide in. A level opened at once mounts none of that: it simply appears. */
 const ANIMATE_NEW_MAX = 20
 
@@ -1056,7 +1058,7 @@ interface HierarchyListActions {
 
 interface HierarchyListProps {
   rows: readonly TreeRow[]
-  /** The entity rows alone, in order, and where each sits among them. */
+  /** The entity rows alone, in order — what the keys walk — and each one's place among them. */
   visibleRowIds: readonly string[]
   rowIndex: ReadonlyMap<string, number>
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
@@ -1112,7 +1114,10 @@ const HierarchyList = memo(function HierarchyList({
     estimateSize: () => rowEstimate,
     overscan: 8,
     paddingStart: 24,
-    paddingEnd: selectionBarRoom ? 96 : 24,
+    // Clear of the selection bar floating over the foot of the list — the last row, and a row
+    // the keys bring on screen.
+    paddingEnd: selectionBarRoom ? SELECTION_BAR_ROOM : 24,
+    scrollPaddingEnd: selectionBarRoom ? SELECTION_BAR_ROOM : 0,
     getItemKey,
   })
   // The persona or Display settings change every row's height: measured sizes held for rows off
@@ -1670,7 +1675,8 @@ function TreeExpandControl({ allLevels, onToggleAllLevels, onExpand, running, on
           onClick={onStop}
           className={cn(segment, 'px-2.5 rounded-lg border border-accent-lineage/30 bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/15')}
         >
-          <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+          {/* The selection bar's Stop, not a spinner: a run paused at a checkpoint is not busy. */}
+          <LucideIcons.CircleStop className="w-3.5 h-3.5" strokeWidth={2.2} aria-hidden />
           Stop opening
         </button>
       </HoverTip>
