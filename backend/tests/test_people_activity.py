@@ -183,11 +183,12 @@ async def test_roster_unions_three_stores_without_double_counting(db_session):
     # not the section move, not the sign-in.
     assert ann["actions"] == 5
     assert ann["signIns"] == 1
-    assert ann["topKind"] == "browse"
     assert ann["previous"] == 1 and ann["changePct"] == 400.0
-    # The cached summary carries no series, dates or addresses: those come per page.
-    assert not {"line", "values", "email", "joinedAt"} & set(ann)
+    # The cached summary carries no series, kinds, dates or addresses: those come per page.
+    assert not {"line", "values", "topKind", "email", "joinedAt"} & set(ann)
     assert ann["activeDays"] == 2
+    page = await repo.enrich_page(db_session, [ann], days=7, now=FIXED)
+    assert page[0]["topKind"] == "browse"
 
     dan = _person(doc, "usr_dan")
     assert dan["actions"] == 0 and dan["signIns"] == 1 and dan["idleSignInDays"] == 1
@@ -490,6 +491,32 @@ async def test_rollup_agrees_with_the_raw_events(db_session):
         if kind == "user" and actor and t != repo.SIGN_IN and not t.startswith("visualization.view."):
             raw[actor] = raw.get(actor, 0) + 1
     assert {p["userId"]: p["actions"] for p in doc["people"] if p["actions"]} == raw
+
+
+async def test_the_roster_totals_agree_with_the_per_kind_rollup(db_session):
+    """The roster reads ``person_daily_totals``; lines, days and pages read
+    ``person_activity_daily``. Both are folded from the same day, and must say the same."""
+    await _seed(db_session)
+    rows = (await db_session.execute(select(PersonActivityDailyORM))).scalars().all()
+    for ws, lens in ((None, repo.FULL), ("ws_a", repo.FULL), ("ws_b", repo.WORKSPACE)):
+        doc = await repo.people_doc(db_session, days=7, now=FIXED, workspace_id=ws, lens=lens)
+        first, last = doc["window"]["buckets"][0], doc["window"]["end"][:10]
+        acts: dict[str, int] = {}
+        days: dict[str, set] = {}
+        for r in rows:
+            n = r.n_ws if lens == repo.WORKSPACE else r.n
+            if (first <= r.day <= last and r.kind in repo.ACTION_KINDS and n
+                    and (ws is None or r.workspace_id == ws)):
+                acts[r.user_id] = acts.get(r.user_id, 0) + n
+                days.setdefault(r.user_id, set()).add(r.day)
+        got = {p["userId"]: (p["actions"], p["activeDays"]) for p in doc["people"] if p["actions"]}
+        assert got == {u: (n, len(days[u])) for u, n in acts.items()}, (ws, lens)
+
+
+def test_every_app_section_has_a_bit():
+    from backend.app.api.v1.endpoints.telemetry import APP_SECTIONS
+    assert APP_SECTIONS <= set(repo.SECTION_BITS)
+    assert len(set(repo.SECTION_BITS.values())) == len(repo.SECTION_BITS)
 
 
 async def test_a_late_ledger_row_recomputes_its_day(db_session):

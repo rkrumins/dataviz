@@ -40,7 +40,7 @@ The ORM maps 99 tables across four PostgreSQL schemas. This page details the cor
 | Aggregation and freshness | `public` | 2 | `data_source_polling_configs`, `refresh_events` |
 | Platform settings | `public` | 11 | `feature_flags`, `feature_definitions`, `platform_settings`, `application_branding`, `announcements` |
 | Events and audit | `public` | 4 | `outbox_events`, `auth_audit_log`, `product_events`, `notifications` |
-| People analytics index | `public` | 5 | `person_activity_daily` (each person's activity per UTC day, workspace and kind — every roster reads only this), `people_daily_facets` (the same days by hour and event type, without the person), `person_workspace_activity` (when each person joined each workspace, and was first and last active in it), `people_index_days` and `people_index_cursors` (what the indexer has computed) |
+| People analytics index | `public` | 6 | `person_daily_totals` (each person's day per workspace and everywhere, with no kind — what every roster reads), `person_activity_daily` (the same per kind — lines, a day, one person), `people_daily_facets` (the same days by hour, event type, kind and section, without the person), `person_workspace_activity` (when each person joined each workspace, and was first and last active in it), `people_index_days` and `people_index_cursors` (what the indexer has computed) |
 | Legacy | `public` | 1 | `graph_connections` — do not write to it |
 | Aggregation jobs | `aggregation` | 6 | `aggregation_jobs`, `data_source_state`, `reconcile_runs`, `job_event_log` |
 | Version store | `graphver` (`GRAPHVER_SCHEMA`) | 14 | `graphs`, `branches`, `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merge_requests` |

@@ -14,8 +14,13 @@ activity line is an indexed read, and nothing on a request path scans an event t
 * ``person_activity_daily`` — what each person did each UTC day, per workspace (``''`` when
   the event had none) and kind. ``n``/``first_at``/``last_at`` count everything;
   ``n_ws``/``first_ws_at``/``last_ws_at`` only what a workspace admin may see.
-* ``people_daily_facets`` — the same days without the person, by hour of day and by event
-  type: the punchcard and "what people do", which need no one's name.
+* ``person_daily_totals`` — the same days with no kind: one row per person per day for each
+  workspace they were in, and one (``workspace_id = '*'``) for everywhere. What a roster
+  reads: everyone's actions, sign-ins and active days are a scan of one row per person-day,
+  however many workspaces and kinds the day spread over.
+* ``people_daily_facets`` — the same days without the person, per workspace and for
+  everywhere (``'*'``): by hour, event type, kind and section — the punchcard, "what people
+  do" and the scope's series, which need no one's name.
 * ``people_index_days`` — which days the indexer has computed, and which are dirty because
   something about them arrived late.
 
@@ -23,7 +28,7 @@ activity line is an indexed read, and nothing on a request path scans an event t
 index nothing reads still costs every insert on the busiest table there is. Dropped
 CONCURRENTLY on Postgres; the downgrade builds it back the same way.
 
-All three tables are new and empty, so nothing here needs a concurrent build. Inspector-guarded:
+All four tables are new and empty, so nothing here needs a concurrent build. Inspector-guarded:
 ``0001_baseline`` create_all()s the current ORM.
 """
 from __future__ import annotations
@@ -41,6 +46,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _DAILY = "person_activity_daily"
 _FACETS = "people_daily_facets"
+_TOTALS = "person_daily_totals"
 _DAYS = "people_index_days"
 _OLD_WS_INDEX = "idx_product_events_ws"
 
@@ -85,6 +91,23 @@ def upgrade() -> None:
         )
         op.create_index("idx_pad_workspace_day", _DAILY, ["workspace_id", "day"])
         op.create_index("idx_pad_user_day", _DAILY, ["user_id", "day"])
+    if not inspector.has_table(_TOTALS):
+        op.create_table(
+            _TOTALS,
+            sa.Column("workspace_id", sa.Text(), nullable=False),
+            sa.Column("day", sa.Text(), nullable=False),
+            sa.Column("user_id", sa.Text(), nullable=False),
+            sa.Column("actions", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("actions_ws", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("signins", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("sections", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("last_action_at", sa.Text(), nullable=True),
+            sa.Column("last_action_ws_at", sa.Text(), nullable=True),
+            sa.Column("last_signin_at", sa.Text(), nullable=True),
+            sa.PrimaryKeyConstraint("workspace_id", "day", "user_id"),
+        )
+        op.create_index("idx_pdt_user", _TOTALS, ["user_id", "workspace_id", "day"])
+        op.create_index("idx_pdt_day", _TOTALS, ["day"])
     if not inspector.has_table(_FACETS):
         op.create_table(
             _FACETS,
@@ -116,6 +139,6 @@ def downgrade() -> None:
     bind = op.get_bind()
     _build_ws_index(bind)
     inspector = sa.inspect(bind)
-    for table in (_DAYS, _FACETS, _DAILY):
+    for table in (_DAYS, _FACETS, _TOTALS, _DAILY):
         if inspector.has_table(table):
             op.drop_table(table)

@@ -4,9 +4,11 @@ Two kinds of read, and the line between them is what makes it scale:
 
 * **Everyone at once** — the roster, its aggregates, the people active on a day, the activity
   lines of a page of people — comes ONLY from the daily rollup the people indexer maintains
-  (``person_activity_daily``, ``people_daily_facets``; see ``people_index_repo``). One row per
-  person, day, workspace and kind: a roster costs people × days, whatever they did, and every
-  aggregate is a ``GROUP BY`` in SQL. Nothing here reads an event table for everyone.
+  (see ``people_index_repo``). A roster reads ``person_daily_totals``, one row per person-day
+  in its scope, and ``people_daily_facets``, which has no person: it costs people × days,
+  whatever they did, and every aggregate is a ``GROUP BY`` in SQL. Lines, a day and a page's
+  kinds read ``person_activity_daily``, per kind, for the people or the day they show.
+  Nothing here reads an event table for everyone.
 * **One person** — their page's totals, line and calendar come from the rollup too; the
   details only raw events hold (which types, which hours, which views) and their feed are read
   from the three stores through each one's actor index, so they cost what one person did.
@@ -25,6 +27,7 @@ way out by the redactors at the bottom, so one computation serves every reader o
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -38,6 +41,7 @@ from backend.app.db.models import (
     AuthAuditLogORM,
     PeopleDailyFacetORM,
     PersonActivityDailyORM,
+    PersonDailyTotalORM,
     ProductEventORM,
     UserORM,
     ViewActivityLogORM,
@@ -70,6 +74,7 @@ from backend.app.db.repositories.people_kinds import (  # noqa: F401 — re-expo
     KINDS,
     LENSES,
     SECTION,
+    SECTION_BITS,
     SECTION_KIND_PREFIX,
     SESSION_GAP_MINUTES,
     SIGN_IN,
@@ -95,7 +100,9 @@ from backend.common.service_accounts import is_person, is_service_account
 LINES_MAX = 100
 
 A = PersonActivityDailyORM
+T = PersonDailyTotalORM
 F = PeopleDailyFacetORM
+EVERYWHERE = people_index_repo.EVERYWHERE
 
 
 # ── Scope over the rollup ─────────────────────────────────────────────
@@ -127,28 +134,41 @@ class _Scope:
     def fn(self):
         return F.n_ws if self.ws_lens else F.n
 
-    def where(self, people: Optional[Sequence[str]] = None) -> list:
-        """Rollup rows in scope. A full-lens workspace scope also reads its people's sign-ins,
-        which happened in no workspace — so it is read a chunk of people at a time."""
-        if self.workspace_id is None:
-            return []
-        if self.ws_lens:
-            return [A.workspace_id == self.workspace_id, A.n_ws > 0]
-        if people is None:
-            return [A.workspace_id == self.workspace_id]
-        return [A.user_id.in_(people), or_(
-            A.workspace_id == self.workspace_id,
-            and_(A.workspace_id == people_index_repo.PLATFORM, A.kind == "signin"),
-        )]
+    # The roster's reads: ``person_daily_totals``, whose rows for this scope are ``key``'s.
 
-    def facet_where(self) -> list:
-        if self.workspace_id is None:
-            return []
-        return [F.workspace_id == self.workspace_id] + ([F.n_ws > 0] if self.ws_lens else [])
+    @property
+    def key(self) -> str:
+        return self.workspace_id or EVERYWHERE
 
     @property
     def chunked(self) -> bool:
+        """A full-lens workspace scope also counts its people's sign-ins, which happened in no
+        workspace: their everywhere rows are read beside the workspace's, a chunk of people at
+        a time. The scope's own rows are still the only ones its actions come from."""
         return self.workspace_id is not None and not self.ws_lens
+
+    def where(self, people: Optional[Sequence[str]] = None) -> list:
+        if not self.chunked or people is None:
+            return [T.workspace_id == self.key]
+        return [T.user_id.in_(people), T.workspace_id.in_([self.key, EVERYWHERE])]
+
+    def _own(self, col, other):
+        return case((T.workspace_id == self.key, col), else_=other) if self.chunked else col
+
+    @property
+    def acts(self):
+        return self._own(T.actions_ws if self.ws_lens else T.actions, 0)
+
+    @property
+    def last_act(self):
+        return self._own(T.last_action_ws_at if self.ws_lens else T.last_action_at, None)
+
+    @property
+    def sections(self):
+        return self._own(T.sections, 0)
+
+    def facet_where(self) -> list:
+        return [F.workspace_id == self.key] + ([F.n_ws > 0] if self.ws_lens else [])
 
 
 _ACTION = A.kind.in_(ACTION_KINDS)
@@ -184,8 +204,8 @@ async def _people_in_scope(session: AsyncSession, scope: _Scope, spans: Sequence
     people = set(members)
     for first, last in spans:
         people.update(u for u in (await session.execute(
-            select(A.user_id).where(A.workspace_id == scope.workspace_id,
-                                    A.day >= first, A.day <= last).distinct()
+            select(T.user_id).where(T.workspace_id == scope.key,
+                                    T.day >= first, T.day <= last).distinct()
         )).scalars().all() if u)
     return sorted(people)
 
@@ -194,7 +214,7 @@ async def _each_chunk(session: AsyncSession, scope: _Scope, people: Optional[lis
     """Run ``build(where)`` once for the scope, or once per chunk of people when the scope
     needs them, and concatenate the rows. People never span chunks, so per-person groups and
     distinct counts add up exactly."""
-    if not scope.chunked:
+    if not scope.chunked or people is None:
         return (await session.execute(build(scope.where()))).all()
     rows: list = []
     for chunk in _chunked(people or []):
@@ -308,20 +328,21 @@ async def people_doc(
     )
     people = (await _people_in_scope(session, sc, [(first, last), (pfirst, plast)], members or ())
               if sc.chunked else None)
-    N, LAST = sc.n, sc.last
+    bits = list(SECTION_BITS.values())
 
-    # Per person: one row each — per (person, day) folded in a subquery, then per person.
+    # Per person: one row each — per (person, day) folded in a subquery, then per person. In a
+    # full-lens workspace scope a person-day is two rows, the workspace's and everywhere's.
     def per_person(where):
         per_day = (
             select(
-                A.user_id.label("u"), A.day.label("d"),
-                func.sum(case((_ACTION, N), else_=0)).label("acts"),
-                func.sum(case((_SIGNIN, N), else_=0)).label("sins"),
-                func.max(case((_ACTION, LAST), else_=None)).label("last_act"),
-                func.max(case((_SIGNIN, LAST), else_=None)).label("last_sin"),
+                T.user_id.label("u"), T.day.label("d"),
+                func.sum(sc.acts).label("acts"), func.sum(T.signins).label("sins"),
+                func.max(sc.last_act).label("last_act"),
+                func.max(T.last_signin_at).label("last_sin"),
+                func.max(sc.sections).label("sec"),
             )
-            .where(A.day >= first, A.day <= last, ~_SECTION_ROW, *where)
-            .group_by(A.user_id, A.day)
+            .where(T.day >= first, T.day <= last, *where)
+            .group_by(T.user_id, T.day)
         ).subquery()
         return (
             select(
@@ -331,26 +352,16 @@ async def people_doc(
                 func.sum(case((per_day.c.sins > 0, 1), else_=0)),
                 func.sum(case((and_(per_day.c.sins > 0, per_day.c.acts == 0), 1), else_=0)),
                 func.max(per_day.c.last_act), func.max(per_day.c.last_sin),
+                *[func.max(case((per_day.c.sec.op("&")(bit) != 0, 1), else_=0)) for bit in bits],
             ).group_by(per_day.c.u)
         )
 
     rows = await _each_chunk(session, sc, people, per_person)
-    kind_rows = await _each_chunk(session, sc, people, lambda where: (
-        select(A.user_id, A.kind, func.sum(N))
-        .where(A.day >= first, A.day <= last, _ACTION, *where)
-        .group_by(A.user_id, A.kind)))
     prev_rows = await _each_chunk(session, sc, people, lambda where: (
-        select(A.user_id, func.sum(case((_ACTION, N), else_=0)),
-               func.sum(case((_SIGNIN, N), else_=0)))
-        .where(A.day >= pfirst, A.day <= plast, ~_SECTION_ROW, *where)
-        .group_by(A.user_id)))
+        select(T.user_id, func.sum(sc.acts), func.sum(T.signins))
+        .where(T.day >= pfirst, T.day <= plast, *where)
+        .group_by(T.user_id)))
 
-    top_kind: dict[str, tuple[int, str]] = {}
-    for uid, kind, n in kind_rows:
-        n = int(n or 0)
-        best = top_kind.get(uid)
-        if n and (best is None or n > best[0] or (n == best[0] and KINDS.index(kind) < KINDS.index(best[1]))):
-            top_kind[uid] = (n, kind)
     previous = {uid: int(a or 0) for uid, a, _ in prev_rows}
     prev_signed = sum(1 for _, _, s in prev_rows if s)
 
@@ -364,9 +375,12 @@ async def people_doc(
 
     full = lens == FULL
     roster = []
-    for uid, acts, sins, active_days, sin_days, idle, last_act, last_sin in rows:
+    section_people: Counter = Counter()
+    for uid, acts, sins, active_days, sin_days, idle, last_act, last_sin, *visited in rows:
         if uid not in ids:
             continue
+        for name, hit in zip(SECTION_BITS, visited):
+            section_people[name] += int(hit or 0)
         acts, sins = int(acts or 0), int(sins or 0)
         if not acts and not (full and sins):
             continue
@@ -385,7 +399,6 @@ async def people_doc(
             "idleSignInDays": int(idle or 0) if full else None,
             "lastActiveAt": last_act,
             "lastSignInAt": (last_sin or u.get("lastLoginAt")) if full else None,
-            "topKind": top_kind.get(uid, (0, None))[1],
             "joinedInWindow": bool(u.get("createdAt") and u["createdAt"] >= w.start),
         })
     roster.sort(key=lambda r: (-r["actions"], -(r["signIns"] or 0), r["name"].lower()))
@@ -393,8 +406,11 @@ async def people_doc(
     active_ids = {r["userId"] for r in roster if r["actions"]}
     sign_in_days = sum(r["signInDays"] or 0 for r in roster)
     idle_days = sum(r["idleSignInDays"] or 0 for r in roster)
-    series, kinds, sections = await _scope_series(session, sc, w, people)
-    punchcard, types = await _scope_facets(session, sc, w)
+    facets = await _scope_facets(session, sc, w)
+    series, kinds = await _scope_series(session, sc, w, people, facets["byKind"])
+    punchcard, types = facets["punchcard"], facets["types"]
+    sections = [{"section": name, "count": n, "people": section_people[name]}
+                for name, n in facets["sections"].most_common()]
     if sc.chunked:
         signin_total = sum(k["count"] for k in kinds if k["kind"] == "signin")
         if signin_total:
@@ -446,47 +462,38 @@ async def people_doc(
 
 
 async def _scope_series(session: AsyncSession, sc: _Scope, w: Window,
-                        people: Optional[list[str]]) -> tuple[dict, list[dict], list[dict]]:
-    """Per bucket: each kind's events, and how many distinct people were active and signed in;
-    the scope's kinds; and sections with the people who moved to them. Groups of at most
-    buckets × kinds rows."""
+                        people: Optional[list[str]],
+                        by_kind: dict[str, list[int]]) -> tuple[dict, list[dict]]:
+    """Per bucket: each kind's events (from the facets), and how many distinct people were
+    active and signed in (from the totals: one row per person-day, grouped per bucket)."""
     first, last = _span(w)
     idx = {b: i for i, b in enumerate(w.buckets)}
-    bucket = _bucket(A.day, w).label("b")
-    N = sc.n
-    in_window = [A.day >= first, A.day <= last]
-
-    by_kind = {k: [0] * len(w.buckets) for k in KINDS}
-    for b, kind, n in await _each_chunk(session, sc, people, lambda where: (
-        select(bucket, A.kind, func.sum(N)).where(*in_window, ~_SECTION_ROW, *where)
-        .group_by("b", A.kind))):
-        if b in idx and kind in by_kind:
-            by_kind[kind][idx[b]] += int(n or 0)
-
-    def distinct_per_bucket(pred):
-        return lambda where: (
-            select(bucket, func.count(func.distinct(A.user_id)))
-            .where(*in_window, pred, *where).group_by("b"))
+    bucket = _bucket(T.day, w).label("b")
+    in_window = [T.day >= first, T.day <= last]
 
     active = [0] * len(w.buckets)
-    for b, n in await _each_chunk(session, sc, people, distinct_per_bucket(_ACTION)):
+    for b, n in (await session.execute(
+        select(bucket, func.count(func.distinct(T.user_id)))
+        .where(*in_window, T.workspace_id == sc.key,
+               (T.actions_ws if sc.ws_lens else T.actions) > 0)
+        .group_by("b")
+    )).all():
         if b in idx:
             active[idx[b]] += int(n or 0)
+
     signed: Optional[list[int]] = None
     if sc.lens == FULL:
+        # Everywhere's rows hold the sign-ins: all of them for the platform; for a workspace,
+        # its people's, a chunk at a time — and the facets have none of theirs to count.
         signed = [0] * len(w.buckets)
-        for b, n in await _each_chunk(session, sc, people, distinct_per_bucket(_SIGNIN)):
+        for b, n, total in await _each_chunk(session, sc, people, lambda where: (
+            select(bucket, func.count(func.distinct(T.user_id)), func.sum(T.signins))
+            .where(*in_window, T.signins > 0, T.workspace_id == EVERYWHERE, *where)
+            .group_by("b"))):
             if b in idx:
                 signed[idx[b]] += int(n or 0)
-
-    section_counts: Counter = Counter()
-    section_people: Counter = Counter()
-    for kind, n, ppl in await _each_chunk(session, sc, people, lambda where: (
-        select(A.kind, func.sum(N), func.count(func.distinct(A.user_id)))
-        .where(*in_window, _SECTION_ROW, *where).group_by(A.kind))):
-        name = kind[len(SECTION_KIND_PREFIX):]
-        section_counts[name] += int(n or 0)
-        section_people[name] += int(ppl or 0)
+                if sc.chunked:
+                    by_kind["signin"][idx[b]] += int(total or 0)
 
     shown = [k for k in KINDS if not (k == "signin" and sc.ws_lens)]
     series = {
@@ -495,18 +502,18 @@ async def _scope_series(session: AsyncSession, sc: _Scope, w: Window,
         "activePeople": active,
         "signedIn": signed,
     }
-    kinds = [{"kind": k, "count": sum(by_kind[k])} for k in shown]
-    sections = [{"section": s, "count": int(n), "people": int(section_people[s])}
-                for s, n in section_counts.most_common()]
-    return series, kinds, sections
+    return series, [{"kind": k, "count": sum(by_kind[k])} for k in shown]
 
 
-async def _scope_facets(session: AsyncSession, sc: _Scope, w: Window) -> tuple[list[list[int]], list[dict]]:
-    """The punchcard and "what people do" by name, from the facet rollup: days × 24 hours and
-    days × types at most."""
+async def _scope_facets(session: AsyncSession, sc: _Scope, w: Window) -> dict:
+    """Everything about the scope that needs no one's name, from the facet rollup: the
+    punchcard, "what people do" by name, each kind per bucket, and visits per section. At most
+    days × (hours + types + kinds + sections) rows."""
     first, last = _span(w)
     by_hour: Counter = Counter()
     by_type: Counter = Counter()
+    sections: Counter = Counter()
+    by_kind = {k: [0] * len(w.buckets) for k in KINDS}
     for facet, value, day, n in (await session.execute(
         select(F.facet, F.value, F.day, func.sum(sc.fn))
         .where(F.day >= first, F.day <= last, *sc.facet_where())
@@ -517,9 +524,16 @@ async def _scope_facets(session: AsyncSession, sc: _Scope, w: Window) -> tuple[l
             by_hour[f"{day}T{value}"] += n
         elif facet == "type":
             by_type[value] += n
+        elif facet == "kind" and value in by_kind:
+            i = bisect_right(w.buckets, day) - 1
+            if i >= 0:
+                by_kind[value][i] += n
+        elif facet == "section":
+            sections[value] += n
     types = [{"type": t, "kind": kind_of(t), "label": label_of(t), "count": int(n)}
              for t, n in by_type.most_common() if n]
-    return _punchcard(by_hour), types
+    return {"punchcard": _punchcard(by_hour), "types": types, "byKind": by_kind,
+            "sections": +sections}
 
 
 async def _quiet(
@@ -608,22 +622,35 @@ async def lines(
     happened there."""
     now = now or datetime.now(timezone.utc)
     w = build_window(days, start=start, end=end, now=now)
-    sc = _Scope(lens, workspace_id)
+    out, _ = await _drawn(session, user_ids, w, _Scope(lens, workspace_id))
+    return {"buckets": list(w.buckets), "granularity": w.granularity, "lines": out}
+
+
+async def _drawn(session: AsyncSession, user_ids: Sequence[str], w: Window,
+                 sc: _Scope) -> tuple[dict[str, list[int]], dict[str, Optional[str]]]:
+    """Some people's actions per bucket, and the kind each did most: one read grouped by
+    person, bucket and kind — people × buckets × kinds rows at most."""
     first, last = _span(w)
     idx = {b: i for i, b in enumerate(w.buckets)}
     bucket = _bucket(A.day, w).label("b")
     out = {uid: [0] * len(w.buckets) for uid in user_ids}
-    where = ([A.workspace_id == workspace_id] + ([A.n_ws > 0] if sc.ws_lens else [])
-             if workspace_id else [])
+    per_kind: dict[str, Counter] = {}
+    where = ([A.workspace_id == sc.workspace_id] + ([A.n_ws > 0] if sc.ws_lens else [])
+             if sc.workspace_id else [])
     for chunk in _chunked(sorted(set(user_ids))):
-        for uid, b, n in (await session.execute(
-            select(A.user_id, bucket, func.sum(sc.n))
+        for uid, b, kind, n in (await session.execute(
+            select(A.user_id, bucket, A.kind, func.sum(sc.n))
             .where(A.user_id.in_(chunk), A.day >= first, A.day <= last, _ACTION, *where)
-            .group_by(A.user_id, "b")
+            .group_by(A.user_id, "b", A.kind)
         )).all():
+            n = int(n or 0)
             if uid in out and b in idx:
-                out[uid][idx[b]] += int(n or 0)
-    return {"buckets": list(w.buckets), "granularity": w.granularity, "lines": out}
+                out[uid][idx[b]] += n
+                per_kind.setdefault(uid, Counter())[kind] += n
+    top = {uid: min(((k, n) for k, n in c.items() if n),
+                    key=lambda kn: (-kn[1], KINDS.index(kn[0])), default=(None, 0))[0]
+           for uid, c in per_kind.items()}
+    return out, top
 
 
 async def enrich_page(
@@ -631,14 +658,14 @@ async def enrich_page(
     start: Optional[str] = None, end: Optional[str] = None, now: Optional[datetime] = None,
     workspace_id: Optional[str] = None, lens: str = FULL, emails: bool = False,
 ) -> list[dict]:
-    """What a page of roster rows needs beyond the cached summary: each person's activity line,
-    when they joined and were first and last active in the scope, and — for a reader allowed
+    """What a page of roster rows needs beyond the cached summary: each person's activity line
+    and the kind they did most, when they joined and were first and last active in the scope, and — for a reader allowed
     it — their address. Bounded by the page, never by everyone."""
     ids = [r["userId"] for r in rows]
     if not ids:
         return rows
-    drawn = await lines(session, ids, days=days, start=start, end=end, now=now,
-                        workspace_id=workspace_id, lens=lens)
+    w = build_window(days, start=start, end=end, now=now or datetime.now(timezone.utc))
+    drawn, top_kind = await _drawn(session, ids, w, _Scope(lens, workspace_id))
     scope_key = workspace_id or people_index_repo.PLATFORM
     timeline = await people_index_repo.timeline_for_workspace(session, scope_key, ids)
     joins = ({uid: at for (uid, _ws), at in (await people_index_repo.join_candidates(
@@ -651,7 +678,8 @@ async def enrich_page(
         u = users.get(uid, {})
         out.append({
             **r,
-            "line": drawn["lines"].get(uid, []),
+            "line": drawn.get(uid, []),
+            "topKind": top_kind.get(uid),
             "joinedAt": (people_index_repo.merge_join(t, joins.get(uid)) if workspace_id
                          else u.get("createdAt")),
             "firstActiveAt": t.get("firstActiveAt"),
@@ -1417,10 +1445,10 @@ def sessions_of(events: Sequence[dict], *, gap_minutes: int = SESSION_GAP_MINUTE
 
 _ROSTER_FIELDS = (
     "userId", "name", "deleted", "actions", "previous", "changePct", "activeDays", "signIns",
-    "signInDays", "idleSignInDays", "lastActiveAt", "lastSignInAt", "topKind", "joinedInWindow",
+    "signInDays", "idleSignInDays", "lastActiveAt", "lastSignInAt", "joinedInWindow",
 )
 #: What page enrichment adds to a roster row. Email is added only for privileged readers.
-PAGE_FIELDS = ("line", "joinedAt", "firstActiveAt", "lastActiveEverAt")
+PAGE_FIELDS = ("line", "topKind", "joinedAt", "firstActiveAt", "lastActiveEverAt")
 _QUIET_FIELDS = ("userId", "name", "joinedAt", "lastLoginAt", "lastActiveAt")
 
 

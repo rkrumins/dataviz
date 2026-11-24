@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from backend.app.db.models import (
     PersonActivityDailyORM,
+    PersonDailyTotalORM,
     RoleBindingORM,
     UserORM,
     ViewORM,
@@ -49,7 +50,7 @@ from backend.app.db.repositories import people_index_repo as index
 from backend.app.services import analytics_cache
 
 _SEEDED = ("product_events", "view_activity_log", "auth_audit_log", "role_bindings", "views",
-           "workspaces", "users", "person_activity_daily", "people_daily_facets",
+           "workspaces", "users", "person_activity_daily", "person_daily_totals", "people_daily_facets",
            "people_index_days", "people_index_cursors", "person_workspace_activity",
            "group_members", "groups")
 
@@ -162,13 +163,15 @@ async def _index(factory, now: datetime) -> dict[str, Any]:
             break
         days.append(time.perf_counter() - t)
     async with factory() as session:
-        await session.execute(text("ANALYZE person_activity_daily"))
-        await session.execute(text("ANALYZE people_daily_facets"))
+        for table in ("person_activity_daily", "person_daily_totals", "people_daily_facets"):
+            await session.execute(text(f"ANALYZE {table}"))
         await session.commit()
         rollup = int((await session.execute(
             select(func.count()).select_from(PersonActivityDailyORM))).scalar())
+        totals = int((await session.execute(
+            select(func.count()).select_from(PersonDailyTotalORM))).scalar())
     return {"steps": len(days), "total": time.perf_counter() - started, "days": days,
-            "rollup_rows": rollup}
+            "rollup_rows": rollup, "totals_rows": totals}
 
 
 async def _measure(factory, fn: Callable[[AsyncSession], Awaitable[Any]], runs: int) -> dict:
@@ -226,7 +229,8 @@ async def main() -> None:
         d = sorted(ix["days"])
         report += [
             "## Indexer backfill (one step per transaction, as production runs it)", "",
-            f"- {ix['steps']} steps in {_fmt(ix['total'])}; rollup {ix['rollup_rows']:,} person-day rows",
+            f"- {ix['steps']} steps in {_fmt(ix['total'])}; rollup {ix['rollup_rows']:,} "
+            f"person × workspace × kind rows, {ix['totals_rows']:,} person-day totals",
             f"- per step: p50 {_fmt(statistics.median(d))}, p95 {_fmt(d[int(len(d) * .95) - 1])}, "
             f"max {_fmt(d[-1])}", "",
         ]

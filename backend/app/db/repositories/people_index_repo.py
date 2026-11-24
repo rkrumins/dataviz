@@ -43,6 +43,7 @@ from backend.app.db.models import (
     PeopleIndexCursorORM,
     PeopleIndexDayORM,
     PersonActivityDailyORM,
+    PersonDailyTotalORM,
     PersonWorkspaceActivityORM,
     ProductEventORM,
     RoleBindingORM,
@@ -62,8 +63,8 @@ from backend.app.db.repositories.analytics_repo import (
 from backend.app.db.repositories.people_kinds import (
     ACTION_KINDS,
     SECTION,
+    SECTION_BITS,
     SECTION_KIND_PREFIX,
-    SIGN_IN,
     USAGE_KINDS,
     _ADMIN_VIEWED,
     _MIRRORED_LEDGER_PREFIX,
@@ -78,6 +79,10 @@ from backend.common.service_accounts import is_person, is_service_account
 #: ``workspace_id`` for no workspace — the platform as a whole in ``person_workspace_activity``,
 #: and events that happened in no workspace in the rollup.
 PLATFORM = ""
+
+#: ``workspace_id`` for everywhere in ``person_daily_totals`` and ``people_daily_facets``: the
+#: platform's figures, so a platform read never sums over workspaces.
+EVERYWHERE = "*"
 
 CURSOR_JOINS = "joins"
 #: How far the ledger has been read for rows recorded after their day was computed.
@@ -326,15 +331,17 @@ class _DayFold:
             a[4] = first if a[4] is None or first < a[4] else a[4]
             a[5] = last if a[5] is None or last > a[5] else a[5]
         if kind.startswith(SECTION_KIND_PREFIX):
-            return
-        facets = [("type", type_key)] if type_key else []
-        if kind != "signin" and hour:
-            facets.append(("hour", hour))
-        for facet, value in facets:
-            f = self.facets.setdefault((ws, facet, value), [0, 0])
-            f[0] += n
-            if visible:
-                f[1] += n
+            facets = [("section", kind[len(SECTION_KIND_PREFIX):])]
+        else:
+            facets = [("kind", kind)] + ([("type", type_key)] if type_key else [])
+            if kind != "signin" and hour:
+                facets.append(("hour", hour))
+        for scope in ((ws, EVERYWHERE) if ws else (EVERYWHERE,)):
+            for facet, value in facets:
+                f = self.facets.setdefault((scope, facet, value), [0, 0])
+                f[0] += n
+                if visible:
+                    f[1] += n
 
 
 def _hour_of(col):
@@ -400,10 +407,44 @@ async def fold_day(session: AsyncSession, day: str) -> _DayFold:
     return fold
 
 
+def _newest(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    return b if a is None or (b is not None and b > a) else a
+
+
+def _totals_rows(day: str, fold: _DayFold) -> list[dict]:
+    """The day per person and scope, with no kind: a row for each workspace they did something
+    in, and one for everywhere. Sign-ins happened in no workspace, so only the latter has them."""
+    out: dict[tuple[str, str], dict] = {}
+
+    def row(ws: str, user: str) -> dict:
+        return out.setdefault((ws, user), {
+            "workspace_id": ws, "day": day, "user_id": user, "actions": 0, "actions_ws": 0,
+            "signins": 0, "sections": 0, "last_action_at": None, "last_action_ws_at": None,
+            "last_signin_at": None,
+        })
+
+    for (user, ws, kind), (n, n_ws, _first, last, _first_ws, last_ws) in fold.people.items():
+        if kind == "signin":
+            r = row(EVERYWHERE, user)
+            r["signins"] += n
+            r["last_signin_at"] = _newest(r["last_signin_at"], last)
+            continue
+        for r in [row(EVERYWHERE, user)] + ([row(ws, user)] if ws else []):
+            if kind in ACTION_KINDS:
+                r["actions"] += n
+                r["actions_ws"] += n_ws
+                r["last_action_at"] = _newest(r["last_action_at"], last)
+                r["last_action_ws_at"] = _newest(r["last_action_ws_at"], last_ws)
+            else:
+                r["sections"] |= SECTION_BITS.get(kind[len(SECTION_KIND_PREFIX):], 0)
+    return [out[k] for k in sorted(out)]
+
+
 async def _replace_day(session: AsyncSession, day: str, fold: _DayFold) -> None:
-    A, F = PersonActivityDailyORM.__table__, PeopleDailyFacetORM.__table__
-    await session.execute(delete(A).where(A.c.day == day))
-    await session.execute(delete(F).where(F.c.day == day))
+    A, T, F = (PersonActivityDailyORM.__table__, PersonDailyTotalORM.__table__,
+               PeopleDailyFacetORM.__table__)
+    for table in (A, T, F):
+        await session.execute(delete(table).where(table.c.day == day))
     people = [
         {"day": day, "user_id": u, "workspace_id": ws, "kind": k, "n": v[0], "n_ws": v[1],
          "first_at": v[2], "last_at": v[3], "first_ws_at": v[4], "last_ws_at": v[5]}
@@ -411,6 +452,9 @@ async def _replace_day(session: AsyncSession, day: str, fold: _DayFold) -> None:
     ]
     for start in range(0, len(people), _INSERT_CHUNK):
         await session.execute(sa_insert(A), people[start:start + _INSERT_CHUNK])
+    totals = _totals_rows(day, fold)
+    for start in range(0, len(totals), _INSERT_CHUNK):
+        await session.execute(sa_insert(T), totals[start:start + _INSERT_CHUNK])
     facets = [
         {"day": day, "workspace_id": ws, "facet": f, "value": v, "n": c[0], "n_ws": c[1]}
         for (ws, f, v), c in sorted(fold.facets.items())
@@ -535,9 +579,10 @@ async def purge_rollup(session: AsyncSession, *, now: datetime) -> int:
         select(func.min(PeopleIndexDayORM.day)).where(PeopleIndexDayORM.day < cutoff))).scalar()
     if oldest is None:
         return 0
-    A, F, D = (PersonActivityDailyORM.__table__, PeopleDailyFacetORM.__table__,
-               PeopleIndexDayORM.__table__)
+    A, T, F, D = (PersonActivityDailyORM.__table__, PersonDailyTotalORM.__table__,
+                  PeopleDailyFacetORM.__table__, PeopleIndexDayORM.__table__)
     gone = (await session.execute(delete(A).where(A.c.day == oldest))).rowcount or 0
+    await session.execute(delete(T).where(T.c.day == oldest))
     await session.execute(delete(F).where(F.c.day == oldest))
     await session.execute(delete(D).where(D.c.day == oldest))
     return gone + 1

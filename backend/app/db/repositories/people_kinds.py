@@ -154,6 +154,16 @@ SECTION_KIND_PREFIX = "section."
 ACTION_KINDS: tuple[str, ...] = tuple(k for k in KINDS if k != "signin")
 
 
+#: The app's sections in a FIXED order: a person-day's ``sections`` bitmask sets bit ``i`` for
+#: ``SECTIONS[i]``, and stored days keep their bits. Append only — never reorder or remove.
+#: A test holds it to ``telemetry.APP_SECTIONS``.
+SECTIONS: tuple[str, ...] = (
+    "dashboard", "explore", "templates", "ingestion", "reviews",
+    "playground", "workspaces", "schema", "analytics", "admin",
+)
+SECTION_BITS: dict[str, int] = {s: 1 << i for i, s in enumerate(SECTIONS)}
+
+
 def section_kind(section: str) -> str:
     return f"{SECTION_KIND_PREFIX}{section}"
 

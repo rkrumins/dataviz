@@ -1984,6 +1984,39 @@ class PersonActivityDailyORM(Base):
     )
 
 
+class PersonDailyTotalORM(Base):
+    """What one person did on one UTC day in one scope, with no kind: what a roster reads.
+
+    ``workspace_id`` is a workspace the person did something in that day, or ``'*'`` for
+    everywhere (every workspace, none, and sign-ins). So a roster is a scan of one row per
+    person-day, however many workspaces and kinds their day spread over — the
+    ``person_activity_daily`` rows it is folded from can be ten times as many.
+
+    ``actions``/``last_action_at`` count every action; the ``_ws`` columns only what a
+    workspace admin may see. Sign-ins happen in no workspace, so only ``'*'`` rows hold them.
+    ``sections`` has bit ``i`` set when the person moved to ``people_kinds.SECTIONS[i]``.
+    """
+    __tablename__ = "person_daily_totals"
+
+    workspace_id = Column(Text, primary_key=True)
+    day = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    actions = Column(Integer, nullable=False, default=0, server_default="0")
+    actions_ws = Column(Integer, nullable=False, default=0, server_default="0")
+    signins = Column(Integer, nullable=False, default=0, server_default="0")
+    sections = Column(Integer, nullable=False, default=0, server_default="0")
+    last_action_at = Column(Text, nullable=True)
+    last_action_ws_at = Column(Text, nullable=True)
+    last_signin_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # Some people's days in a scope: the sign-ins of a workspace's people.
+        Index("idx_pdt_user", "user_id", "workspace_id", "day"),
+        # A day across every scope: the indexer replacing it, the purge dropping it.
+        Index("idx_pdt_day", "day"),
+    )
+
+
 class PeopleDailyFacetORM(Base):
     """The same days without the person: events by hour of day (``facet='hour'``) and by
     event type (``facet='type'``) — the punchcard and "what people do", which name no one."""
