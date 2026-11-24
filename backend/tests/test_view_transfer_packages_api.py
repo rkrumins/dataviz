@@ -173,8 +173,8 @@ async def test_a_view_is_packaged_by_a_job_the_request_only_queues(test_client, 
     assert (job["graph_id"], job["scope_view_id"], job["branch_id"], job["export_format"], job["as_of_seq"]) == \
         (f"g_{ds}", view_id, None, "ndjson", 12), "published data, pinned to the commit it stands at"
     assert job["package"] == {"fileName": body["fileName"], "scope": "view", "dataVersion": "published",
-                              "views": body["views"], "actor": _FAKE_USER.id}
-    assert isinstance(job["with_path"], dict), "its data says where each entity sits, up this containment"
+                              "views": body["views"], "actor": _FAKE_USER.id, "withPath": False}
+    assert job["with_path"] is None, "not asked for: its data doesn't say where each entity sits"
     assert jobs.ran == ["exp_1"], "the export job was queued"
     assert not (tmp_path / "store").exists(), "nothing is written in the request"
 
@@ -185,6 +185,41 @@ async def test_a_view_is_packaged_by_a_job_the_request_only_queues(test_client, 
     assert [v.raw["metadata"]["name"] for v in parsed.views] == ["Finance lineage"]
     assert parsed.views[0].raw["version"] == 1
     assert sorted(scope["assigned_urns"]) == ["urn:a", "urn:b", "urn:gone"]
+
+
+async def test_a_package_says_where_each_entity_sits_only_when_asked(test_client, db_session, graph, services,
+                                                                    monkeypatch):
+    """``withPath``: the job's data says where each entity sits, up the containment the ontology
+    has, and so does its views' manifest. A job asked for before the option existed has no
+    ``withPath`` in its package, and was asked with them."""
+    from backend.tests.test_view_transfer_export import _PlacingEngine
+
+    versioning, jobs = services
+    ws = await _workspace(test_client, "Dev")
+    ds = await _data_source(db_session, ws)
+    versioning.track(ws, ds)
+    view_id = await _view(test_client, ws, dataSourceId=ds)
+    resp = await test_client.post(f"{_TRANSFER}/packages", json={"views": [{"viewId": view_id}], "withPath": True})
+    assert resp.status_code == 202, resp.text
+    [job] = jobs.of("exp")
+    assert job["package"]["withPath"] is True
+    assert isinstance(job["with_path"], dict), "its data says where each entity sits, up this containment"
+
+    engine = _PlacingEngine(graph, {"urn:a": ["urn:anchor"]})
+
+    async def _engine_for(session, workspace_id, data_source_id):
+        return engine
+
+    monkeypatch.setattr("backend.app.services.view_transfer.export.engine_for", _engine_for)
+
+    async def manifest(options):
+        bundle, _scope = await package.build_bundle(db_session, options, ws, ds)
+        return bundle["views"][0]["manifest"]["entities"]["urn:a"]
+
+    assert (await manifest(job["package"]))["parentName"] == "Finance"
+    assert "parentUrn" not in await manifest({**job["package"], "withPath": False})
+    earlier = {k: v for k, v in job["package"].items() if k != "withPath"}
+    assert (await manifest(earlier))["pathUrns"] == ["urn:anchor"]
 
 
 async def test_a_package_asked_for_again_is_the_same_job(test_client, db_session, graph, services):
@@ -243,19 +278,26 @@ async def test_what_a_package_refuses(test_client, db_session, graph, services, 
 
 
 _DATA = b'{"kind":"node","urn":"urn:a","entityType":"dataset"}\n{"kind":"node","urn":"urn:new","entityType":"dataset"}\n'
+#: The same data, each node saying where it sits, as an export asked for that writes it.
+_PLACED_DATA = (b'{"kind":"node","urn":"urn:a","entityType":"dataset","parentUrn":"urn:anchor","parentName":"Finance",'
+                b'"parentType":"domain","path":["Finance"],"pathUrns":["urn:anchor"]}\n'
+                b'{"kind":"node","urn":"urn:new","entityType":"dataset","parentUrn":null,"parentName":null,'
+                b'"parentType":null,"path":[],"pathUrns":[]}\n')
 
 
-async def _package_file(test_client, view_id) -> bytes:
-    """A package of the view: the real bundle, with some graph data, as an export job writes one."""
+async def _package_file(test_client, view_id, placed=False) -> bytes:
+    """A package of the view: the real bundle, with some graph data, as an export job writes one;
+    ``placed``, as one asked for with where each entity sits."""
     async def data():
-        yield _DATA
+        yield _PLACED_DATA if placed else _DATA
 
     def manifest_of(found):
         return {"format": "view-package", "formatVersion": 1, "scope": "view",
                 "data": {"version": "published", "nodes": 2, "edges": 0}, "parts": found}
 
-    bundle = await _export(test_client, view_id)
-    return b"".join([c async for c in package.write_package(bundle, data(), manifest_of)])
+    resp = await test_client.post(f"{_TRANSFER}/export", json={"views": [{"viewId": view_id}], "withPath": placed})
+    assert resp.status_code == 200, resp.text
+    return b"".join([c async for c in package.write_package(resp.content, data(), manifest_of)])
 
 
 async def _upload(client, raw: bytes, *, complete: bool = True) -> str:
@@ -325,6 +367,37 @@ async def test_a_package_is_uploaded_in_parts_checked_by_a_job_and_described(
     assert body["ontologyMatch"] == {"s1": {"exact": None, "drift": False, "sameEnvironment": False}}
     assert all("versioned" in s for items in body["targetSuggestions"].values() for s in items)
     assert body["identityMatches"] is not None
+
+
+async def test_a_package_that_says_where_its_entities_sat_is_described_as_one_that_does_not(
+        test_client, db_session, graph, services, monkeypatch):
+    """Two packages of one view, one with where each entity sat (its views' manifest and its data)
+    and one without: checked and described alike — the same views, the same data by type."""
+    from backend.tests.test_view_transfer_import import _PlacingEngine, _without_places
+
+    async def _engine_for(session, workspace_id, data_source_id):
+        return _PlacingEngine(graph)
+
+    monkeypatch.setattr("backend.app.services.view_transfer.export.engine_for", _engine_for)
+    versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    versioning.track(uat, await _data_source(db_session, uat))
+    view_id = await _view(test_client, dev)
+    described = {}
+    for placed in (True, False):
+        upload = await _upload(test_client, await _package_file(test_client, view_id, placed))
+        await jobs.inspect_queued()
+        resp = await test_client.get(f"{_TRANSFER}/packages/{upload}")
+        assert resp.status_code == 200, resp.text
+        described[placed] = resp.json()
+    assert described[True]["views"][0]["manifest"]["entities"]["urn:a"]["parentName"] == "Finance"
+
+    def what(body):
+        return _without_places({"integrity": body["package"]["integrity"], "data": body["package"]["data"],
+                                **{k: body[k] for k in ("views", "identityMatches", "targetSuggestions",
+                                                        "ontologyMatch")}})
+    assert what(described[True]) == what(described[False])
+    assert described[True]["package"]["data"]["typeStats"]["entityTypeCounts"] == {"dataset": 2}
 
 
 async def test_a_completion_that_died_half_way_is_finished_by_the_next(

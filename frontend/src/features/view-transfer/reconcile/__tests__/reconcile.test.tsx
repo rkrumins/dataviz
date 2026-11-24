@@ -5,9 +5,11 @@
  *   - the score projects dropped entities immediately and counts what it can't score (remaps,
  *     withdrawn choices) as pending, never as found;
  *   - the panel turns a click into exactly that edit: drop one, drop all not found, map a type;
- *   - Merge can't be chosen where there's nothing to merge from.
+ *   - Merge can't be chosen where there's nothing to merge from;
+ *   - a file that says where its entities sat (its manifest's parent and path) reads as one that
+ *     doesn't: nothing here shows or sends it differently.
  */
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ReconciledView, ReconcileReport, Resolutions } from '@/services/viewTransferApiService'
 import { ReconciliationPanel } from '../ReconciliationPanel'
@@ -135,6 +137,22 @@ describe('ReconciliationPanel', () => {
       sourceLabel="dev" targetLabel="UAT" exportedNames={{}} />)
     expect(screen.getByRole('img', { name: '66.7% matched' })).toBeInTheDocument()
     expect(screen.getByText('after your choices')).toBeInTheDocument()
+  })
+
+  it('reads a file that says where its entities sat as one that does not', () => {
+    const shown = (place: Record<string, unknown>) => {
+      const r = reconciled()
+      r.report.entities = r.report.entities.map((e) => ({ ...e, exported: { ...e.exported, ...place } }))
+      const onDraft = vi.fn()
+      const { container } = render(<ReconciliationPanel reconciled={r} applied={{}} draft={{}} onDraft={onDraft}
+        sourceLabel="dev" targetLabel="UAT" exportedNames={Object.fromEntries(r.report.entities.map((e) => [e.urn, e.exported!]))} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Drop all 2' }))
+      const out = { text: container.textContent, sent: onDraft.mock.calls }
+      cleanup()
+      return out
+    }
+    expect(shown({ parentUrn: 'urn:db', parentName: 'Warehouse', parentType: 'Database', path: ['Warehouse'], pathUrns: ['urn:db'] }))
+      .toEqual(shown({ parentUrn: null, parentName: null, parentType: null, path: null, pathUrns: null }))
   })
 
   it('offers Merge only when there is a version to merge from', () => {

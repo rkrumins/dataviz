@@ -441,10 +441,12 @@ export function filenameFromDisposition(header: string | null): string | null {
 /**
  * Export views to a file and start the download. Each view exports as a real version: the one
  * asked for, or its current design (saved as a new version first when it has unsaved changes).
+ * `withPath`: the file's manifest also says where each entity sits, which no import reads.
  */
 export async function exportViews(
   views: Array<{ viewId: string; version?: number | null }>,
   message?: string,
+  options: { withPath?: boolean } = {},
 ): Promise<ExportedFile> {
   const res = await send('/export', {
     method: 'POST',
@@ -452,6 +454,7 @@ export async function exportViews(
     body: JSON.stringify({
       views: views.map((v) => (v.version ? { viewId: v.viewId, version: v.version } : { viewId: v.viewId })),
       message: message || null,
+      ...(options.withPath ? { withPath: true } : {}),
     }),
   })
   const blob = await res.blob()
@@ -520,11 +523,12 @@ export interface PackageStarted {
  * Have the server package views with their graph data: the views are sealed as versions now, and
  * an export job builds the package (the data can be large): follow it as any export the server
  * prepares (`features/import-export/backgroundExports`). Sending the same `requestId` again
- * answers with the job it started.
+ * answers with the job it started. `withPath`: its data, and the views' manifest, also say where
+ * each entity sits, which no import reads.
  */
 export function startViewPackage(
   views: Array<{ viewId: string; version?: number | null }>,
-  options: { scope: PackageScope; dataVersion: PackageDataVersion; message?: string; requestId?: string },
+  options: { scope: PackageScope; dataVersion: PackageDataVersion; message?: string; requestId?: string; withPath?: boolean },
 ): Promise<PackageStarted> {
   return postJson<PackageStarted>('/packages', {
     views: views.map((v) => (v.version ? { viewId: v.viewId, version: v.version } : { viewId: v.viewId })),
@@ -532,6 +536,7 @@ export function startViewPackage(
     dataVersion: options.dataVersion,
     message: options.message || null,
     requestId: options.requestId ?? null,
+    ...(options.withPath ? { withPath: true } : {}),
   })
 }
 

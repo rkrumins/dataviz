@@ -100,9 +100,9 @@ class EntityInfo(_Model):
     name: Optional[str] = Field(None, max_length=2_000)
     type: Optional[str] = Field(None, max_length=256)
     qualifiedName: Optional[str] = Field(None, max_length=2_000)
-    # Where it sits in the graph it was exported from (``common.ancestry_columns``), as every
-    # export of entities says it. Informational: no import or reconcile reads it, so a value that
-    # doesn't fit is read as nothing rather than refusing the file.
+    # Where it sits in the graph it was exported from (``common.ancestry_columns``), when the export
+    # asked for it. Informational: no import or reconcile reads it, so a value that doesn't fit is
+    # read as nothing rather than refusing the file.
     parentUrn: Annotated[Optional[str], BeforeValidator(_place_text)] = None
     parentName: Annotated[Optional[str], BeforeValidator(_place_text)] = None
     parentType: Annotated[Optional[str], BeforeValidator(_place_text)] = None

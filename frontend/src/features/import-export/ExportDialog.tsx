@@ -12,9 +12,10 @@
  * the dialog hands it to the export tray (`backgroundExports`), and opened again it shows it once
  * more. It can be cancelled while it is prepared. One without version control exports its live
  * graph, downloaded as the server reads it, in view and edit mode alike: a cold copy, importable
- * later into one with version control. Either way each entity says where it sits (its parent and
- * path, as the canvas nests it) unless that is switched off: informational columns, which importing
- * the file back skips.
+ * later into one with version control. Either way each entity can say where it sits (its parent
+ * and path, as the canvas nests it): informational columns, which importing the file back skips.
+ * Off until the person turns it on, so a file reads as it always has to whatever consumes it; their
+ * choice is remembered for the next export (`exportWithPath`).
  */
 import { useState } from 'react'
 import {
@@ -22,10 +23,9 @@ import {
   Info, Layers, Loader2, RefreshCw, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { ANCESTRY_COLUMNS } from '@/lib/ancestryColumns'
 import { usePersonaMode } from '@/store/persona'
+import { usePreferencesStore } from '@/store/preferences'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { HoverTip } from '@/components/ui/HoverTip'
 import {
   createExport, exportStreamUrl, planExport, triggerBrowserDownload,
   type ExportPlan, type ExportSummary, type ExportTarget, type ImportFormat,
@@ -37,6 +37,7 @@ import {
 import { CancelExport } from './CancelExport'
 import { ExportProgressPanel } from './ExportProgress'
 import { prettyBytes } from './format'
+import { PathOption } from './PathOption'
 
 export interface ExportDialogProps {
   wsId: string
@@ -95,8 +96,9 @@ export function ExportDialog({
   const [scope, setScope] = useState<'view' | 'all'>(viewId && !live ? 'view' : 'all')
   const [source, setSource] = useState<'branch' | 'published'>(branchId && !live ? 'branch' : 'published')
   const [newProps, setNewProps] = useState('')
-  // Where each entity sits travels with it, as the canvas shows it: on unless asked otherwise.
-  const [withPath, setWithPath] = useState(true)
+  // Where each entity sits, as the canvas shows it: the person's own remembered choice, off at first.
+  const withPath = usePreferencesStore((s) => s.exportWithPath)
+  const setWithPath = usePreferencesStore((s) => s.setExportWithPath)
   const [phase, setPhase] = useState<Phase>(earlier ? 'server' : 'choose')
   const [plan, setPlan] = useState<ExportPlan | null>(null)
   const [fileName, setFileName] = useState(earlier?.fileName ?? '')
@@ -517,38 +519,6 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, picked, sourc
         )}
       </div>
     </div>
-  )
-}
-
-/** Whether each entity carries where it sits: its parent and path, the five informational columns
- *  every export of entities writes (`lib/ancestryColumns`). */
-function PathOption({ on, onChange, technical }: { on: boolean; onChange: (on: boolean) => void; technical: boolean }) {
-  return (
-    <button type="button" role="switch" aria-checked={on} onClick={() => onChange(!on)}
-      className={cn('w-full text-left flex items-start gap-3 px-3.5 py-3 rounded-xl border transition-colors duration-150',
-        on ? 'border-indigo-500/60 bg-indigo-50/40 dark:bg-indigo-950/15' : 'border-glass-border hover:border-glass-border-hover')}>
-      <FolderTree className={cn('w-4 h-4 mt-0.5 flex-shrink-0', on ? 'text-indigo-500' : 'text-ink-muted')} />
-      <span className="flex-1 min-w-0">
-        <span className="block text-xs font-semibold text-ink">Include where each entity sits (parent and path)</span>
-        <span className="block text-[11px] text-ink-muted mt-0.5 leading-relaxed">
-          {technical ? (
-            <>
-              Adds{' '}
-              <HoverTip label="One read of containment for every thousand entities"
-                detail="Lists in NDJSON and JSON; one cell in a spreadsheet, a path reading A / B and its URNs a; b.">
-                <span className="font-mono underline decoration-dotted underline-offset-2 cursor-help">{ANCESTRY_COLUMNS.join(', ')}</span>
-              </HoverTip>
-              . Informational: an import skips them.
-            </>
-          ) : 'Each row says what it sits in, all the way to the top. Skipped when you import the file back.'}
-        </span>
-      </span>
-      <span aria-hidden className={cn('relative mt-0.5 w-8 h-[18px] rounded-full flex-shrink-0 transition-colors',
-        on ? 'bg-indigo-500' : 'bg-black/15 dark:bg-white/15')}>
-        <span className={cn('absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow-sm transition-transform',
-          on ? 'translate-x-[16px]' : 'translate-x-[2px]')} />
-      </span>
-    </button>
   )
 }
 

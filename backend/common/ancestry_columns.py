@@ -1,8 +1,9 @@
-"""Where an entity sits, as the five columns every file of entities carries.
+"""Where an entity sits, as the five columns any file of entities can carry.
 
-The trace dock's file (``frontend/src/hooks/lib/traceExport.ts``) wrote them first. A member set's
-download, a data export (every format, a view package's data included), a view file's manifest and
-a search's export write the same five, meaning the same thing:
+The trace dock's file (``frontend/src/hooks/lib/traceExport.ts``) wrote them first, and a member
+set's download writes them unless asked not to. A data export (every format, a view package's data
+included), a view file's manifest and a search's export write the same five when asked
+(``withPath``, :data:`WITH_PATH`), meaning the same thing:
 
 * ``parentUrn``, ``parentName``, ``parentType``: its direct container, empty at the top of the
   graph;

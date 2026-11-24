@@ -15,6 +15,10 @@
  * Every limit the server reached is said, never silent. Closing stops
  * following the set; the server keeps what it worked out for a while, and the
  * same question asked again carries on from there.
+ *
+ * Each entity says where it sits (its parent and path) as this file always
+ * has, unless the reader switches it off: their choice is remembered for the
+ * next one (`traceExportWithPath`).
  */
 import { motion } from 'framer-motion'
 import { Check, Download, FileDown, Network, X } from 'lucide-react'
@@ -30,6 +34,7 @@ import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { followMemberSet } from '@/services/memberSetExport'
+import { usePreferencesStore } from '@/store/preferences'
 import type { Depth, MembershipSpec } from '@/types/membership'
 import type { MemberSetFormat, MemberSetStage, MemberSetStatus } from '@/types/memberSet'
 
@@ -91,6 +96,8 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
   const [format, setFormat] = useState<MemberSetFormat>('csv')
   const [withFlows, setWithFlows] = useState(false)
   const [withDescription, setWithDescription] = useState(true)
+  const withPath = usePreferencesStore((s) => s.traceExportWithPath)
+  const setWithPath = usePreferencesStore((s) => s.setTraceExportWithPath)
   const [upstream, setUpstream] = useState<Depth>(adjustable ? 1 : initial.expand.upstream)
   const [downstream, setDownstream] = useState<Depth>(adjustable ? 1 : initial.expand.downstream)
   const [inside, setInside] = useState(adjustable ? false : initial.expand.partnerChildren !== 0)
@@ -122,7 +129,7 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
       const columns = withDescription ? ['description', 'tags'] : []
       const base = `lineage-${slug(seedsLabel)}-${new Date().toISOString().slice(0, 10)}`
       const ext = format === 'csv' ? 'csv' : format === 'ndjson' ? 'ndjson' : 'json'
-      const files = [{ url: provider.memberSetDownloadUrl(answer.setId, answer.downloadToken, format, 'nodes', columns), name: `${base}.${ext}` }]
+      const files = [{ url: provider.memberSetDownloadUrl(answer.setId, answer.downloadToken, format, 'nodes', columns, withPath), name: `${base}.${ext}` }]
       // JSON carries its flows in the one document; the others as a file of their own.
       if (withFlows && format !== 'json') {
         files.push({ url: provider.memberSetDownloadUrl(answer.setId, answer.downloadToken, format, 'edges'), name: `${base}-flows.${ext}` })
@@ -219,8 +226,14 @@ export function ExportLineageDialog({ viewId, spec: initial, seedsLabel, adjusta
                     <input type="checkbox" checked={withDescription} onChange={e => setWithDescription(e.target.checked)} />
                     Description and tags columns
                   </label>
+                  <label className="inline-flex items-center gap-2">
+                    <input type="checkbox" checked={withPath} onChange={e => setWithPath(e.target.checked)} data-include-path />
+                    Parent and path columns
+                  </label>
                   <p className="text-[11px] text-ink-muted">
-                    Every row: URN, name, type, qualified name, why it is in (seed, upstream, downstream…), hops, its nearest starting point, and where it sits — its parent and every container down to it.
+                    Every row: URN, name, type, qualified name, why it is in (seed, upstream, downstream…), hops{withPath
+                      ? ', its nearest starting point, and where it sits — its parent and every container down to it.'
+                      : ' and its nearest starting point.'}
                   </p>
                 </div>
                 {phase.kind === 'failed' && <p role="alert" className="text-[11.5px] text-rose-400">{phase.message}</p>}
