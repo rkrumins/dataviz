@@ -8,8 +8,8 @@ The file also carries, per view:
 
 * a manifest naming every entity the view references (resolved against the source graph, one
   lookup per graph however many views share it), so the importing side can say WHAT didn't
-  match, not just how many — and where each sat there, its parent and its path, which nothing
-  on the importing side reads;
+  match, not just how many — and, when the export asks for it (``with_path``), where each sat
+  there, its parent and its path, which nothing on the importing side reads;
 * its history: the version hashes the view has been through, including those carried in from
   earlier imports, which is how a later import finds the version both sides last agreed on.
 """
@@ -190,9 +190,11 @@ async def export_views(
     *,
     actor: Optional[str],
     message: Optional[str] = None,
+    with_path: bool = False,
 ) -> Tuple[Dict[str, Any], List[SealedView]]:
     """Build the bundle for ``requests``: each a view, an optional version number, and whether
-    the caller may seal the view's unsaved changes (see ``seal``).
+    the caller may seal the view's unsaved changes (see ``seal``). ``with_path``: each manifest
+    entity says where it sits (:func:`_places`).
 
     Returns ``(bundle, sealed)``. Raises ``LookupError`` for a version that doesn't exist.
     """
@@ -243,7 +245,7 @@ async def export_views(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("export: identity lookup failed for source %s: %s", key, exc)
                 ok = False
-        if engine is not None and found:
+        if with_path and engine is not None and found:
             places = await _places(engine, found)
             found = {urn: {**info, **places.get(urn, {})} if isinstance(info, dict) else info
                      for urn, info in found.items()}

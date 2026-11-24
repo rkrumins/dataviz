@@ -4,9 +4,10 @@ The file streams as it is read — ``PAGE`` rows to a short read of the set's ro
 each read in a session of its own, so a download of a million rows holds no
 connection between pages and memory stays flat. What a set knows about each member
 (its name, type, why it is in, its distances, its nearest seed) comes straight from
-its rows. Where each sits — its parent and its path — is the graph's containment
-chains, read ``LOOKUP`` members to a statement as the page goes out (two short
-statements a thousand rows), and so are any other ``columns``: each statement under
+its rows. Where each sits — its parent and its path, unless the download is asked
+without them — is the graph's containment chains, read ``LOOKUP`` members to a
+statement as the page goes out (two short statements a thousand rows), and so are
+any other ``columns``: each statement under
 its own admission and never held across a yield, so a client that reads slowly
 holds no graph slot.
 
@@ -31,11 +32,12 @@ from backend.app.db.models import MemberSetEdgeORM, MemberSetRowORM
 from backend.common import ancestry_columns as ancestry
 from backend.common.models.graph import GraphNode, NodeQuery
 
-#: What every member row carries, first and in this order: what it is, why it is in,
-#: and where it sits — its parent, and every container from the top of the graph
-#: down to it (by name and by URN: ``common.ancestry_columns``).
-BASE_COLUMNS = ("urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown", "nearestSeed",
-                *ancestry.ANCESTRY_COLUMNS)
+#: What every member row carries, first and in this order: what it is and why it is in.
+MEMBER_COLUMNS = ("urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown", "nearestSeed")
+#: Then, unless the download is asked without them, where it sits — its parent, and every
+#: container from the top of the graph down to it (by name and by URN:
+#: ``common.ancestry_columns``).
+BASE_COLUMNS = (*MEMBER_COLUMNS, *ancestry.ANCESTRY_COLUMNS)
 EDGE_COLUMNS = ("source", "target", "type")
 #: Rows per read of the set; members per node query for extra columns.
 PAGE = 5_000
@@ -151,8 +153,8 @@ async def _place(records: List[Dict[str, Any]], engine, admit, known: Dict[str, 
 
 
 async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str], engine, admit,
-                first: bool = True) -> AsyncIterator[bytes]:
-    names = list(BASE_COLUMNS) + list(columns)
+                with_path: bool, first: bool = True) -> AsyncIterator[bytes]:
+    names = list(BASE_COLUMNS if with_path else MEMBER_COLUMNS) + list(columns)
     known: Dict[str, Tuple[str, str]] = {}
     after = -1
     while True:
@@ -161,7 +163,7 @@ async def _rows(sessions: Sessions, set_id: str, fmt: str, columns: Sequence[str
             return
         after = rows[-1].seq
         records = [_member(r) for r in rows]
-        if engine is not None:
+        if engine is not None and with_path:
             await _place(records, engine, admit, known)
         if columns:
             await _fill(records, columns, engine, admit)
@@ -191,9 +193,10 @@ def _header(columns: Sequence[str]) -> bytes:
 
 async def stream(sessions: Sessions, set_id: str, *, fmt: str, part: str = "nodes",
                  columns: Sequence[str] = (), engine=None, admit=None,
-                 meta: Optional[Dict[str, Any]] = None) -> AsyncIterator[bytes]:
+                 meta: Optional[Dict[str, Any]] = None, with_path: bool = True) -> AsyncIterator[bytes]:
     """The set's file. ``part`` ``edges`` is its lineage alone (csv or ndjson);
-    ``json`` is one document holding both."""
+    ``json`` is one document holding both. ``with_path``: each member says where it
+    sits, as a set's file always has; without it, no chain is read."""
     columns = [c for c in dict.fromkeys(columns) if c not in BASE_COLUMNS]
     if part == "edges":
         if fmt == "csv":
@@ -202,10 +205,10 @@ async def stream(sessions: Sessions, set_id: str, *, fmt: str, part: str = "node
             yield chunk
         return
     if fmt == "csv":
-        yield _header(list(BASE_COLUMNS) + columns)
+        yield _header(list(BASE_COLUMNS if with_path else MEMBER_COLUMNS) + columns)
     if fmt == "json":
         yield ('{"meta":' + json.dumps(meta or {}, ensure_ascii=False) + ',"nodes":[').encode("utf-8")
-    async for chunk in _rows(sessions, set_id, fmt, columns, engine, admit):
+    async for chunk in _rows(sessions, set_id, fmt, columns, engine, admit, with_path):
         yield chunk
     if fmt == "json":
         yield b'],"edges":['

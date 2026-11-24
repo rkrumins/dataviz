@@ -56,6 +56,7 @@ from backend.app.services.member_sets import download, stepper
 from backend.app.services.member_sets import store as sets
 from backend.app.services.search_downloads import MEMBER_SET, mint_download_token, read_download_token
 from backend.app.services.view_membership_search import make_seed_pages, seed_query_for
+from backend.common import ancestry_columns
 from backend.common.models.member_set import (
     PAGE_MAX,
     MemberSetMember,
@@ -273,6 +274,7 @@ async def download_member_set(
     part: str = Query("nodes", description="nodes, or edges (csv or ndjson)."),
     columns: Optional[str] = Query(None, description="More columns, comma-separated: a node's fields or "
                                                      "properties."),
+    with_path: bool = Query(True, alias="withPath", description=ancestry_columns.WITH_PATH),
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
@@ -289,8 +291,9 @@ async def download_member_set(
 ):
     """A complete set, streamed as it is read — for the person its ``downloadToken``
     was issued to, for an hour after: its members with why each is in, their
-    distances and nearest seed (plus any ``columns``), or (``part=edges``) the lineage
-    between them when the set was asked for with its edges."""
+    distances, nearest seed and where each sits (unless ``withPath=false``), plus any
+    ``columns``; or (``part=edges``) the lineage between them when the set was asked
+    for with its edges."""
     from backend.auth_service.core import config as auth_config
 
     vouched = read_download_token(token, _principal(user),
@@ -320,5 +323,5 @@ async def download_member_set(
     turn = await take_turn()
     return ExportStreamResponse(
         download.stream(sessions, ms.id, fmt=fmt, part=part, columns=extra, engine=engine,
-                        admit=_statement_admission(engine), meta=meta),
+                        admit=_statement_admission(engine), meta=meta, with_path=with_path),
         turn=turn, fmt=fmt, filename=f"member-set-{ms.spec_hash[:12]}" + ("-edges" if part == "edges" else ""))

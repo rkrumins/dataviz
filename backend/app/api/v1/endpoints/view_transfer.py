@@ -96,6 +96,8 @@ class ExportViewRef(BaseModel):
 class ExportRequest(BaseModel):
     views: List[ExportViewRef] = Field(..., min_length=1, max_length=limits.MAX_VIEWS_PER_BUNDLE)
     message: Optional[str] = Field(None, max_length=500)
+    #: Each entity of the manifest says where it sits (``common.ancestry_columns``): informational.
+    withPath: bool = False
 
 
 @router.post("/export", dependencies=[Depends(require_feature("viewExportEnabled"))])
@@ -110,7 +112,8 @@ async def export_view_file(
     Each view exports as a real version: the one asked for, or its current design, sealed as a
     new version first if it has unsaved changes and the caller may edit it (anyone else gets its
     latest version). Every view needs read access; one the caller can't read fails the whole
-    export with the same 404 a direct read would give.
+    export with the same 404 a direct read would give. ``withPath``: the manifest also says where
+    each entity sits there, which no import reads.
     """
     seen = set()
     requests = []
@@ -122,7 +125,8 @@ async def export_view_file(
         requests.append((view, ref.version, await may_edit_view(session, view, user, claims)))
 
     try:
-        bundle, sealed = await export_views(session, requests, actor=_actor(user), message=req.message)
+        bundle, sealed = await export_views(session, requests, actor=_actor(user), message=req.message,
+                                            with_path=req.withPath)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -161,6 +165,9 @@ class PackageRequest(BaseModel):
     message: Optional[str] = Field(None, max_length=500)
     #: Makes the request safe to send again: the same id answers with the job it started.
     requestId: Optional[str] = Field(None, min_length=8, max_length=128)
+    #: Each entity of the data, and of the views' manifest, says where it sits
+    #: (``common.ancestry_columns``): informational.
+    withPath: bool = False
 
 
 class ExportPreviewRequest(BaseModel):
@@ -202,7 +209,8 @@ async def export_view_package(
     at; an export job builds the package off the request — the views' file, then the data streamed
     into it (the view's own entities, as its sealed version places them, or the whole source). Poll
     and download it through the data source's export endpoints; the download is named for it.
-    Sending the same ``requestId`` again answers with the job it started.
+    Sending the same ``requestId`` again answers with the job it started. ``withPath``: its data
+    and the views' manifest also say where each entity sits, which no import reads.
     """
     if req.scope == "view" and len(req.views) != 1:
         raise HTTPException(status_code=422, detail=(
@@ -264,8 +272,9 @@ async def export_view_package(
     else:
         filename = f"{len(sealed)}-views.view-package.zip"
     views = [{"viewId": item.row.id, "version": item.version.version} for item in sealed]
-    # The package's data says where each entity sits, up the containment the ontology has now.
-    containment = await _live_containment_map(session, workspace_id, ds_id)
+    # Asked for, the package's data says where each entity sits, up the containment the ontology
+    # has now.
+    containment = await _live_containment_map(session, workspace_id, ds_id) if req.withPath else None
     # The job reads these versions from another process, so they are committed before it exists.
     await session.commit()
 
@@ -277,7 +286,7 @@ async def export_view_package(
                 branch_id=branch_id, provider_id=graph.get("provider_id"),
                 as_of_seq=None if branch_id else graph.get("main_head_commit_seq"), idempotency_key=key,
                 package={"fileName": filename, "scope": req.scope, "dataVersion": req.dataVersion,
-                         "views": views, "actor": actor},
+                         "views": views, "actor": actor, "withPath": req.withPath},
                 with_path=containment,
             )
     except IntegrityError:                  # the same requestId, sent twice at once

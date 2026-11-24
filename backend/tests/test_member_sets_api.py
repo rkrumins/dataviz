@@ -47,6 +47,11 @@ class FormulaNames(ScopedEngine):
                 for u in query.urns if u in self.all]
 
 
+class NoChains(ScopedEngine):
+    async def get_ancestor_chains(self, urns):
+        raise AssertionError("asked without where each member sits: no chain is read")
+
+
 class NoWalk(ScopedEngine):
     async def trace_closure(self, req):
         raise NotImplementedError("provider does not support trace_closure")
@@ -184,6 +189,21 @@ async def test_where_a_member_sits_is_blank_when_the_graph_cannot_say(client):
     table = rows((await client.get(f"{BASE}/{body['setId']}/download",
                                    params={"token": body["downloadToken"]})).text)
     assert table[1][9:] == ["", "", "", "", ""]
+
+
+async def test_a_download_asked_without_where_each_sits_leaves_it_out(client):
+    """``withPath=false``: no parent or path columns in any format, and no containment read;
+    every other column as it always is."""
+    body = (await resolve(client, LINEAGE)).json()
+    client.state.engine = NoChains()
+    url, params = f"{BASE}/{body['setId']}/download", {"token": body["downloadToken"], "withPath": "false"}
+    table = rows((await client.get(url, params=params)).text)
+    assert table[0] == ["urn", "name", "type", "qualifiedName", "via", "hops", "hopsUp", "hopsDown", "nearestSeed"]
+    assert table[1] == ["col_a1", "col_a1", "thing", "", "seed", "", "0", "", "col_a1"]
+    line = json.loads((await client.get(url, params={**params, "format": "ndjson"})).text.splitlines()[0])
+    assert list(line) == table[0]
+    doc = (await client.get(url, params={**params, "format": "json"})).json()
+    assert [list(n) for n in doc["nodes"]] == [table[0]] * 4
 
 
 async def test_edges_are_their_own_part(client):
