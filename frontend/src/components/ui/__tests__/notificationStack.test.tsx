@@ -221,3 +221,25 @@ describe('a notification may offer two ways on', () => {
     expect(useNotificationStore.getState().notifications).toEqual([])
   })
 })
+
+describe('a paused loading notification waits on the reader', () => {
+  // A run at a checkpoint: Load 2,000 more, Load everything, or Stop here.
+  it('is not busy, says what its choices rest on, offers three, and may be closed', () => {
+    const more = vi.fn()
+    useNotificationStore.getState().add({
+      type: 'loading', paused: true, key: 'run', message: 'Paused opening “Warehouse” · 2,032 loaded so far',
+      detail: '312 containers still to open at level 4',
+      action: { label: 'Load 2,000 more', onClick: more },
+      secondaryAction: { label: 'Load everything', onClick: () => {} },
+      tertiaryAction: { label: 'Stop here', onClick: () => {} },
+    })
+    render(<NotificationStack />)
+    const card = screen.getByText('312 containers still to open at level 4').closest('.w-96') as HTMLElement
+    expect(card.querySelector('.animate-spin')).toBeNull()
+    expect(card.querySelector('[style*="toast-indeterminate"]')).toBeNull()
+    expect(screen.getAllByRole('button').map(b => b.textContent || b.getAttribute('aria-label')))
+      .toEqual(['Dismiss', 'Load 2,000 more', 'Load everything', 'Stop here'])
+    act(() => { screen.getByRole('button', { name: 'Load 2,000 more' }).click() })
+    expect(more).toHaveBeenCalled()
+  })
+})
