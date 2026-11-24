@@ -21,6 +21,7 @@ tests/integration/test_bootstrap_job.py
 tests/integration/test_change_sets.py
 tests/integration/test_change_summaries.py
 tests/integration/test_change_tree.py
+tests/integration/test_children_batch_live.py
 tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
 tests/integration/test_commit_provenance.py

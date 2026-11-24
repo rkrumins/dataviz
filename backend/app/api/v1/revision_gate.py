@@ -44,6 +44,7 @@ REVISION_READS = frozenset({
     (_GRAPH, "get_top_level_nodes"),
     (_GRAPH, "get_node_children"),
     (_GRAPH, "get_children_with_edges"),
+    (_GRAPH, "get_children_batch"),
     (_GRAPH, "get_node_ancestors"),
     (_GRAPH, "get_node_ancestor_chains"),
     (_GRAPH, "get_node_degrees"),

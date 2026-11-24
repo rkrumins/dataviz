@@ -26,6 +26,7 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
+    ChildrenBatchParent, ChildrenBatchResult,
     EdgesBeneathRequest, EdgesBeneathResult, TraceClosureRequest, TraceClosureResult,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
@@ -1251,8 +1252,9 @@ def label_failover(response: Response, target, seen: dict) -> None:
         response.headers["X-Provider-Failing-Over"] = seen["endpoint"]
 
 
-async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
-    """Charge one token against the workspace's per-endpoint bucket.
+async def _enforce_fair_share(engine: ContextEngine, endpoint: str, cost: int = 1) -> None:
+    """Charge ``cost`` tokens (a batch: one per item) against the workspace's
+    per-endpoint bucket.
 
     Raises :class:`ProviderBusy` (mapped to 429+Retry-After in main.py)
     when the bucket is empty. No-op when the fair-share feature flag is
@@ -1263,7 +1265,7 @@ async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
     ws = getattr(engine, "_workspace_id", None)
     if not ws:
         return
-    await bucket.enforce(endpoint, ws)
+    await bucket.enforce(endpoint, ws, cost=cost)
 
 
 async def _resolve_data_source_id(
@@ -1974,29 +1976,187 @@ async def get_children_with_edges(
         return await get_graph_cache().get_or_compute(
             scope=scope,
             endpoint=ENDPOINT_CHILDREN,
-            params={
-                "urn": urn,
-                "edgeTypes": sorted(edge_types) if edge_types else None,
-                "lineageEdgeTypes": sorted(lineage_edge_types) if lineage_edge_types else None,
-                "searchQuery": search_query,
-                "sortProperty": sort_property,
-                "limit": limit,
-                "offset": offset,
-                "cursor": cursor,
-                "includeLineageEdges": include_lineage_edges,
-                "sortDirection": sort_direction,
-                # A cached page-scope answer must never be served to a
-                # siblings-scope request (it would drop edges) — so a widened
-                # scope is part of the key. Only when widened: every existing
-                # key stays byte-identical, so a deploy doesn't cold-miss the
-                # whole children cache at once.
-                **({"lineageScope": lineage_scope} if lineage_scope != "page" else {}),
-            },
+            params=_children_cache_params(
+                urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+                search_query=search_query, sort_property=sort_property, limit=limit,
+                offset=offset, cursor=cursor, include_lineage_edges=include_lineage_edges,
+                sort_direction=sort_direction, lineage_scope=lineage_scope,
+            ),
             compute=_bounded_compute(engine, compute),
             model_cls=ChildrenWithEdgesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
             expected_compute_s=_compute_budget(ENDPOINT_CHILDREN),
         )
+    except CursorMismatchError as exc:
+        # Cursor/direction mismatch from the provider (client bug) — 400, not 500.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _children_cache_params(
+    urn: str, *, edge_types: Optional[List[str]], lineage_edge_types: Optional[List[str]],
+    search_query: Optional[str], sort_property: Optional[str], limit: int, offset: int,
+    cursor: Optional[str], include_lineage_edges: bool, sort_direction: str, lineage_scope: str,
+) -> Dict[str, Any]:
+    """One parent's page's response-cache key, the same from /children-with-edges and
+    /children-batch: a page read either way is cached for both."""
+    return {
+        "urn": urn,
+        "edgeTypes": sorted(edge_types) if edge_types else None,
+        "lineageEdgeTypes": sorted(lineage_edge_types) if lineage_edge_types else None,
+        "searchQuery": search_query,
+        "sortProperty": sort_property,
+        "limit": limit,
+        "offset": offset,
+        "cursor": cursor,
+        "includeLineageEdges": include_lineage_edges,
+        "sortDirection": sort_direction,
+        # A cached page-scope answer must never be served to a
+        # siblings-scope request (it would drop edges) — so a widened
+        # scope is part of the key. Only when widened: every existing
+        # key stays byte-identical, so a deploy doesn't cold-miss the
+        # whole children cache at once.
+        **({"lineageScope": lineage_scope} if lineage_scope != "page" else {}),
+    }
+
+
+#: Parents one /children-batch request may name, and rows per parent.
+CHILDREN_BATCH_MAX_PARENTS = 50
+CHILDREN_BATCH_MAX_LIMIT = 200
+
+
+class _ChildrenBatchRequest(BaseModel):
+    """Body for /nodes/children-batch: the /children-with-edges query, for many parents."""
+    parents: List[ChildrenBatchParent] = Field(..., min_length=1, max_length=CHILDREN_BATCH_MAX_PARENTS)
+    limit: int = Field(100, ge=1, le=CHILDREN_BATCH_MAX_LIMIT)
+    sort_direction: str = Field("asc", alias="sortDirection", pattern="^(asc|desc)$")
+    include_lineage_edges: bool = Field(True, alias="includeLineageEdges")
+    lineage_scope: str = Field("page", alias="lineageScope", pattern="^(page|siblings)$")
+    edge_types: Optional[List[str]] = Field(None, alias="edgeTypes")
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+
+    class Config:
+        populate_by_name = True
+
+
+@router.post("/nodes/children-batch", response_model=ChildrenBatchResult, response_model_by_alias=True)
+async def get_children_batch(
+    response: Response,
+    body: _ChildrenBatchRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> ChildrenBatchResult:
+    """/children-with-edges for up to 50 parents in one round trip: ``{results: {urn:
+    page}}``, each page exactly what that endpoint answers for its parent. Opening a
+    level of a hundred small containers was a hundred requests, each its own queue
+    slot, provider call and render.
+
+    Not a way past the limits: the workspace's fair share is charged per parent, so
+    a batch costs what its parents would one by one. Each parent goes through the
+    response cache under the key /children-with-edges uses; those it cannot answer
+    are read together in ONE provider call (one statement on FalkorDB), under the
+    same per-query timeout, once every parent has been answered or asked for. A
+    parent that is unknown, or that this reader cannot see, answers an empty page,
+    never an error."""
+    import asyncio
+
+    firsts: Dict[str, ChildrenBatchParent] = {}
+    for p in body.parents:
+        firsts.setdefault(p.urn, p)
+    parents = list(firsts.values())
+    await _enforce_fair_share(engine, ENDPOINT_CHILDREN, cost=len(parents))
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+    kw = dict(
+        edge_types=body.edge_types, lineage_edge_types=body.lineage_edge_types,
+        limit=body.limit, include_lineage_edges=body.include_lineage_edges,
+        sort_direction=body.sort_direction, lineage_scope=body.lineage_scope,
+    )
+
+    def empty(p: ChildrenBatchParent) -> ChildrenWithEdgesResult:
+        return ChildrenWithEdgesResult(
+            children=[], containmentEdges=[], lineageEdges=[],
+            totalChildren=0, hasMore=False, nextOffset=p.offset,
+        )
+
+    async def read(asked: List[ChildrenBatchParent]) -> Dict[str, ChildrenWithEdgesResult]:
+        async def compute():
+            return await engine.get_children_batch(asked, **kw)
+        found = await _bounded_compute(engine, compute)()
+        return {p.urn: found.get(p.urn) or empty(p) for p in asked}
+
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return ChildrenBatchResult(results=await read(parents))
+
+        # Every parent asks the cache; the misses wait here, and are read together
+        # once no parent is still being answered.
+        loop = asyncio.get_running_loop()
+        missed: Dict[str, asyncio.Future] = {}
+        unsettled = len(parents)
+        reading: List[asyncio.Task] = []
+        over = False
+
+        async def read_missed() -> None:
+            asked = [p for p in parents if p.urn in missed]
+            try:
+                pages = await read(asked)
+            except asyncio.CancelledError:
+                for f in missed.values():
+                    f.cancel()
+                raise
+            except Exception as exc:
+                # Each parent's cache read takes it from here: its last good
+                # answer, or the error.
+                for f in missed.values():
+                    if not f.done():
+                        f.set_exception(exc)
+                return
+            for p in asked:
+                missed[p.urn].set_result(pages[p.urn])
+
+        def settled() -> None:
+            nonlocal unsettled
+            unsettled -= 1
+            if unsettled == 0 and missed and not over:
+                reading.append(asyncio.ensure_future(read_missed()))
+
+        async def one(p: ChildrenBatchParent):
+            asked = False
+
+            async def compute() -> ChildrenWithEdgesResult:
+                nonlocal asked
+                asked = True
+                missed[p.urn] = loop.create_future()
+                settled()
+                return await missed[p.urn]
+
+            try:
+                return p.urn, await get_graph_cache().get_or_compute(
+                    scope=scope,
+                    endpoint=ENDPOINT_CHILDREN,
+                    params=_children_cache_params(
+                        p.urn, edge_types=body.edge_types, lineage_edge_types=body.lineage_edge_types,
+                        search_query=None, sort_property="displayName", limit=body.limit,
+                        offset=p.offset, cursor=p.cursor, include_lineage_edges=body.include_lineage_edges,
+                        sort_direction=body.sort_direction, lineage_scope=body.lineage_scope,
+                    ),
+                    compute=compute,
+                    model_cls=ChildrenWithEdgesResult,
+                    on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+                    expected_compute_s=_compute_budget(ENDPOINT_CHILDREN),
+                )
+            finally:
+                if not asked:
+                    settled()
+
+        tasks = [asyncio.ensure_future(one(p)) for p in parents]
+        try:
+            return ChildrenBatchResult(results=dict(await asyncio.gather(*tasks)))
+        finally:
+            # A parent that failed (a shed, a bad cursor) fails the batch: stop the
+            # rest, and start no read for them.
+            over = True
+            for t in tasks + reading:
+                t.cancel()
     except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug) — 400, not 500.
         raise HTTPException(status_code=400, detail=str(exc))

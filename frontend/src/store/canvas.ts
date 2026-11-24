@@ -131,6 +131,14 @@ export interface ChildPageState {
   childCount: number
 }
 
+/** One child page to land with `addChildPages`. */
+export interface ChildPageLanding {
+  parentId: string
+  page: ChildPageState
+  nodes: LineageNode[]
+  edges: LineageEdge[]
+}
+
 /**
  * Where one feed of entities-by-type stands: the entity types it queries, where
  * its next page starts and whether there is one — as the server said (see
@@ -190,9 +198,12 @@ interface CanvasState {
    *  scroll/expand). Cleared by setGraph. Never persisted. */
   childPaging: Record<string, ChildPageState>
   setChildPage: (parentId: string, page: ChildPageState) => void
-  /** Land one child page — its nodes, its edges AND the pager's new position —
-   *  as ONE store update, so a page costs one render, not two. */
-  addChildPage: (parentId: string, page: ChildPageState, nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Land child pages — their nodes, their edges AND each pager's new position —
+   *  as ONE store update: every update re-renders the whole canvas, so pages that
+   *  land together cost one render, not one each. A pager another reader has
+   *  already taken further (same order, same count) keeps its position; the
+   *  page's rows still land. `edges` beside them land in the same update. */
+  addChildPages: (pages: readonly ChildPageLanding[], edges?: readonly LineageEdge[]) => void
   /** Entity feeds by key (a type id in an open Context View; '__roots__' /
    *  '__orphans__' in the Hierarchy and Graph views). Cleared by setGraph.
    *  Never persisted. */
@@ -685,10 +696,19 @@ export const useCanvasStore = create<CanvasState>()(
       setChildPage: (parentId, page) => set((state) => ({
         childPaging: { ...state.childPaging, [parentId]: page },
       })),
-      addChildPage: (parentId, page, newNodes, newEdges) => set((state) => ({
-        ...(mergeGraph(state, newNodes, newEdges) ?? {}),
-        childPaging: { ...state.childPaging, [parentId]: page },
-      })),
+      addChildPages: (pages, extraEdges = []) => set((state) => {
+        const childPaging = { ...state.childPaging }
+        for (const { parentId, page } of pages) {
+          const cur = childPaging[parentId]
+          const further = !!cur && cur.direction === page.direction && cur.childCount === page.childCount
+            && cur.offset > page.offset
+          if (!further) childPaging[parentId] = page
+        }
+        return {
+          ...(mergeGraph(state, pages.flatMap((p) => p.nodes), [...pages.flatMap((p) => p.edges), ...extraEdges]) ?? {}),
+          childPaging,
+        }
+      }),
       typeFeeds: {},
       setTypeFeed: (feedKey, feed) => set((state) => ({
         typeFeeds: { ...state.typeFeeds, [feedKey]: feed },

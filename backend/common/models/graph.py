@@ -456,6 +456,22 @@ class ChildrenWithEdgesResult(BaseModel):
         populate_by_name = True
 
 
+class ChildrenBatchParent(BaseModel):
+    """One parent in a children batch, and where its page starts: ``offset``, or a
+    ``cursor`` from that parent's previous page (it takes precedence, as on
+    ``/children-with-edges``)."""
+    urn: str
+    offset: int = Field(0, ge=0)
+    cursor: Optional[str] = None
+
+
+class ChildrenBatchResult(BaseModel):
+    """A page of children per parent, each exactly what ``/children-with-edges``
+    answers for it: a parent that is unknown, or not visible here, has an empty
+    page."""
+    results: Dict[str, ChildrenWithEdgesResult]
+
+
 class NodePage(BaseModel):
     """One page of a node query, with where the next page starts (see
     ChildrenWithEdgesResult.next_offset) and whether there is one."""

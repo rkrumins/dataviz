@@ -200,6 +200,8 @@ class WorkspaceTokenBucket:
         cfg = _CONFIGS.get(endpoint)
         if cfg is None:
             return TakeResult(True, 0)
+        # Never more than a full bucket, or the request could never be admitted.
+        cost = min(cost, cfg.burst)
         if not workspace_id:
             # Unscoped requests bypass — `/api/v1` legacy routes that
             # carry no workspace context. The fair-share guard only
@@ -228,11 +230,11 @@ class WorkspaceTokenBucket:
         retry_s = max(1, math.ceil(retry_ms / 1000)) if not allowed_int else 0
         return TakeResult(allowed=bool(allowed_int), retry_after_seconds=retry_s)
 
-    async def enforce(self, endpoint: str, workspace_id: str) -> None:
-        """Take a token; raise :class:`ProviderBusy` on deny so the
+    async def enforce(self, endpoint: str, workspace_id: str, cost: int = 1) -> None:
+        """Take ``cost`` tokens; raise :class:`ProviderBusy` on deny so the
         existing 429+Retry-After handler in ``main.py`` returns a
         properly-formed response."""
-        outcome = await self.take(endpoint, workspace_id)
+        outcome = await self.take(endpoint, workspace_id, cost=cost)
         if outcome.allowed:
             return
         raise ProviderBusy(

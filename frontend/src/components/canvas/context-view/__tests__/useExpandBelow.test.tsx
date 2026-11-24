@@ -26,12 +26,13 @@ const parentsOf = (tree: Tree) => {
 }
 
 /** A canvas in miniature: what is open, what is loaded, what is on its way. */
-function useFakeCanvas(tree: Tree, opts: { hold?: boolean; weight?: number; firstPageSize?: number } = {}) {
+function useFakeCanvas(tree: Tree, opts: { hold?: boolean; weight?: number; firstPageSize?: number; batched?: boolean } = {}) {
   const parents = parentsOf(tree)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [loaded, setLoaded] = useState<Record<string, string[]>>({})
   const [loading, setLoading] = useState<ReadonlySet<string>>(new Set())
   const asked = useRef<string[]>([])
+  const batches = useRef<string[][]>([])
   const cancelled = useRef<string[]>([])
   const deps: ExpandBelowDeps = {
     expanded,
@@ -48,6 +49,17 @@ function useFakeCanvas(tree: Tree, opts: { hold?: boolean; weight?: number; firs
         setLoading((prev) => { const next = new Set(prev); next.delete(id); return next })
       })
     },
+    // A loader that lands a whole level's first pages together.
+    ...(opts.batched ? {
+      loadFirstPages: (ids: readonly string[]) => {
+        batches.current.push([...ids])
+        setLoading((prev) => new Set([...prev, ...ids]))
+        return Promise.resolve().then(() => {
+          setLoaded((prev) => ({ ...prev, ...Object.fromEntries(ids.map((id) => [id, tree[id] ?? []])) }))
+          setLoading((prev) => new Set([...prev].filter((id) => !ids.includes(id))))
+        })
+      },
+    } : {}),
     cancelLoad: (id) => { cancelled.current.push(id) },
     loading,
     // Each loaded entity counts `weight` — enough to reach a checkpoint with a small tree.
@@ -56,7 +68,7 @@ function useFakeCanvas(tree: Tree, opts: { hold?: boolean; weight?: number; firs
     labelOf: (id) => id,
   }
   const api = useExpandBelow(deps)
-  return { api, expanded, asked, cancelled }
+  return { api, expanded, asked, batches, cancelled }
 }
 
 const toasts = () => useNotificationStore.getState().notifications
@@ -169,6 +181,17 @@ describe('useExpandBelow', () => {
     expect(result.current.cancelled.current).toEqual(['R'])
     expect([...result.current.expanded]).toEqual(['R'])
     expect(lastToast()).toMatchObject({ type: 'info', message: 'Stopped opening “R”' })
+  })
+
+  it('asks a loader that batches for a whole level at once, and only for what is not loaded', async () => {
+    const { result } = renderHook(() => useFakeCanvas(TREE, { batched: true }))
+    act(() => result.current.api.expand(['R'], true))
+    await waitFor(() => expect(result.current.api.running).toBe(false))
+    expect([...result.current.expanded].sort()).toEqual(['A', 'B', 'R', 'a1'])
+    // One call per level, never one per container.
+    expect(result.current.batches.current).toEqual([['R'], ['A', 'B'], ['a1']])
+    expect(result.current.asked.current).toEqual([])
+    expect(lastToast()).toMatchObject({ type: 'success', message: 'Opened everything inside “R” · 6 loaded' })
   })
 
   it(`stops at ${MAX_EXPAND_DEPTH} levels, whatever the graph says`, async () => {

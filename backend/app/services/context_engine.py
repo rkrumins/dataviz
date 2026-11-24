@@ -13,8 +13,9 @@ from ..models.graph import (
 )
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
-    TraceClosureRequest, TraceClosureResult, EdgesBeneathResult,
+    TraceClosureRequest, TraceClosureResult, EdgesBeneathResult, ChildrenBatchParent,
 )
+from backend.common.interfaces.provider import children_batch_by_query
 
 from ..providers.base import GraphDataProvider
 from .settings import signals
@@ -1054,6 +1055,30 @@ class ContextEngine:
             sort_direction=sort_direction,
             **scope_kw,
         )
+
+    async def get_children_batch(
+        self, parents: List[ChildrenBatchParent], edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        limit: int = 100,
+        include_lineage_edges: bool = True,
+        sort_direction: str = "asc",
+        lineage_scope: str = "page",
+    ) -> Dict[str, ChildrenWithEdgesResult]:
+        """``get_children_with_edges`` for many parents at once, resolved the same way."""
+        edge_types = await self._ensure_containment_edge_types(edge_types)
+        if not lineage_edge_types:
+            resolved = await self._resolve_ontology()
+            if resolved and resolved.lineage_edge_types:
+                lineage_edge_types = list(resolved.lineage_edge_types)
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
+        kw = dict(edge_types=edge_types, lineage_edge_types=lineage_edge_types, limit=limit,
+                  include_lineage_edges=include_lineage_edges, sort_direction=sort_direction, **scope_kw)
+        batch = getattr(self.provider, "get_children_batch", None)
+        if batch is None:
+            # A reader that is not a GraphDataProvider (a draft overlay, a versioned
+            # branch) reads each parent through its own single read.
+            return await children_batch_by_query(self.provider, parents, **kw)
+        return await batch(parents, **kw)
 
     async def get_top_level_or_orphan_nodes(
         self,
