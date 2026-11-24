@@ -7665,6 +7665,9 @@ export function ContextViewCanvas({
               focusLabel={tracedLabel ?? undefined}
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
+              // An entity only the walk holds opens too: the drawer resolves
+              // it through `resolveTraceNode`.
+              onOpenDetails={(ref) => useCanvasStore.getState().openNodeDrawer(urnToIdMap.get(ref) ?? ref)}
               outsideView={overlay.view?.outsideView ?? 0}
               keep={traceKeepActions}
               sinceSaved={sinceSaved}
@@ -8051,15 +8054,16 @@ export function ContextViewCanvas({
             it to the trace on screen — and read it (Details) or export it, which only read, so the
             trace's write lock doesn't apply. Only once the reader selects something other than
             what is traced: the selection a trace starts from is the trace's own, and the dock
-            already reads it. The same actions lead a trace card's context menu. */}
-        {traceActive && bulkSelection.length > 0 && !selectionIsTraced(bulkSelection) && (
+            already reads it — but for Details, where a click doesn't open them (the dock's focus
+            chip offers them too). The same actions lead a trace card's context menu. */}
+        {traceActive && bulkSelection.length > 0 && (!selectionIsTraced(bulkSelection) || offerDetails) && (
           <SelectionBar
             nodeIds={bulkSelection}
             labelFor={(id) => displayMap.get(id)?.name
               || (traceNodeIndex?.get(id)?.data as { label?: string } | undefined)?.label || id}
             onRemove={(id) => selectNode(id, true)}
             onClear={clearSelection}
-            onTraceFrom={() => startCanvasTrace(bulkSelection)}
+            onTraceFrom={selectionIsTraced(bulkSelection) ? undefined : () => startCanvasTrace(bulkSelection)}
             onAddToTrace={selectionTraceAddition && selectionTraceAddition.urns.length > 0
               ? () => addTraceSeeds(selectionTraceAddition.urns)
               : undefined}
