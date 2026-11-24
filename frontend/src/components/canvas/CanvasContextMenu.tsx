@@ -55,8 +55,9 @@ export interface LayerMenuModel {
     /** The layer's settings — its essentials and its own properties; its
      *  details, read-only, outside a draft. */
     onOpenSettings?: () => void
-    /** The header's own actions, where the header keeps to the essentials (the
-     *  Business view's): add an entity, start a group, build many at once. */
+    /** The header's own actions — add an entity, start a group, build many at
+     *  once — for wherever its actions tray does not show them: the Business
+     *  view's, and a column too narrow for the tray's icons (its ⋯ opens this). */
     onAddEntity?: () => void
     onNewGroup?: () => void
     onBuild?: () => void
@@ -231,7 +232,7 @@ export function CanvasContextMenu({
         if (!isOpen) setSubmenu(null)
     }, [isOpen])
 
-    // Opened from a button (the Business layer header's ⋯), not a right-click:
+    // Opened from a button (a layer header's ⋯), not a right-click:
     // the keyboard follows into the menu, and back to the button when it closes,
     // unless what was chosen took the focus somewhere of its own.
     useEffect(() => {

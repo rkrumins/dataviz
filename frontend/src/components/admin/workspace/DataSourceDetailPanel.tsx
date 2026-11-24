@@ -4,6 +4,7 @@
  * Tabs: Insights · Aggregation · Views (· Questions · Activity · Versioning, by switch)
  */
 import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
@@ -17,15 +18,18 @@ import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/No
 import { cn } from '@/lib/utils'
 import { viewTypeLabel } from '@/lib/viewUtils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
-import type { View } from '@/services/viewApiService'
+import { listViews } from '@/services/viewApiService'
 
 /** Tab ids, in the order they appear. Hoisted so the URL parser and the
  *  buttons cannot drift apart. */
 const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'questions', 'activity', 'versioning'] as const
+/** The newest views the Views tab lists; the rest open in the Explorer. */
+const SOURCE_VIEWS_SHOWN = 20
 type DataSourceTab = (typeof DATA_SOURCE_TABS)[number]
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
@@ -72,7 +76,9 @@ interface DataSourceDetailPanelProps {
     providerInfo?: DataSourceProviderInfo
     ontologyName?: string
     ontologyId?: string
-    views: View[]
+    /** How many views are built on it, exactly; undefined while still counted,
+     *  null when the count could not be read. */
+    viewCount?: number | null
     /** Live aggregation readiness — drives the header pill so it agrees with
      *  the Overview's Aggregation card (the persisted ds.aggregationStatus can
      *  lag behind the live state). */
@@ -148,7 +154,7 @@ export function DataSourceDetailPanel({
     providerInfo,
     ontologyName,
     ontologyId,
-    views,
+    viewCount,
     readiness,
     ontologies,
     onSaveEdit,
@@ -194,6 +200,15 @@ export function DataSourceDetailPanel({
     const dsSubject = ds ? { type: 'data_source' as const, id: ds.id, name: ds.label || ds.graphName || ds.catalogItemId } : null
     const questions = useSubjectSummary(conversations ? dsSubject : null).data
     const openThreadId = activeTab === 'questions' ? searchParams.get('discussion') : null
+    // The Views tab lists this source's own latest views: the page's list is the
+    // workspace's newest, which holds only those of this source that happen to be
+    // among them. Under the page's key prefix, so its reload refreshes this too.
+    const sourceViews = useQuery({
+        queryKey: ['workspace-detail', wsId, 'source-views', ds?.id],
+        queryFn: () => listViews({ workspaceId: wsId, dataSourceId: ds!.id, limit: SOURCE_VIEWS_SHOWN }),
+        enabled: isOpen && !!ds && activeTab === 'views',
+        staleTime: 60_000,
+    })
     const [askOpen, setAskOpen] = useState(false)
     const showThread = (id: string | null) => {
         const merged = new URLSearchParams(searchParams)
@@ -437,7 +452,7 @@ export function DataSourceDetailPanel({
                             <DrawerTab value="insights" icon={BarChart3} label="Overview" />
                             <DrawerTab value="aggregation" icon={Settings2} label="Processing" />
                             <DrawerTab value="profiling" icon={LineChart} label="Trends" />
-                            <DrawerTab value="views" icon={Eye} label="Views" count={views.length} />
+                            <DrawerTab value="views" icon={Eye} label="Views" count={viewCount ?? undefined} />
                             {conversations && (
                                 <DrawerTab value="questions" icon={MessageCircleQuestion} label="Questions" count={questions?.open} />
                             )}
@@ -454,7 +469,9 @@ export function DataSourceDetailPanel({
                             {!editing && (
                                 <div className="mb-5 space-y-3 empty:hidden">
                                     <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} className="" />
-                                    <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />
+                                    {viewCount != null && (
+                                        <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={viewCount} />
+                                    )}
                                     <DataSourceLifecycle wsId={wsId} dataSourceId={ds.id} onChanged={onMovedAway} />
                                 </div>
                             )}
@@ -696,9 +713,22 @@ export function DataSourceDetailPanel({
                                         </Link>
                                     </div>
 
-                                    {views.length > 0 ? (
+                                    {sourceViews.isPending ? (
+                                        <div className="space-y-2" role="status" aria-label="Loading its views">
+                                            {Array.from({ length: 3 }, (_, i) => <Skeleton key={i} className="h-[54px] rounded-lg" />)}
+                                        </div>
+                                    ) : sourceViews.isError ? (
+                                        <div role="alert" className="flex items-center gap-2 p-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] text-xs text-ink-secondary">
+                                            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                            <span className="flex-1">Couldn’t load its views.</span>
+                                            <button type="button" onClick={() => void sourceViews.refetch()}
+                                                className="inline-flex items-center gap-1 font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                                                <RotateCcw className="w-3 h-3" /> Retry
+                                            </button>
+                                        </div>
+                                    ) : sourceViews.data.items.length > 0 ? (
                                         <div className="space-y-2">
-                                            {views.map(view => (
+                                            {sourceViews.data.items.map(view => (
                                                 <Link key={view.id} to={`/views/${view.id}`}
                                                     className="flex items-center justify-between gap-3 p-3 rounded-lg border border-glass-border hover:border-indigo-500/20 hover:bg-indigo-500/[0.02] transition-colors duration-150 group/view">
                                                     <div className="flex items-center gap-3 min-w-0">
@@ -716,6 +746,14 @@ export function DataSourceDetailPanel({
                                                     </div>
                                                 </Link>
                                             ))}
+                                            {/* Its newest few; the rest are a click away, never silently cut off. */}
+                                            {sourceViews.data.total > sourceViews.data.items.length && (
+                                                <Link to={`/explorer?workspace=${wsId}&dataSource=${ds.id}`}
+                                                    className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-xs text-ink-muted hover:text-indigo-600 hover:bg-indigo-500/[0.04] transition-colors">
+                                                    <span>Showing the latest {sourceViews.data.items.length} of {sourceViews.data.total.toLocaleString()}</span>
+                                                    <span className="inline-flex items-center gap-1 font-semibold">See all <ExternalLink className="w-3 h-3" /></span>
+                                                </Link>
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="py-8 text-center bg-black/[0.02] dark:bg-white/[0.02] rounded-xl border border-glass-border border-dashed">

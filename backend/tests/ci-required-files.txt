@@ -76,6 +76,7 @@ tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
 tests/test_change_index_unit.py
 tests/test_changeset_materialize.py
+tests/test_children_batch.py
 tests/test_ci_required_list.py
 tests/test_cleanup_graph_indices.py
 tests/test_concurrency_tuning_doc.py

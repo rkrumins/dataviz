@@ -47,7 +47,7 @@ function renderAt(url: string) {
     render(
         <QueryClientProvider client={qc}>
             <MemoryRouter initialEntries={[url]}>
-                <DataSourceDetailPanel ds={ds} wsId="ws1" isOpen views={[]} ontologies={[]}
+                <DataSourceDetailPanel ds={ds} wsId="ws1" isOpen viewCount={0} ontologies={[]}
                     onSaveEdit={vi.fn()} onReaggregate={vi.fn()} onPurge={vi.fn()} onSetPrimary={vi.fn()}
                     onSaveAggregationConfig={vi.fn()} onClose={vi.fn()} />
                 <Address />

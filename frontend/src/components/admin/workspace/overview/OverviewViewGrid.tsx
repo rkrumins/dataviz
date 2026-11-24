@@ -97,7 +97,7 @@ export function OverviewViewGrid({ wsId, views, layout = 'cards', meta }: {
     }), [views, favourite])
 
     const refresh = () => {
-        void queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', wsId] })
+        void queryClient.invalidateQueries({ queryKey: ['workspace-detail', wsId] })
         void queryClient.invalidateQueries({ queryKey: ['workspace-overview'] })
         invalidateOtherViewLists(queryClient)
     }

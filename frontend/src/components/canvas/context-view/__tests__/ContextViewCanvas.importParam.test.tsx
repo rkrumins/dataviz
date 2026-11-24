@@ -24,7 +24,7 @@ vi.mock('@/features/import-export/ImportDialog', () => ({
   ),
 }))
 
-import { act, fireEvent, screen } from '@testing-library/react'
+import { act, fireEvent, screen, within } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
@@ -71,7 +71,7 @@ describe('?import=1 on the canvas', () => {
 
   it('saves a pending layout edit before the dialog opens', async () => {
     const h = await openCanvas(true)
-    act(() => { fireEvent.click(screen.getAllByTitle('Rename layer')[0]) })
+    act(() => { fireEvent.click(within(screen.getAllByRole('group', { name: /: actions$/ })[0]).getByRole('button', { name: /^Rename / })) })
     const input = document.activeElement as HTMLInputElement
     act(() => {
       fireEvent.change(input, { target: { value: 'Renamed' } })

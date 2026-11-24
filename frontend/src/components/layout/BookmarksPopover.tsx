@@ -23,6 +23,7 @@ export function BookmarksPopover() {
 
   const {
     bookmarks,
+    bookmarkCount,
     bookmarkedIds,
     recentViews,
     isLoadingBookmarks,
@@ -56,7 +57,7 @@ export function BookmarksPopover() {
     setSearch('')
   }
 
-  const totalCount = bookmarks.length
+  const totalCount = bookmarkCount
 
   return (
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>

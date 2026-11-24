@@ -1,8 +1,9 @@
 /**
  * The layer header in a draft. The Business view keeps it to the layer itself
  * (fold, icon, name, count, sort) and puts adding, grouping, building and
- * deleting in the layer's menu, behind ⋯; the Technical view keeps them inline.
- * In either view a layer with properties says so, and its card lists them.
+ * deleting in the layer's menu, behind ⋯; the Technical view keeps them in the
+ * header's actions tray too. In either view a layer with properties says so,
+ * and its card lists them.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -75,9 +76,9 @@ describe('LayerColumn header', () => {
     expect(actions.onHeaderContextMenu).toHaveBeenCalledWith(expect.anything(), 'L1')
   })
 
-  it('in the Technical view, keeps every action inline', () => {
+  it('in the Technical view, keeps every action in the tray, beside the menu', () => {
     renderHeader()
-    expect(screen.queryByRole('button', { name: 'Data: layer actions' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Data: layer actions' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add entity to Data' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'New group in Data' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Build a lot at once in Data' })).toBeInTheDocument()
@@ -110,7 +111,8 @@ describe('LayerColumn header', () => {
   it('says a layer has properties, and its card lists them', async () => {
     renderHeader()
     const badge = screen.getByRole('img', { name: '2 properties' })
-    fireEvent.mouseEnter(badge.closest('h3')!.parentElement!)
+    // The badge sits beside the name, in the title the card opens from.
+    fireEvent.mouseEnter(badge.closest('[class*="flex-1"]')!)
     const card = await screen.findByRole('tooltip')
     expect(card).toHaveTextContent('Owner')
     expect(card).toHaveTextContent('data-eng')

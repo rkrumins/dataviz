@@ -10,6 +10,7 @@ import { useNavigate } from 'react-router-dom'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useSchemaStore } from '@/store/schema'
 import { useBookmarkedViews } from '@/hooks/useBookmarkedViews'
+import { useWorkspaceViewCounts } from '@/features/ontology/hooks/useWorkspaceViewCounts'
 import { useRecentViews, type RecentViewEntry } from '@/hooks/useRecentViews'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
 import type { ViewConfiguration } from '@/types/schema'
@@ -28,6 +29,7 @@ export interface WorkspaceContext {
   views: ViewConfiguration[]
   activeView: ViewConfiguration | undefined
   activeViewId: string | null
+  /** Every view the reader can open: the Explorer's own total, from the server. */
   viewCount: number
 
   // All views (for cross-workspace search / counts)
@@ -35,7 +37,9 @@ export interface WorkspaceContext {
 
   // Quick access
   recentViews: RecentViewEntry[]
+  /** The newest of the reader's favourites; `bookmarkCount` is how many there are. */
   bookmarks: View[]
+  bookmarkCount: number
   bookmarkedIds: Set<string>
   isLoadingBookmarks: boolean
 
@@ -80,8 +84,12 @@ export function useWorkspaceContext(): WorkspaceContext {
     [allViews, activeViewId]
   )
 
+  // The Explore badge. Not `views.length`: the store holds the newest page of views
+  // (and whatever else was opened), so counting it stopped at that page's size.
+  const viewCount = useWorkspaceViewCounts().counts.total
+
   // ── Bookmarks & Recent ──────────────────────────────────
-  const { bookmarks, isLoading: isLoadingBookmarks, toggleBookmark } = useBookmarkedViews()
+  const { bookmarks, total: bookmarkCount, isLoading: isLoadingBookmarks, toggleBookmark } = useBookmarkedViews()
   const { recent: recentViews, recordVisit } = useRecentViews()
 
   const bookmarkedIds = useMemo(
@@ -111,10 +119,11 @@ export function useWorkspaceContext(): WorkspaceContext {
     views,
     activeView,
     activeViewId,
-    viewCount: views.length,
+    viewCount,
     allViews,
     recentViews,
     bookmarks,
+    bookmarkCount,
     bookmarkedIds,
     isLoadingBookmarks,
     openView,

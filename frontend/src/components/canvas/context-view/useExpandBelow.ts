@@ -1,13 +1,14 @@
 /**
  * useExpandBelow — open what is inside an entity (or a selection) one nested
- * level at a time, or every level, without a new endpoint and without a
- * scheduler of its own.
+ * level at a time, or every level, without a scheduler of its own.
  *
  * DELIBERATELY SMALL. A level is the containers not yet open at the shallowest
  * depth beneath the roots; opening it is ONE expansion update, and each of
  * those containers' first page comes through the loader the canvas already
  * has (`loadChildren`: its 6-slot queue, its merging of duplicate requests,
- * its Retry-After). Later pages arrive through the column's Load more row as
+ * its Retry-After), or — given `loadFirstPages` — the whole level's together,
+ * as few requests and canvas updates as that loader can make of them. Later
+ * pages arrive through the column's Load more row as
  * the reader scrolls to them — so however many containers a level holds,
  * nothing off screen is drained early. "All levels" is the same step again
  * once a level's first pages have landed, until no containers are left — with
@@ -90,6 +91,10 @@ export interface ExpandBelowDeps extends ExpandTree {
   /** Fetch a container's first page; settles when it has landed. Called only
    *  for containers with nothing loaded. Absent in a trace: nothing to fetch. */
   loadFirstPage?: (id: string) => Promise<unknown>
+  /** Fetch a whole level's first pages together, in as few requests as the
+   *  loader can; settles when all have landed. Used in place of
+   *  `loadFirstPage` when given. */
+  loadFirstPages?: (ids: readonly string[]) => Promise<unknown>
   /** Stop a page still on its way. */
   cancelLoad?: (id: string) => void
   /** Pages still on their way, by container — a level has landed once none
@@ -196,14 +201,15 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
     // One expansion update for the whole level (or batch); a first page only
     // where nothing is loaded yet.
     d.open(ids)
-    const toLoad = d.loadFirstPage ? ids.filter((id) => d.childrenOf(id).length === 0) : []
+    const toLoad = d.loadFirstPage || d.loadFirstPages ? ids.filter((id) => d.childrenOf(id).length === 0) : []
     run.wave = toLoad
     const containers = ids.length < level.ids.length
       ? `${ids.length.toLocaleString()} of ${level.ids.length.toLocaleString()} containers`
       : `${ids.length.toLocaleString()} ${ids.length === 1 ? 'container' : 'containers'}`
     toast(run, `Opening ${run.subject} · level ${(level.depth + 1).toLocaleString()} · ${containers}${loadedSoFar(d, run)}`,
       { label: 'Cancel', onClick: cancel })
-    void Promise.allSettled(toLoad.map((id) => d.loadFirstPage!(id))).then(() => {
+    const landing = d.loadFirstPages ? [d.loadFirstPages(toLoad)] : toLoad.map((id) => d.loadFirstPage!(id))
+    void Promise.allSettled(landing).then(() => {
       if (runRef.current !== run) return
       run.settled = true
       setTick((t) => t + 1)
@@ -274,5 +280,9 @@ export function useExpandBelow(deps: ExpandBelowDeps) {
     step(run)
   }, [cancel, step])
 
-  return { expand, cancel, running }
+  /** Whether a run is going, read at the moment it is asked (`running` is as of
+   *  the last render). */
+  const isRunning = useCallback(() => runRef.current !== null, [])
+
+  return { expand, cancel, running, isRunning }
 }

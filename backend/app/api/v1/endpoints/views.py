@@ -86,6 +86,7 @@ from backend.common.models.management import (
     ViewFacetsResponse,
     ViewCatalogStats,
     ViewCountResponse,
+    ViewScopeCountsResponse,
     ViewHistogramBucket,
     ViewHistogramResponse,
 )
@@ -580,6 +581,30 @@ async def count_views(
         readable=clause,
     )
     return ViewCountResponse(total=total)
+
+
+# Declared before ``/{view_id}``, like ``/count``.
+@router.get("/counts", response_model=ViewScopeCountsResponse)
+async def count_views_by_scope(
+    workspace_ids: Optional[List[str]] = Query(
+        None, alias="workspaceIds", description="Count only the views in these workspaces (repeatable).",
+    ),
+    data_source_ids: Optional[List[str]] = Query(
+        None, alias="dataSourceIds", description="Count only the views on these data sources (repeatable).",
+    ),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewScopeCountsResponse:
+    """How many views the caller can read — in all, per workspace and per data
+    source — for the "N views" pills, which counted a page of the list and so
+    stopped at its size. Counted as the Explorer counts, through the same read
+    rule, in one statement."""
+    clause, _scope = await _readable_clause(session, user, claims)
+    total, by_ws, by_ds = await view_repo.count_views_by_scope(
+        session, readable=clause, workspace_ids=workspace_ids, data_source_ids=data_source_ids,
+    )
+    return ViewScopeCountsResponse(total=total, byWorkspace=by_ws, byDataSource=by_ds)
 
 
 _HISTOGRAM_FIELDS = ("created", "updated")

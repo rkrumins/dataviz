@@ -34,7 +34,7 @@ import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
 import type { PlacedOut, PlacementInfo } from './placement'
 import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
-import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
+import { LayerSortMenu, SORT_MODE_ICONS, SORT_MODE_LABELS } from './LayerSortMenu'
 import { ValueView, humanizeKey } from '@/components/ui/ValueView'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -182,6 +182,9 @@ interface LayerColumnProps {
   /** Right-click on the header (folded or not): this layer's menu — insert a layer beside it,
    *  rename, colour, move, delete. Reachable from the Layer Strip too, so no scrolling is needed. */
   onHeaderContextMenu?: (e: React.MouseEvent, layerId: string) => void
+  /** This layer's menu is open (from its header's ⋯, a right-click, or its Layer Strip pill): the
+   *  header's actions tray stays out until it closes, rather than vanishing from under it. */
+  layerMenuOpen?: boolean
   /** Draft: insert a new layer just before this one — the "+" on the header's left edge, which
    *  sits in the gutter between this column and the one before it. */
   onInsertLayerBefore?: (layerId: string) => void
@@ -298,14 +301,32 @@ interface LayerColumnProps {
   onFoldChange?: (layerId: string, folded: boolean) => void
 }
 
-/** Where an open column's first row starts: below its header (measured
- *  74px in Chromium, the header's `py-3` around the title and the count).
- *  A folded layer's lines land at the heights its rows WOULD have, so a
- *  line does not jump when the layer folds or unfolds. */
-const FOLD_LIST_TOP_PX = 74
+/** An open column's title row, whatever its name: the tallest thing in it is a
+ *  name at its two lines (`text-sm leading-snug`, 38.5px), taller than the
+ *  36px icon. Every column's row is this height, so their headers' edges, and
+ *  the rows below them, line up. */
+const LAYER_HEADER_ROW_PX = 39
+/** That header: the row, its `py-3` and its bottom border. (A column drilled
+ *  into a node adds its breadcrumb under the row.) */
+const LAYER_HEADER_HEIGHT_PX = LAYER_HEADER_ROW_PX + 24 + 1
+
+/** Where an open column's first row starts: right below its header. A folded
+ *  layer's lines land at the heights its rows WOULD have, so a line does not
+ *  jump when the layer folds or unfolds. */
+const FOLD_LIST_TOP_PX = LAYER_HEADER_HEIGHT_PX
 
 /** A spine narrower than this drops to its compact type and padding. */
 const NARROW_SPINE_PX = 36
+
+/** One control in a header's actions tray: `p-1.5` round a 14px glyph, and the gap. */
+const TRAY_BUTTON_PX = 28
+/** The tray's leading edge, where its backing fades in over the name. */
+const TRAY_FADE_PX = 24
+/** How much of the name the tray must leave uncovered while it shows; what
+ *  does not fit beside that waits in the layer's menu (⋯). */
+const TITLE_PEEK_PX = 96
+/** The tray's own controls besides the sort and ⋯, most wanted first. */
+type TrayAction = 'add' | 'group' | 'build' | 'rename' | 'delete'
 
 const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
 
@@ -403,6 +424,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDeleteLayer,
   onReorderLayer,
   onHeaderContextMenu,
+  layerMenuOpen = false,
   onInsertLayerBefore,
   renameNonce = 0,
   newGroupNonce = 0,
@@ -1739,6 +1761,63 @@ export const LayerColumn = React.memo(function LayerColumn({
     return () => { geometryRegistry.delete(layer.id) }
   }, [geometryRegistry, layer.id, virtualizer])
 
+  // ── The header's actions tray ─────────────────────────────────────────────
+  // Its controls besides the sort and ⋯, most wanted first. The Business view
+  // keeps the header to the layer and its sort: adding, grouping, building and
+  // deleting wait in the layer's menu (⋯), with its settings.
+  const technical = personaMode === 'technical'
+  const trayOptional = [
+    technical && onAddToLayer && 'add',
+    technical && onCreateGroup && 'group',
+    technical && onBuildToLayer && 'build',
+    onRenameLayer && 'rename',
+    technical && onDeleteLayer && 'delete',
+  ].filter((a): a is TrayAction => !!a)
+  // How many controls the tray has room for: as many as leave the name
+  // TITLE_PEEK_PX of itself while they show. Measured off the title's own box,
+  // which is exactly the room the name has at rest — and as a count, not a
+  // width, so a column resize re-renders the column only when the tray changes
+  // shape, not on every frame of the drag. Room for all until measured: jsdom
+  // never measures, and a browser does before the tray is first seen.
+  const titleBoxRef = useRef<HTMLDivElement>(null)
+  const [traySlots, setTraySlots] = useState(Infinity)
+  useEffect(() => {
+    const el = titleBoxRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(([entry]) => {
+      setTraySlots(Math.floor((entry.contentRect.width - TITLE_PEEK_PX - TRAY_FADE_PX) / TRAY_BUTTON_PX))
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [isCollapsed])
+  // The sort and ⋯ always show; the rest fill the room left, and what does not
+  // fit waits in the layer's menu, which holds every one of them. With no menu
+  // to hold them, the tray shows them all.
+  const trayFixed = (onSetSortMode ? 1 : 0) + (onHeaderContextMenu ? 1 : 0)
+  const trayShown = onHeaderContextMenu ? trayOptional.slice(0, Math.max(0, traySlots - trayFixed)) : trayOptional
+  const trayHas = (action: TrayAction) => trayShown.includes(action)
+  const trayCount = trayFixed + trayShown.length
+  // How much of the name the tray covers while it shows, for the title's card.
+  const trayWidth = trayCount > 0 ? trayCount * TRAY_BUTTON_PX + TRAY_FADE_PX : 0
+  const [sortMenuOpen, setSortMenuOpen] = useState(false)
+  // A sort menu unmounted open (the column folds, a rename starts) never says it closed.
+  if (sortMenuOpen && (isCollapsed || isNamingGroup || isRenaming || !onSetSortMode)) setSortMenuOpen(false)
+  // It stays out while something it opened is still open: the layer's menu
+  // (from ⋯, a right-click or the Layer Strip), the sort menu, the delete confirm.
+  const trayPinned = layerMenuOpen || sortMenuOpen || (confirmingDelete && trayHas('delete'))
+  // A confirm nobody answers would hold the tray over the name: a click
+  // anywhere else keeps the layer, as Escape does.
+  const confirmRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!confirmingDelete) return
+    const away = (e: PointerEvent) => {
+      if (!confirmRef.current?.contains(e.target as Node)) setConfirmingDelete(false)
+    }
+    document.addEventListener('pointerdown', away, true)
+    return () => document.removeEventListener('pointerdown', away, true)
+  }, [confirmingDelete])
+  const OverrideSortIcon = SORT_MODE_ICONS[sortMode]
+
   return (
     <motion.div
       data-layer-id={layer.id}
@@ -1867,7 +1946,9 @@ export const LayerColumn = React.memo(function LayerColumn({
             onResizeLayer?.(layer.id, null)
           }}
           title={`${customWidth !== null ? 'Your personal width' : "This view's authored width"} (${effectiveWidth}px). Click to reset to the default — or double-click the drag handle on the column edge.`}
-          className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
+          // On the header's bottom edge.
+          style={{ top: LAYER_HEADER_HEIGHT_PX - 9 }}
+          className="absolute right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
           <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
           Reset width · {effectiveWidth}px
@@ -1879,11 +1960,12 @@ export const LayerColumn = React.memo(function LayerColumn({
           column, stretched (`flex-1`) to its siblings' height, and one
           button — anywhere on it unfolds the layer. */}
       <div
-        role={isCollapsed ? 'button' : undefined}
+        // Open, it is named for its layer — in full, whatever the clamp shows.
+        role={isCollapsed ? 'button' : 'group'}
         tabIndex={isCollapsed ? 0 : undefined}
         aria-label={isCollapsed
           ? `Unfold ${layer.name}${spineLinesSaid ? ` — ${spineLinesSaid}` : ''}`
-          : undefined}
+          : layer.name}
         title={isCollapsed ? `Unfold ${layer.name}` : undefined}
         onKeyDown={isCollapsed ? (e) => {
           if (e.key !== 'Enter' && e.key !== ' ') return
@@ -1891,7 +1973,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           requestFold(false)
         } : undefined}
         className={cn(
-          "sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
+          "group/header sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
           isCollapsed
             ? "flex-1 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/50"
             : "flex-shrink-0 px-4 py-3",
@@ -1987,10 +2069,13 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           </div>
         )}
-        <div className={cn(
-          "flex items-center",
-          isCollapsed ? "flex-col gap-2.5 h-full" : "gap-3"
-        )}>
+        <div
+          className={cn(
+            "flex items-center",
+            isCollapsed ? "flex-col gap-2.5 h-full" : "relative gap-3"
+          )}
+          style={isCollapsed ? undefined : { height: LAYER_HEADER_ROW_PX }}
+        >
           {/* Fold Toggle + Icon Container */}
           <div className="flex items-center gap-2">
             {!isCollapsed && onFoldChange && (
@@ -2109,238 +2194,308 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           ) : (
             <>
-              {isNamingGroup && onCreateGroup ? (
-                <input
-                  autoFocus
-                  value={draftGroupName}
-                  placeholder="New group name"
-                  aria-label={`Name the new group in ${layer.name}`}
-                  aria-invalid={headerNameTaken || undefined}
-                  title={headerNameTaken ? `There's already a group called “${draftGroupName.trim()}” in ${layer.name}` : undefined}
-                  onChange={(e) => setDraftGroupName(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => {
-                    e.stopPropagation()
-                    // A taken name is refused with a notice saying why; the field stays open to fix it.
-                    if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); if (!headerNameTaken) setIsNamingGroup(false) }
-                    if (e.key === 'Escape') setIsNamingGroup(false)
-                  }}
-                  onBlur={() => { if (draftGroupName.trim() && !headerNameTaken) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
-                  className={cn(
-                    "flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal",
-                    headerNameTaken ? "border-red-400" : "border-violet-400/60",
-                  )}
-                />
-              ) : isRenaming && onRenameLayer ? (
-                <input
-                  autoFocus
-                  value={draftName}
-                  onChange={(e) => setDraftName(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => {
-                    e.stopPropagation()
-                    if (e.key === 'Enter') { onRenameLayer(layer.id, draftName); setIsRenaming(false) }
-                    if (e.key === 'Escape') { setDraftName(layer.name); setIsRenaming(false) }
-                  }}
-                  onBlur={() => { onRenameLayer(layer.id, draftName); setIsRenaming(false) }}
-                  className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-accent-lineage/60 text-sm font-semibold text-ink outline-none"
-                />
-              ) : (
-                <div className="flex-1 min-w-0 flex items-center gap-1">
+              {/* The title: the name, up to two lines and then an ellipsis, and at the row's
+                  right end what must stay on screen at rest — the count and the order marks,
+                  compact so the name keeps the width. It used to share one shrinking row with
+                  the sort and every edit button, so a draft's name came down to "Transformat",
+                  or to nothing at all; the actions wait in the tray now. One row, one height:
+                  every column's header is the same, long name or short. */}
+              <div ref={titleBoxRef} className="flex-1 min-w-0 flex items-center gap-2">
+                {isNamingGroup && onCreateGroup ? (
+                  <input
+                    autoFocus
+                    value={draftGroupName}
+                    placeholder="New group name"
+                    aria-label={`Name the new group in ${layer.name}`}
+                    aria-invalid={headerNameTaken || undefined}
+                    title={headerNameTaken ? `There's already a group called “${draftGroupName.trim()}” in ${layer.name}` : undefined}
+                    onChange={(e) => setDraftGroupName(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      // A taken name is refused with a notice saying why; the field stays open to fix it.
+                      if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); if (!headerNameTaken) setIsNamingGroup(false) }
+                      if (e.key === 'Escape') setIsNamingGroup(false)
+                    }}
+                    onBlur={() => { if (draftGroupName.trim() && !headerNameTaken) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
+                    className={cn(
+                      "flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal",
+                      headerNameTaken ? "border-red-400" : "border-violet-400/60",
+                    )}
+                  />
+                ) : isRenaming && onRenameLayer ? (
+                  <input
+                    autoFocus
+                    value={draftName}
+                    aria-label={`Rename ${layer.name}`}
+                    onChange={(e) => setDraftName(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === 'Enter') { onRenameLayer(layer.id, draftName); setIsRenaming(false) }
+                      if (e.key === 'Escape') { setDraftName(layer.name); setIsRenaming(false) }
+                    }}
+                    onBlur={() => { onRenameLayer(layer.id, draftName); setIsRenaming(false) }}
+                    className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-accent-lineage/60 text-sm font-semibold text-ink outline-none"
+                  />
+                ) : (
                   <LayerHeaderTitle
                     name={layer.name}
                     description={layer.description}
                     color={layer.color}
                     properties={layer.properties}
+                    coverRight={trayWidth}
                   />
-                  {onRenameLayer && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setDraftName(layer.name); setIsRenaming(true) }}
-                      className="opacity-0 group-hover/column:opacity-100 p-1 rounded text-ink-muted hover:text-ink hover:bg-white/10 transition-all flex-shrink-0"
-                      title="Rename layer"
+                )}
+                <div className="flex-shrink-0 flex items-center gap-1.5">
+                  {/* Loading pill — replaces the entity-count pill while this
+                      layer is hydrating with no entities yet. Premium spinner +
+                      layer-tinted background makes the loading state legible at
+                      a glance from anywhere on the canvas. */}
+                  {shouldShowGhosts && flatTree.length === 0 ? (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.92 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.92 }}
+                      className="flex items-center gap-1.5 px-1.5 py-px rounded-full border"
+                      style={{
+                        backgroundColor: `${layer.color}1a`,
+                        borderColor: `${layer.color}40`,
+                        color: layer.color,
+                      }}
                     >
-                      <LucideIcons.Pencil className="w-3 h-3" />
-                    </button>
+                      <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
+                      <span className="text-[10px] font-semibold tracking-wide">Loading…</span>
+                    </motion.div>
+                  ) : (
+                    <div
+                      className="flex items-center gap-1 px-1.5 py-px rounded-full bg-white/[0.06] dark:bg-white/[0.04] border border-white/[0.08]"
+                      title={isTracing
+                        ? onLineageLabel
+                        : subsetFeed
+                          ? `${feedCountSentence(subsetFeed)} in this layer${subsetAsOf ? ` — ${subsetAsOf}, a fresh answer is on its way` : ''}`
+                          : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${loadedCount.toLocaleString()} loaded · ${totalLabel} in this layer (with the children the server reports for loaded rows${totalIsFloor ? '; some types have no count yet' : ''})`}
+                    >
+                      {isTracing ? (
+                        <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
+                          {onLineageCount}
+                        </span>
+                      ) : subsetFeed ? (
+                        <>
+                          <span className="text-[10px] font-semibold text-ink tabular-nums" style={{ color: layer.color }}>
+                            {subsetFeed.delivered.toLocaleString()}{subsetShowsTotal ? '' : '+'}
+                          </span>
+                          {subsetShowsTotal && (
+                            <>
+                              <span className="text-[9px] text-ink-muted/60">/</span>
+                              <span className="text-[10px] text-ink-muted/60 tabular-nums">{totalLabel}</span>
+                            </>
+                          )}
+                          {subsetFeed.status === 'running' && (
+                            <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-ink-muted/60" aria-label="still counting" />
+                          )}
+                          {subsetAsOf && <LucideIcons.Clock3 className="w-2.5 h-2.5 text-ink-muted/60" aria-label={subsetAsOf} />}
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
+                            {loadedCount.toLocaleString()}
+                          </span>
+                          <span className="text-[9px] text-ink-muted/60">/</span>
+                          <span className="text-[10px] text-ink-muted/60">{totalLabel}</span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {/* Curated-order signal — always visible (never hover-gated) so
+                      read-only consumers know the arrangement is deliberate. A mark, not
+                      a worded pill, so it takes none of the name's width. */}
+                  {sortMode === 'custom' && (
+                    <HoverTip label="Custom order" detail="Arranged by hand — this layer's own order, not the view default">
+                      <span
+                        role="img"
+                        aria-label="Custom order"
+                        className="grid place-items-center w-[18px] h-[18px] rounded-full"
+                        style={{ backgroundColor: `${layer.color}1a`, color: layer.color }}
+                      >
+                        <LucideIcons.ListOrdered className="w-3 h-3" aria-hidden />
+                      </span>
+                    </HoverTip>
+                  )}
+                  {/* A sort of the layer's own. The sort control waits in the tray now,
+                      so its at-rest mark (full strength, with a dot) is kept here. */}
+                  {sortIsOverride && sortMode !== 'custom' && (
+                    <HoverTip label={`Sorted ${SORT_MODE_LABELS[sortMode]}`} detail="This layer's own order, not the view default">
+                      <span
+                        role="img"
+                        aria-label={`Sorted ${SORT_MODE_LABELS[sortMode]}`}
+                        className="flex items-center"
+                        style={{ color: layer.color }}
+                      >
+                        <OverrideSortIcon className="w-3 h-3" aria-hidden />
+                      </span>
+                    </HoverTip>
+                  )}
+                </div>
+              </div>
+
+              {/* The actions tray. Hidden at rest, so it never takes width from the name, it
+                  rises over the right of the header on hover and while focus is in it — over an
+                  opaque, tinted backing that fades in across the title (no backdrop-filter: inside
+                  the column scroller a blurred surface ghosts as white strips). It stays out while
+                  something it opened is open: the layer's menu, the sort menu, the delete confirm.
+                  A device with no hover keeps the sort and ⋯ in the row at rest instead (the sort
+                  is in no menu; the rest are all in the layer's). */}
+              {!isNamingGroup && !isRenaming && trayCount > 0 && (
+                <div
+                  role="group"
+                  aria-label={`${layer.name}: actions`}
+                  data-header-tray
+                  data-pinned={trayPinned || undefined}
+                  className={cn(
+                    "absolute inset-y-0 right-0 flex items-center gap-0.5 pl-6",
+                    "[background:var(--tray-bg)] [mask-image:linear-gradient(to_right,transparent,#000_1.25rem)]",
+                    "transition-[opacity,transform] duration-150 ease-out motion-reduce:transition-none",
+                    trayPinned
+                      ? "opacity-100"
+                      : cn(
+                        "opacity-0 translate-x-1 pointer-events-none",
+                        "group-hover/header:opacity-100 group-hover/header:translate-x-0 group-hover/header:pointer-events-auto",
+                        // Focus inside it, not only keyboard focus: a menu it opened hands focus back to
+                        // its button on closing, and that button's tip must not point at a hidden tray.
+                        "focus-within:opacity-100 focus-within:translate-x-0 focus-within:pointer-events-auto",
+                      ),
+                    "[@media(hover:none)]:static [@media(hover:none)]:flex-shrink-0 [@media(hover:none)]:pl-0 [@media(hover:none)]:[background:none] [@media(hover:none)]:[mask-image:none]",
+                    "[@media(hover:none)]:opacity-100 [@media(hover:none)]:translate-x-0 [@media(hover:none)]:pointer-events-auto",
+                  )}
+                  style={{ '--tray-bg': `linear-gradient(${layer.color}08, ${layer.color}08), var(--nx-bg-elevated)` } as React.CSSProperties}
+                >
+                  {onSetSortMode && (
+                    <LayerSortMenu
+                      layerName={layer.name}
+                      layerColor={layer.color}
+                      mode={sortMode}
+                      isOverride={sortIsOverride}
+                      viewDefault={viewDefaultSortMode}
+                      canPersist={canPersistSort}
+                      onSelectMode={(mode) => onSetSortMode(layer.id, mode)}
+                      onApplyToView={() => onApplySortToView?.(layer.id)}
+                      onResetCustomOrder={onResetCustomOrder ? () => onResetCustomOrder(layer.id) : undefined}
+                      onOpenChange={setSortMenuOpen}
+                    />
+                  )}
+                  {trayHas('rename') && (
+                    <TrayButton
+                      label={`Rename ${layer.name}`}
+                      onClick={() => { setDraftName(layer.name); setIsRenaming(true) }}
+                      menuHasIt={!!onHeaderContextMenu}
+                      className="text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.1]"
+                    >
+                      <LucideIcons.Pencil className="w-3.5 h-3.5" />
+                    </TrayButton>
+                  )}
+                  {trayHas('add') && onAddToLayer && (
+                    <TrayButton
+                      label={`Add entity to ${layer.name}`}
+                      onClick={() => onAddToLayer(layer.id)}
+                      menuHasIt={!!onHeaderContextMenu}
+                      className="bg-green-500/10 hover:bg-green-500/20 text-green-500 hover:scale-110 active:scale-95"
+                    >
+                      <LucideIcons.Plus className="w-3.5 h-3.5" />
+                    </TrayButton>
+                  )}
+                  {trayHas('group') && (
+                    <TrayButton
+                      label={`New group in ${layer.name}`}
+                      detail="Organise entities in this view — the data is unchanged"
+                      onClick={() => { setDraftGroupName(''); setIsNamingGroup(true) }}
+                      menuHasIt={!!onHeaderContextMenu}
+                      className="bg-violet-500/10 hover:bg-violet-500/20 text-violet-500 hover:scale-110 active:scale-95"
+                    >
+                      <LucideIcons.FolderPlus className="w-3.5 h-3.5" />
+                    </TrayButton>
+                  )}
+                  {trayHas('build') && onBuildToLayer && (
+                    <TrayButton
+                      label={`Build a lot at once in ${layer.name}`}
+                      onClick={() => onBuildToLayer(layer.id)}
+                      menuHasIt={!!onHeaderContextMenu}
+                      className="bg-accent-lineage/10 hover:bg-accent-lineage/20 text-accent-lineage hover:scale-110 active:scale-95"
+                    >
+                      <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
+                    </TrayButton>
+                  )}
+                  {/* Delete — trash → inline check/✗ confirm (the check's tip warns when the layer
+                      has entities: hand-placed ones fall back to the default layer, rule-placed
+                      ones become unassigned unless another layer claims their type). */}
+                  {trayHas('delete') && onDeleteLayer && (
+                    confirmingDelete ? (
+                      <div
+                        ref={confirmRef}
+                        className="flex items-center gap-0.5"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setConfirmingDelete(false) } }}
+                      >
+                        <TrayButton
+                          label={`Yes, delete ${layer.name}`}
+                          detail={loadedCount > 0
+                            ? `${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type`
+                            : undefined}
+                          // The trash it replaces took the focus with it.
+                          autoFocus
+                          onClick={() => { onDeleteLayer(layer.id); setConfirmingDelete(false) }}
+                          menuHasIt={!!onHeaderContextMenu}
+                          className="bg-rose-500/15 text-rose-500 hover:bg-rose-500/25"
+                        >
+                          <LucideIcons.Check className="w-3.5 h-3.5" />
+                        </TrayButton>
+                        <TrayButton
+                          label={`Keep ${layer.name}`}
+                          onClick={() => setConfirmingDelete(false)}
+                          menuHasIt={!!onHeaderContextMenu}
+                          className="text-ink-muted hover:bg-black/[0.06] dark:hover:bg-white/10"
+                        >
+                          <LucideIcons.X className="w-3.5 h-3.5" />
+                        </TrayButton>
+                      </div>
+                    ) : (
+                      <TrayButton
+                        label={`Delete ${layer.name}`}
+                        onClick={() => setConfirmingDelete(true)}
+                        menuHasIt={!!onHeaderContextMenu}
+                        className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-500"
+                      >
+                        <LucideIcons.Trash2 className="w-3.5 h-3.5" />
+                      </TrayButton>
+                    )
+                  )}
+                  {onHeaderContextMenu && (
+                    <HoverTip
+                      label="More for this layer"
+                      detail={trayShown.length < trayOptional.length
+                        ? 'Every action for it, with those this column has no room to show here'
+                        : 'Its settings, colour and place — the menu a right-click opens'}
+                    >
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          // The menu drops from the button, clicked or pressed.
+                          const r = e.currentTarget.getBoundingClientRect()
+                          onHeaderContextMenu(Object.assign(e, { clientX: r.left, clientY: r.bottom + 4 }), layer.id)
+                        }}
+                        aria-label={`${layer.name}: layer actions`}
+                        aria-haspopup="menu"
+                        aria-expanded={layerMenuOpen}
+                        data-canvas-menu-trigger
+                        className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.1] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
+                      >
+                        <LucideIcons.Ellipsis className="w-3.5 h-3.5" />
+                      </button>
+                    </HoverTip>
                   )}
                 </div>
               )}
-              <div className="flex items-center gap-2">
-                {/* Loading pill — replaces the entity-count pill while this
-                    layer is hydrating with no entities yet. Premium spinner +
-                    layer-tinted background makes the loading state legible at
-                    a glance from anywhere on the canvas. */}
-                {shouldShowGhosts && flatTree.length === 0 ? (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.92 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.92 }}
-                    className="flex items-center gap-1.5 px-2 py-1 rounded-full border"
-                    style={{
-                      backgroundColor: `${layer.color}1a`,
-                      borderColor: `${layer.color}40`,
-                      color: layer.color,
-                    }}
-                  >
-                    <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
-                    <span className="text-[10px] font-semibold tracking-wide">Loading…</span>
-                  </motion.div>
-                ) : (
-                  <div
-                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] border border-white/[0.08]"
-                    title={isTracing
-                      ? onLineageLabel
-                      : subsetFeed
-                        ? `${feedCountSentence(subsetFeed)} in this layer${subsetAsOf ? ` — ${subsetAsOf}, a fresh answer is on its way` : ''}`
-                        : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${loadedCount.toLocaleString()} loaded · ${totalLabel} in this layer (with the children the server reports for loaded rows${totalIsFloor ? '; some types have no count yet' : ''})`}
-                  >
-                    {isTracing ? (
-                      <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
-                        {onLineageCount}
-                      </span>
-                    ) : subsetFeed ? (
-                      <>
-                        <span className="text-[10px] font-semibold text-ink tabular-nums" style={{ color: layer.color }}>
-                          {subsetFeed.delivered.toLocaleString()}{subsetShowsTotal ? '' : '+'}
-                        </span>
-                        {subsetShowsTotal && (
-                          <>
-                            <span className="text-[9px] text-ink-muted/60">/</span>
-                            <span className="text-[10px] text-ink-muted/60 tabular-nums">{totalLabel}</span>
-                          </>
-                        )}
-                        {subsetFeed.status === 'running' && (
-                          <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-ink-muted/60" aria-label="still counting" />
-                        )}
-                        {subsetAsOf && <LucideIcons.Clock3 className="w-2.5 h-2.5 text-ink-muted/60" aria-label={subsetAsOf} />}
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
-                          {loadedCount.toLocaleString()}
-                        </span>
-                        <span className="text-[9px] text-ink-muted/60">/</span>
-                        <span className="text-[10px] text-ink-muted/60">{totalLabel}</span>
-                      </>
-                    )}
-                  </div>
-                )}
-                {/* Curated-order signal — always visible (never hover-gated) so
-                    read-only consumers know the arrangement is deliberate. */}
-                {sortMode === 'custom' && (
-                  <div
-                    className="flex items-center gap-1 px-2 py-1 rounded-full"
-                    style={{ backgroundColor: `${layer.color}1a`, color: layer.color }}
-                    title="This layer uses a curated custom order"
-                  >
-                    <LucideIcons.ListOrdered className="w-3 h-3" />
-                    <span className="text-[10px] font-semibold">Custom</span>
-                  </div>
-                )}
-                {onSetSortMode && (
-                  <LayerSortMenu
-                    layerName={layer.name}
-                    layerColor={layer.color}
-                    mode={sortMode}
-                    isOverride={sortIsOverride}
-                    viewDefault={viewDefaultSortMode}
-                    canPersist={canPersistSort}
-                    onSelectMode={(mode) => onSetSortMode(layer.id, mode)}
-                    onApplyToView={() => onApplySortToView?.(layer.id)}
-                    onResetCustomOrder={onResetCustomOrder ? () => onResetCustomOrder(layer.id) : undefined}
-                  />
-                )}
-                {/* The Business view keeps the header to the layer and its sort:
-                    adding, grouping, building and deleting wait in its menu (⋯),
-                    with the layer's settings. */}
-                {personaMode !== 'technical' && onHeaderContextMenu && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      // The menu drops from the button, clicked or pressed.
-                      const r = e.currentTarget.getBoundingClientRect()
-                      onHeaderContextMenu(Object.assign(e, { clientX: r.left, clientY: r.bottom + 4 }), layer.id)
-                    }}
-                    aria-label={`${layer.name}: layer actions`}
-                    aria-haspopup="menu"
-                    data-canvas-menu-trigger
-                    className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.1] transition-colors"
-                  >
-                    <LucideIcons.Ellipsis className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                {personaMode === 'technical' && onAddToLayer && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onAddToLayer(layer.id)
-                    }}
-                    className="p-1.5 rounded-lg bg-green-500/10 hover:bg-green-500/20 text-green-500 transition-all duration-200 hover:scale-110 active:scale-95"
-                    title={`Add entity to ${layer.name}`}
-                  >
-                    <LucideIcons.Plus className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                {personaMode === 'technical' && onCreateGroup && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setDraftGroupName('')
-                      setIsNamingGroup(true)
-                    }}
-                    className="p-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-500 transition-all duration-200 hover:scale-110 active:scale-95"
-                    title={`New group in ${layer.name} — organise entities in this view (the data is unchanged)`}
-                    aria-label={`New group in ${layer.name}`}
-                  >
-                    <LucideIcons.FolderPlus className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                {personaMode === 'technical' && onBuildToLayer && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onBuildToLayer(layer.id)
-                    }}
-                    className="p-1.5 rounded-lg bg-accent-lineage/10 hover:bg-accent-lineage/20 text-accent-lineage transition-all duration-200 hover:scale-110 active:scale-95"
-                    title={`Build a lot at once in ${layer.name}`}
-                  >
-                    <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                {/* Delete — hover-revealed trash → inline check/✗ confirm (the check's tooltip warns
-                    when the layer has entities: hand-placed ones fall back to the default layer,
-                    rule-placed ones become unassigned unless another layer claims their type). */}
-                {personaMode === 'technical' && onDeleteLayer && (
-                  confirmingDelete ? (
-                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); setConfirmingDelete(false) }}
-                        title={loadedCount > 0
-                          ? `Delete — ${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type`
-                          : 'Delete layer'}
-                        className="p-1.5 rounded-lg bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 transition-all"
-                      >
-                        <LucideIcons.Check className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false) }}
-                        title="Cancel"
-                        className="p-1.5 rounded-lg text-ink-muted hover:bg-white/10 transition-all"
-                      >
-                        <LucideIcons.X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true) }}
-                      className="opacity-0 group-hover/column:opacity-100 p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-all duration-200"
-                      title={`Delete ${layer.name}`}
-                    >
-                      <LucideIcons.Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )
-                )}
-              </div>
             </>
           )}
         </div>
@@ -3288,11 +3443,44 @@ export const LayerColumn = React.memo(function LayerColumn({
   )
 })
 
+/** A control in a layer header's actions tray: a glyph, named for what it does, with its tip. */
+function TrayButton({ label, detail, onClick, menuHasIt, autoFocus, className, children }: {
+  label: string
+  detail?: string
+  onClick: () => void
+  /** The layer's menu offers it too, so a device with no hover leaves it to the ⋯. */
+  menuHasIt: boolean
+  autoFocus?: boolean
+  className: string
+  children: React.ReactNode
+}) {
+  return (
+    <HoverTip label={label} detail={detail} className={menuHasIt ? '[@media(hover:none)]:hidden' : undefined}>
+      <button
+        type="button"
+        aria-label={label}
+        autoFocus={autoFocus}
+        onClick={(e) => { e.stopPropagation(); onClick() }}
+        className={cn(
+          "p-1.5 rounded-lg transition-all duration-200",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50",
+          className,
+        )}
+      >
+        {children}
+      </button>
+    </HoverTip>
+  )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// LayerHeaderTitle — name + description block for an expanded layer column.
+// LayerHeaderTitle — the name of an expanded layer column.
 //
-// Wraps the title in a 2-line clamp so long names wrap legibly and a hover
-// popover that materialises ONLY when text is actually truncated. The
+// Wraps the title in a 2-line clamp so long names wrap legibly, and a hover
+// popover that materialises when there is more to read: the name cut short
+// (clamped, or under the header's actions tray), the layer's description —
+// which the header never prints, so every header is one height — or its
+// properties. The
 // popover (createPortal + framer-motion) mirrors LineageDisplayPopover's
 // pattern so the two header surfaces feel like a matched set.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3308,6 +3496,7 @@ function LayerHeaderTitle({
   description,
   color,
   properties,
+  coverRight = 0,
 }: {
   name: string
   description?: string
@@ -3315,40 +3504,52 @@ function LayerHeaderTitle({
   /** The layer's own properties: an owner, a purpose, an SLA. Shown on its
    *  card, read at a glance — the header itself only says there are some. */
   properties?: Record<string, unknown>
+  /** How much of the right of the row the title sits in the header's actions
+   *  tray covers while it shows, px. */
+  coverRight?: number
 }) {
   const resolvedColor = color ?? '#6b7280'
   const propertyEntries = Object.entries(properties ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
   const hasProperties = propertyEntries.length > 0
   const containerRef = useRef<HTMLDivElement>(null)
   const nameRef = useRef<HTMLHeadingElement>(null)
-  const descRef = useRef<HTMLParagraphElement>(null)
+  const nameTextRef = useRef<HTMLSpanElement>(null)
+  const coverRightRef = useRef(coverRight)
   const [isTruncated, setIsTruncated] = useState(false)
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null)
   const openTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  // Detect overflow after layout / on every name/description change. The
-  // popover only opens when there's actually more text to show.
-  useLayoutEffect(() => {
+  // Is the name cut short? Clamped, or running on under the actions tray, which covers the end of a long name while the header is
+  // hovered: hidden there as surely as past the clamp. Reads refs only. The
+  // tray covers the right of the ROW; this box is only as wide as its words,
+  // so the row's edge is read off the box it sits in.
+  const measureCut = useCallback(() => {
     const nameOverflow = nameRef.current ? nameRef.current.scrollHeight > nameRef.current.clientHeight + 1 : false
-    const descOverflow = descRef.current ? descRef.current.scrollHeight > descRef.current.clientHeight + 1 : false
-    setIsTruncated(nameOverflow || descOverflow)
-  }, [name, description])
+    const box = containerRef.current?.parentElement?.getBoundingClientRect()
+    const underTray = !!box && coverRightRef.current > 0
+      && Array.from(nameTextRef.current?.getClientRects() ?? []).some((line) => line.right > box.right - coverRightRef.current)
+    setIsTruncated(nameOverflow || underTray)
+  }, [])
+
+  // Detect overflow after layout / on every name change.
+  useLayoutEffect(() => {
+    coverRightRef.current = coverRight
+    measureCut()
+  }, [measureCut, name, coverRight])
 
   // Re-check on container resize (column width can change as users open
-  // the right-rail drawer or toggle adjacent layers).
+  // the right-rail drawer or toggle adjacent layers) — and on the row's: a
+  // short name keeps its own width as the column narrows under it.
   useEffect(() => {
     const el = containerRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => {
-      const nameOverflow = nameRef.current ? nameRef.current.scrollHeight > nameRef.current.clientHeight + 1 : false
-      const descOverflow = descRef.current ? descRef.current.scrollHeight > descRef.current.clientHeight + 1 : false
-      setIsTruncated(nameOverflow || descOverflow)
-    })
+    const ro = new ResizeObserver(measureCut)
     ro.observe(el)
+    if (el.parentElement) ro.observe(el.parentElement)
     return () => ro.disconnect()
-  }, [])
+  }, [measureCut])
 
   useLayoutEffect(() => {
     if (!open) return
@@ -3378,9 +3579,9 @@ function LayerHeaderTitle({
   }, [])
 
   const scheduleOpen = () => {
-    // The card opens when the header cuts something short — or the layer has
-    // properties to read.
-    if (!isTruncated && !hasProperties) return
+    // The card opens when the header cuts the name short — or the layer has
+    // a description or properties to read.
+    if (!isTruncated && !description && !hasProperties) return
     clearTimeout(closeTimerRef.current)
     clearTimeout(openTimerRef.current)
     openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
@@ -3394,7 +3595,8 @@ function LayerHeaderTitle({
   return (
     <div
       ref={containerRef}
-      className="flex-1 min-w-0"
+      // The row's width, less the count at its end.
+      className="flex-1 min-w-0 flex items-center gap-1.5"
       onMouseEnter={scheduleOpen}
       onMouseLeave={scheduleClose}
       onFocus={scheduleOpen}
@@ -3402,30 +3604,35 @@ function LayerHeaderTitle({
     >
       <h3
         ref={nameRef}
-        className="text-sm font-semibold tracking-tight line-clamp-2 leading-snug"
+        // A name with no spaces still breaks, inside its two lines, rather
+        // than running out of the box with no ellipsis.
+        className="min-w-0 text-sm font-semibold tracking-tight line-clamp-2 leading-snug break-words"
         style={{ color: resolvedColor }}
-        title={isTruncated || hasProperties ? undefined : name}
+        title={isTruncated || description || hasProperties ? undefined : name}
       >
-        {name}
-        {hasProperties && (
-          <span
-            className="ml-1.5 inline-flex items-center gap-0.5 align-middle text-[10px] font-medium text-ink-muted"
-            role="img"
-            aria-label={`${propertyEntries.length} ${propertyEntries.length === 1 ? 'property' : 'properties'}`}
-          >
-            <LucideIcons.Tags className="w-3 h-3" aria-hidden />
-            {propertyEntries.length}
-          </span>
-        )}
+        <span ref={nameTextRef}>{name}</span>
       </h3>
-      {description && (
-        <p
-          ref={descRef}
-          className="text-[10px] text-ink-muted/70 line-clamp-2 mt-0.5 leading-snug"
-        >
-          {description}
-        </p>
+      {/* What the card holds besides the name. Beside the name, never inside
+          its clamp, so a long name's ellipsis cannot take them away. */}
+      {(description || hasProperties) && (
+        <span className="flex-shrink-0 flex items-center gap-1.5 text-ink-muted">
+          {description && (
+            <LucideIcons.AlignLeft className="w-3 h-3" role="img" aria-label="Has a description" />
+          )}
+          {hasProperties && (
+            <span
+              className="inline-flex items-center gap-0.5 text-[10px] font-medium tabular-nums"
+              role="img"
+              aria-label={`${propertyEntries.length} ${propertyEntries.length === 1 ? 'property' : 'properties'}`}
+            >
+              <LucideIcons.Tags className="w-3 h-3" aria-hidden />
+              {propertyEntries.length}
+            </span>
+          )}
+        </span>
       )}
+      {/* Read out after the name; seen in the card. */}
+      {description && <p className="sr-only">{description}</p>}
 
       {/* No AnimatePresence: the tooltip unmounts instantly on close so an
           interrupted exit can never strand an invisible click-blocker at

@@ -1012,6 +1012,41 @@ export class RemoteGraphProvider implements GraphDataProvider {
         })
     }
 
+    /** This server answered /nodes/children-batch with 404 or 405 (it predates
+     *  the route: a deploy in progress), so for the rest of the session each
+     *  parent is loaded alone, without asking again. */
+    private childrenBatchMissing = false
+
+    async getChildrenBatch(
+        parents: Array<{ urn: URN; offset?: number; cursor?: string | null }>,
+        options?: {
+            edgeTypes?: string[]
+            lineageEdgeTypes?: string[]
+            limit?: number
+            includeLineageEdges?: boolean
+            sortDirection?: 'asc' | 'desc'
+            lineageScope?: 'page' | 'siblings'
+        }
+    ): Promise<Record<URN, Awaited<ReturnType<RemoteGraphProvider['getChildrenWithEdges']>>> | null> {
+        if (this.childrenBatchMissing) return null
+        try {
+            const res = await this.fetch<{ results: Record<URN, Awaited<ReturnType<RemoteGraphProvider['getChildrenWithEdges']>>> }>(
+                '/nodes/children-batch', {
+                    method: 'POST',
+                    body: JSON.stringify({ parents, ...options }),
+                    timeoutMs: TIMEOUTS.GET_CHILDREN_MS,
+                })
+            return res.results
+        } catch (error) {
+            const status = (error as { status?: number } | null)?.status
+            if (status === 404 || status === 405) {
+                this.childrenBatchMissing = true
+                return null
+            }
+            throw error
+        }
+    }
+
     async getParent(childUrn: URN): Promise<GraphNode | null> {
         return await this.fetch<GraphNode | null>(`/nodes/${encodeURIComponent(childUrn)}/parent`)
     }

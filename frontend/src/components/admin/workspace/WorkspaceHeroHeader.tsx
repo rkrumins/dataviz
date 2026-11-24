@@ -24,6 +24,7 @@ import { ROLE_NAMES } from '@/lib/roleNames'
 import { usePersonaMode } from '@/store/persona'
 import { useWorkspaceUsage } from '@/hooks/useContentInsights'
 import { Badge } from '@/components/ui/Badge'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { Button, IconButton } from '@/components/ui/Button'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBadge'
@@ -44,7 +45,10 @@ interface WorkspaceHeroHeaderProps {
     healthStatus: WorkspaceHealth
     healthStory: HealthStory
     onHealthAction?: (section: DataSection) => void
-    aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number }
+    /** `totalViews` is null while it is still being counted. */
+    aggregateStats: { totalNodes: number; totalEdges: number; totalTypes: number; totalViews: number | null }
+    /** The sources' counts are still on their way. */
+    statsPending?: boolean
     primaryOntologyName?: string
     providerInfos: DataSourceProviderInfo[]
     /** The primary action: the workspace's views in the Explorer. */
@@ -85,7 +89,7 @@ function withArticle(label: string): string {
 }
 
 export function WorkspaceHeroHeader({
-    workspace, healthStatus, healthStory, onHealthAction, aggregateStats, primaryOntologyName,
+    workspace, healthStatus, healthStory, onHealthAction, aggregateStats, statsPending, primaryOntologyName,
     providerInfos, exploreHref, onNewView, moreLinks = [], canEdit,
     isEditing, editName, editDesc, onEditNameChange, onEditDescChange, onStartEdit, onSave, onCancel,
 }: WorkspaceHeroHeaderProps) {
@@ -215,9 +219,11 @@ export function WorkspaceHeroHeader({
                                         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-ink-muted">
                                             <span className="inline-flex items-center gap-1"><Calendar className="w-3 h-3" /> Created {new Date(workspace.createdAt).toLocaleDateString()}</span>
                                             {primaryOntologyName && <span className="inline-flex items-center gap-1"><GitBranch className="w-3 h-3" /> {primaryOntologyName}</span>}
-                                            <span title="Entities · relationships · entity types across every source">
-                                                {compact(aggregateStats.totalNodes)} entities · {compact(aggregateStats.totalEdges)} relationships · {aggregateStats.totalTypes} types
-                                            </span>
+                                            {statsPending ? <Skeleton className="h-3 w-48" /> : (
+                                                <span title="Entities · relationships · entity types across every source">
+                                                    {compact(aggregateStats.totalNodes)} entities · {compact(aggregateStats.totalEdges)} relationships · {aggregateStats.totalTypes} types
+                                                </span>
+                                            )}
                                             {uniqueProviders.map(p => {
                                                 const Logo = getProviderLogo(p.providerType)
                                                 return (
@@ -235,7 +241,8 @@ export function WorkspaceHeroHeader({
 
                     {!isEditing && (
                         <div className="flex flex-wrap items-center gap-2 shrink-0" data-tour="workspace-actions">
-                            {/* The way in is its views; with none yet, it is making the first. */}
+                            {/* The way in is its views; with none yet, it is making the first (not
+                                while they are still being counted). */}
                             {aggregateStats.totalViews === 0 && onNewView ? (
                                 <button type="button" onClick={onNewView} className={PRIMARY}>
                                     <Plus className="w-4 h-4" /> New view

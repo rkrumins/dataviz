@@ -11,7 +11,7 @@ from .native_query import NativeQueryResult
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
-    ChildrenWithEdgesResult, TopLevelNodesResult, NodePage,
+    ChildrenWithEdgesResult, ChildrenBatchParent, TopLevelNodesResult, NodePage,
     TraceResult, TraceClosureResult,
 )
 
@@ -84,6 +84,34 @@ _DEFAULT_CAPABILITY = ProviderCapability(writable=False, full_crud=False, is_ext
 def capability_for(provider_type: Optional[str]) -> ProviderCapability:
     """Capability for a ``provider_type`` (e.g. the data source's). Unknown → read-only/external."""
     return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
+
+
+#: Parents read at once by the default ``get_children_batch``.
+CHILDREN_BATCH_CONCURRENCY = 4
+
+
+async def children_batch_by_query(
+    provider: Any, parents: List[ChildrenBatchParent], **kw: Any,
+) -> Dict[str, ChildrenWithEdgesResult]:
+    """:meth:`GraphDataProvider.get_children_batch` for any object with an async
+    ``get_children_with_edges``: each parent's page read by it, a few at a time, so a
+    reader with no bulk path (another adapter, a draft overlay, a versioned branch)
+    answers every parent exactly as its own single read does. One that fails fails the
+    batch, and stops the reads still out."""
+    gate = asyncio.Semaphore(CHILDREN_BATCH_CONCURRENCY)
+
+    async def one(parent: ChildrenBatchParent):
+        async with gate:
+            return parent.urn, await provider.get_children_with_edges(
+                parent.urn, offset=parent.offset, cursor=parent.cursor, **kw)
+
+    tasks = [asyncio.ensure_future(one(p)) for p in parents]
+    try:
+        return dict(await asyncio.gather(*tasks))
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        raise
 
 
 async def resolve_identities_by_query(provider: Any, urns: List[str], *, chunk: int = 1000,
@@ -279,6 +307,27 @@ class GraphDataProvider(ABC):
             hasMore=has_more,
             nextCursor=next_cursor,
             nextOffset=offset + len(children),
+        )
+
+    async def get_children_batch(
+        self,
+        parents: List[ChildrenBatchParent],
+        edge_types: Optional[List[str]] = None,
+        lineage_edge_types: Optional[List[str]] = None,
+        limit: int = 100,
+        include_lineage_edges: bool = True,
+        sort_direction: str = "asc",
+        lineage_scope: str = "page",
+    ) -> Dict[str, ChildrenWithEdgesResult]:
+        """A page of children for each of ``parents``, by urn: for each, exactly what
+        ``get_children_with_edges`` answers with the same arguments (ordered by
+        displayName). This default asks it per parent, a few at a time; a provider
+        with a bulk path overrides it (FalkorDB answers in one statement)."""
+        scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
+        return await children_batch_by_query(
+            self, parents, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+            limit=limit, include_lineage_edges=include_lineage_edges,
+            sort_direction=sort_direction, **scope_kw,
         )
 
     async def _default_sibling_lineage(

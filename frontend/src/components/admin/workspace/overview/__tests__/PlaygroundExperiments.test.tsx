@@ -13,10 +13,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { View } from '@/services/viewApiService'
 
-const { get, samples } = vi.hoisted(() => ({ get: vi.fn(), samples: vi.fn() }))
+const { get, samples, listViews } = vi.hoisted(() => ({ get: vi.fn(), samples: vi.fn(), listViews: vi.fn() }))
 vi.mock('@/services/playgroundService', () => ({
     playgroundService: { get, samples, startSample: vi.fn(), listModels: vi.fn(async () => []) },
 }))
+vi.mock('@/services/viewApiService', () => ({ listViews }))
 // The checklist reads its own signals and has its own suite; here it only has a place.
 vi.mock('@/components/playground/BuilderChecklist', () => ({ BuilderChecklist: () => <div data-testid="first-steps" /> }))
 
@@ -40,12 +41,23 @@ function Address() {
 }
 
 const onNewGraph = vi.fn()
+/** The Playground's views, as the server answers a filtered list of them. */
+function serve(views: View[]) {
+    listViews.mockImplementation(async (p: { createdBy?: string; dataSourceId?: string; viewType?: string; limit?: number }) => {
+        const items = views.filter(v => (!p.createdBy || v.createdBy === p.createdBy)
+            && (!p.dataSourceId || v.dataSourceId === p.dataSourceId)
+            && (!p.viewType || v.viewType === p.viewType))
+        return { items: items.slice(0, p.limit ?? 50), total: items.length }
+    })
+}
+
 function renderPanel({ at = '/workspaces/ws_play', workspace = playground(), canStart = true, views = [] as View[] } = {}) {
+    serve(views)
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
         <QueryClientProvider client={qc}>
             <MemoryRouter initialEntries={[at]}>
-                <PlaygroundExperiments workspace={workspace} views={views} onNewGraph={canStart ? onNewGraph : undefined} onOpenGraph={vi.fn()} />
+                <PlaygroundExperiments workspace={workspace} viewCountByDs={{}} countsPending={false} onNewGraph={canStart ? onNewGraph : undefined} onOpenGraph={vi.fn()} />
                 <Address />
             </MemoryRouter>
         </QueryClientProvider>,
@@ -133,7 +145,7 @@ describe('Your experiments: three ways to start', () => {
             { id: 'ds_bare', label: 'Bare', createdBy: 'usr_me' },
         ]) })
         const graphs = await screen.findByRole('list', { name: 'Your graphs' })
-        expect(within(graphs).getByRole('link', { name: 'Add more data to Mine' })).toHaveAttribute('href', '/views/v_ctx?import=1')
+        expect(await within(graphs).findByRole('link', { name: 'Add more data to Mine' })).toHaveAttribute('href', '/views/v_ctx?import=1')
         expect(within(graphs).queryByRole('link', { name: 'Add more data to Bare' })).toBeNull()
     })
 })

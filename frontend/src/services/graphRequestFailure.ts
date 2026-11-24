@@ -222,6 +222,7 @@ const READ_ONLY_POST_PATHS = [
   /^\/nodes\/page$/,
   /^\/nodes\/degree$/,
   /^\/nodes\/ancestor-chains$/,
+  /^\/nodes\/children-batch$/,
   /^\/edges\/query$/,
   /^\/edges\/between$/,
   /^\/edges\/aggregated$/,

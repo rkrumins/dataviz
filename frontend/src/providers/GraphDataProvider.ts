@@ -977,6 +977,25 @@ export interface GraphDataProvider {
     }>
 
     /**
+     * A page of children for each of up to 50 parents in ONE round trip
+     * (`POST /nodes/children-batch`), by parent URN: for each, exactly what
+     * `getChildrenWithEdges` answers with the same options. An unknown parent
+     * has an empty page. Optional capability, and `null` when the server has
+     * no such route (an older one): the caller then loads each parent alone.
+     */
+    getChildrenBatch?(
+        parents: Array<{ urn: URN; offset?: number; cursor?: string | null }>,
+        options?: {
+            edgeTypes?: string[]
+            lineageEdgeTypes?: string[]
+            limit?: number
+            includeLineageEdges?: boolean
+            sortDirection?: 'asc' | 'desc'
+            lineageScope?: 'page' | 'siblings'
+        }
+    ): Promise<Record<URN, Awaited<ReturnType<GraphDataProvider['getChildrenWithEdges']>>> | null>
+
+    /**
      * Get parent of a node (inverse of CONTAINS)
      */
     getParent(childUrn: URN): Promise<GraphNode | null>
