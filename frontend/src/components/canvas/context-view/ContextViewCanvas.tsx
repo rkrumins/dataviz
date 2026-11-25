@@ -4949,6 +4949,17 @@ export function ContextViewCanvas({
     return out
   }, [sortedLayers, nodeMap, hydrationStatus, activeReferenceLayout])
   const isHydratingInitial = hydrationPhase !== 'complete'
+  // A column of types that also holds entities of other types placed there by hand says how many.
+  const handPlacedByLayer = useMemo(() => {
+    const out = new Map<string, number>()
+    const byId = new Map(sortedLayers.map((l) => [l.id, l]))
+    for (const [urn, a] of Object.entries(activeReferenceLayout.assignments)) {
+      const types = byId.get(a.layerId)?.entityTypes ?? []
+      const type = nodeMap.get(urn)?.data?.type
+      if (types.length > 0 && typeof type === 'string' && !types.includes(type)) out.set(a.layerId, (out.get(a.layerId) ?? 0) + 1)
+    }
+    return out
+  }, [sortedLayers, activeReferenceLayout.assignments, nodeMap])
 
   // What resolveCreationScope reads — see openCreation. All lookups but `parentsFor`, which scans
   // the canvas once, and only for a type that needs a parent.
@@ -8746,6 +8757,7 @@ export function ContextViewCanvas({
                 nodes={renderByLayer.get(layer.id) ?? EMPTY_LAYER_NODES}
                 anchorMore={anchorMoreByLayer.get(layer.id)}
                 anchorIssue={anchorIssueByLayer.get(layer.id)}
+                handPlaced={handPlacedByLayer.get(layer.id)}
                 schema={schema}
                 // An empty column means something different in each: in a Context View the
                 // entities exist and just aren't assigned here; in a blank model nothing has

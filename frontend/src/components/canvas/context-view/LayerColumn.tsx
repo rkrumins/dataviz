@@ -36,6 +36,8 @@ import { DropHint } from './DropHint'
 import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
 import { draggedEntity } from './entityDrag'
 import { useReparentNode } from './useReparentNode'
+import { COLUMN_KIND_ICON, columnKind, columnKindCopy, type ColumnKind, type ColumnKindCopy } from './columnKind'
+import { ColumnKindMark } from './ColumnKindMark'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 import type { PlacedOut, PlacementInfo } from './placement'
@@ -293,6 +295,8 @@ interface LayerColumnProps {
   /** Why an anchored column can never fill — see anchorIssueByLayer. Changes
    *  the empty state from "nothing assigned" (untrue here) to the real reason. */
   anchorIssue?: 'missing' | 'duplicate'
+  /** A column of types: how many entities of other types are placed in it by hand. */
+  handPlaced?: number
   /** Folded into a spine. The canvas's fold window decides (useLayerFold);
    *  the column only asks, through `onFoldChange`. */
   isFolded?: boolean
@@ -464,6 +468,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onResizeLayer,
   anchorMore,
   anchorIssue,
+  handPlaced = 0,
   subsetFeed,
   emptyText,
   onSearchInLayer,
@@ -1780,15 +1785,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   const { reparent, verdict } = useReparentNode()
   const anchorUrn = layer.anchorUrn && !anchorIssue ? layer.anchorUrn : null
   const anchorNode = useCanvasStore((s) => (anchorUrn ? nodeIndexOf(s.nodes).get(anchorUrn) : undefined))
-  const [bodyHint, setBodyHint] = useState<DropHintSpec | null>(null)
+  const [bodyHint, setBodyHint] = useState<(DropHintSpec & { top: number }) | null>(null)
   // The hint rides just above the pointer, so it never sits far from where the drop lands — moved
   // in place on each dragover rather than re-rendering the column.
   const bodyChipRef = useRef<HTMLDivElement>(null)
-  const bodyChipTop = useRef(10)
-  const placeBodyChip = (clientY: number, box: DOMRect) => {
-    bodyChipTop.current = Math.max(10, Math.min(clientY - box.top - 44, box.height - 40))
-    if (bodyChipRef.current) bodyChipRef.current.style.top = `${bodyChipTop.current}px`
-  }
+  const chipTop = (clientY: number, box: DOMRect) => Math.max(10, Math.min(clientY - box.top - 44, box.height - 40))
   const bodyHintFor = (): DropHintSpec | null => {
     if (!anchorNode) return null
     const dragged = draggedEntity()
@@ -1807,6 +1808,32 @@ export const LayerColumn = React.memo(function LayerColumn({
     const dragged = draggedEntity()
     return !!anchorNode && !!dragged && !nodes.some((n) => n.id === dragged)
   }
+  // What kind of column this is — mapped to an entity, by type, or hand-picked — said by a mark
+  // on its tile and in its name's card, in the reader's view.
+  const kind = columnKind(layer, { resolved: !!anchorNode, issue: anchorIssue })
+  const anchorName = anchorNode ? resolveEntityName(anchorNode.data, personaMode, anchorNode.id) : undefined
+  const kindCopy = columnKindCopy(kind, {
+    persona: personaMode,
+    anchorName,
+    anchorUrn: layer.anchorUrn,
+    typeNames: (layer.entityTypes ?? []).map((id) => viewEntityTypes.find((t) => t.id === id)?.name ?? id),
+    typePlurals: (layer.entityTypes ?? []).map((id) => {
+      const t = viewEntityTypes.find((x) => x.id === id)
+      return t?.pluralName ?? `${t?.name ?? id}s`
+    }),
+    typeIds: layer.entityTypes,
+    ruleCount: layer.rules?.length,
+    handPlaced,
+  })
+  const openAnchor = kind === 'mapped' && anchorNode ? () => {
+    const id = anchorNode.id
+    useCanvasStore.getState().requestDrawerMove(() => {
+      const st = useCanvasStore.getState()
+      st.openNodeDrawer(id)
+      st.selectNode(id)
+    })
+  } : undefined
+
   // dragleave fires on the element left, so a drag cancelled or dropped elsewhere clears it here.
   useEffect(() => {
     if (!bodyHint) return
@@ -1877,7 +1904,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   const OverrideSortIcon = SORT_MODE_ICONS[sortMode]
   // Display › Header size: an open header's row, padding, icon and name — one
   // height for every column at a size (`layerHeaderTokens`).
-  const header = layerHeaderTokens(usePreferencesStore(s => s.canvasHeaderSize) ?? 'comfortable')
+  const canvasHeaderSize = usePreferencesStore(s => s.canvasHeaderSize) ?? 'comfortable'
+  const header = layerHeaderTokens(canvasHeaderSize)
   // Display › Show off-screen markers: the "↑ N more · M lines" at the column's ends.
   const showOffscreenMarkers = usePreferencesStore(s => s.showOffscreenLineMarkers) ?? true
   // Display › Empty layers. A column whose anchor entity is gone, or held by
@@ -2176,7 +2204,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               } : undefined}
               title={onReorderLayer ? `Drag to reorder ${layer.name}` : undefined}
               className={cn(
-                "flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
+                "relative flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
                 isCollapsed
                   ? (spineWidth < NARROW_SPINE_PX ? "rounded-md" : "rounded-lg")
                   : cn(header.tileClass, "group-hover/column:scale-105 group-hover/column:shadow-md"),
@@ -2198,6 +2226,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                 )}
                 style={{ color: layer.color }}
               />
+              {/* The column's kind, over the tile's corner: no width of its own. A narrow spine
+                  has no corner to spare. */}
+              {!(isCollapsed && spineWidth < NARROW_SPINE_PX) && (
+                <ColumnKindMark kind={kind} copy={kindCopy} small={isCollapsed || canvasHeaderSize === 'compact'} />
+              )}
             </div>
           </div>
 
@@ -2324,6 +2357,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     properties={layer.properties}
                     coverRight={trayWidth}
                     nameClass={header.nameClass}
+                    kind={kind}
+                    kindCopy={kindCopy}
+                    onOpenAnchor={openAnchor}
+                    anchorName={anchorName}
                   />
                 )}
                 <div className="flex-shrink-0 flex items-center gap-1.5">
@@ -2630,7 +2667,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               data-body-drop={bodyHint.kind}
               className={cn('pointer-events-none absolute inset-1 z-30 rounded-xl transition-shadow duration-150', dropSurfaceClass(bodyHint.kind))}
             >
-              <div ref={bodyChipRef} className="absolute inset-x-0 flex justify-center px-2 transition-[top] duration-75" style={{ top: bodyChipTop.current }}>
+              <div ref={bodyChipRef} className="absolute inset-x-0 flex justify-center px-2 transition-[top] duration-75" style={{ top: bodyHint.top }}>
                 <DropHint kind={bodyHint.kind} title={bodyHint.title} detail={bodyHint.detail} />
               </div>
             </div>
@@ -3068,8 +3105,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
                 }
-                if (!sameHint(hint, bodyHint)) setBodyHint(hint)
-                if (hint) placeBodyChip(e.clientY, e.currentTarget.getBoundingClientRect())
+                const top = chipTop(e.clientY, e.currentTarget.getBoundingClientRect())
+                if (!sameHint(hint, bodyHint)) setBodyHint(hint ? { ...hint, top } : null)
+                else if (bodyChipRef.current) bodyChipRef.current.style.top = `${top}px`
               }
             }}
             // A row stops the drag reaching here; seen on the way down, its hint gives way to the row's.
@@ -3586,9 +3624,9 @@ function TrayButton({ label, detail, onClick, menuHasIt, autoFocus, className, c
 //
 // Wraps the title in a 2-line clamp so long names wrap legibly, and a hover
 // popover that materialises when there is more to read: the name cut short
-// (clamped, or under the header's actions tray), the layer's description —
-// which the header never prints, so every header is one height — or its
-// properties. The
+// (clamped, or under the header's actions tray), what KIND of column it is and
+// what adding or dropping there does, the layer's description — which the
+// header never prints, so every header is one height — or its properties. The
 // popover (createPortal + framer-motion) mirrors LineageDisplayPopover's
 // pattern so the two header surfaces feel like a matched set.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3606,6 +3644,10 @@ function LayerHeaderTitle({
   properties,
   coverRight = 0,
   nameClass,
+  kind,
+  kindCopy,
+  onOpenAnchor,
+  anchorName,
 }: {
   name: string
   description?: string
@@ -3618,6 +3660,12 @@ function LayerHeaderTitle({
   coverRight?: number
   /** The name's size and how many lines it may take (Display › Header size). */
   nameClass: string
+  /** What kind of column this is, explained (see columnKind.ts). */
+  kind?: ColumnKind
+  kindCopy?: ColumnKindCopy
+  /** A mapped column: open the details of the entity it is. */
+  onOpenAnchor?: () => void
+  anchorName?: string
 }) {
   const resolvedColor = color ?? '#6b7280'
   const propertyEntries = Object.entries(properties ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -3690,9 +3738,9 @@ function LayerHeaderTitle({
   }, [])
 
   const scheduleOpen = () => {
-    // The card opens when the header cuts the name short — or the layer has
-    // a description or properties to read.
-    if (!isTruncated && !description && !hasProperties) return
+    // The card opens when the header cuts the name short — or there is more
+    // to read: what kind of column it is, its description, its properties.
+    if (!isTruncated && !kindCopy && !description && !hasProperties) return
     clearTimeout(closeTimerRef.current)
     clearTimeout(openTimerRef.current)
     openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
@@ -3719,7 +3767,7 @@ function LayerHeaderTitle({
         // running out of the box with no ellipsis.
         className={cn("min-w-0 font-semibold tracking-tight break-words", nameClass)}
         style={{ color: resolvedColor }}
-        title={isTruncated || description || hasProperties ? undefined : name}
+        title={isTruncated || kindCopy || description || hasProperties ? undefined : name}
       >
         <span ref={nameTextRef}>{name}</span>
       </h3>
@@ -3779,6 +3827,33 @@ function LayerHeaderTitle({
                   {name}
                 </div>
               </div>
+              {kind && kindCopy && (() => {
+                const KindIcon = COLUMN_KIND_ICON[kind]
+                return (
+                  <div data-column-kind-card={kind} className="px-3 py-2.5 flex items-start gap-2.5 border-b border-black/[0.06] dark:border-white/[0.04]">
+                    <span className="mt-px grid place-items-center w-6 h-6 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary shrink-0">
+                      <KindIcon className="w-3.5 h-3.5" aria-hidden />
+                    </span>
+                    <div className="min-w-0 space-y-1">
+                      <p className="text-[12px] font-semibold text-ink leading-snug">{kindCopy.label}</p>
+                      <p className="text-[12px] text-ink/80 leading-relaxed">{kindCopy.detail}</p>
+                      {kindCopy.technical && (
+                        <p className="font-mono text-[10.5px] text-ink-muted break-all">{kindCopy.technical}</p>
+                      )}
+                      {onOpenAnchor && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenAnchor() }}
+                          className="mt-0.5 inline-flex items-center gap-1 text-[12px] font-semibold text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+                        >
+                          Open {anchorName ? `${anchorName}’s` : 'its'} details
+                          <LucideIcons.ArrowUpRight className="w-3 h-3" aria-hidden />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
               {description && (
                 <div className="px-3 py-2.5 text-[12px] text-ink/85 leading-relaxed whitespace-pre-wrap">
                   {description}
