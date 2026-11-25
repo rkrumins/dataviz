@@ -87,6 +87,14 @@ Every new capability ships behind its own switch, off by default.
   filter now takes every operator (greater than, contains, between, …) on a relationship's own
   property. A property still held in the JSON is matched by is set, is, is not and is one of, and
   the search builder offers just those for it.
+- **A relationship can be watched as an item can**: Watch in the relationship drawer; a publish
+  that changes it says so in the Inbox, and the digest lists it by its ends and type.
+- **The import template and record schema know a relationship's fields**: an edge row's
+  `prop.<field>` columns are typed from its relationship type, and the template shows an example
+  for each.
+- **Bulk clean-ups reach relationships**: replace, normalize, map values and convert, previewed on
+  the relationships' own values. A job over a Connections search covers the relationships the
+  draft added or changed, and lists those that no longer match.
 - **A versioned graph's health shows its property names**: how many it uses of the graph store's
   65,534, the budget past which new names are kept as values (still shown and exported), a warning
   near and at it, and which keys on items and on relationships were kept as values.
@@ -144,6 +152,7 @@ Every new capability ships behind its own switch, off by default.
 - **`20261203_1000_gv_ps_prop_names`** adds `projection_state.property_names`, the reading each
   update records (created by the versioning worker where alembic doesn't reach the graphver
   schema). Until a graph's next update, its health shows its data source's last statistics count.
+- **`20261203_1000_watch_edges`** adds `graph_watches.entity_kind` (`node` by default).
 - **Existing relationships keep their properties in their JSON** until they are written again, and
   read and search as before meanwhile. The next full rebuild of a graph rewrites each relationship
   once into the new form; nothing has to be run.
@@ -164,6 +173,8 @@ Every new capability ships behind its own switch, off by default.
   `AGGREGATED`, are still not copied by an enable.
 - A CSV or TSV export carries numbers and booleans as text (NDJSON, JSON and Excel keep them), and
   no flat file carries a property whose value is null.
+- A bulk job over a Connections search doesn't reach a relationship the draft didn't change whose
+  ends it changed to match; the job's summary says so.
 - A connection kept or merged by a review is one connection in history; the source graph keeps
   every copy until it is rebuilt from history.
 
