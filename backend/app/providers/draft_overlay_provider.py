@@ -1348,6 +1348,27 @@ class DraftOverlayProvider:
                 scope, items, urns, context=self._main_context(context))
         return await search.membership(scope, items, urns, context.named or {})
 
+    async def deep_search_edge_membership(self, scope, items, edges, *, context):
+        """Connections rule membership: main's, with the relationships the draft changed judged
+        on the draft — a removed one matches nothing, a created or changed one is tested on its
+        values and its ends as the draft holds them (``draft_search``)."""
+        self._now_only("Search")
+        if not self._searches_draft():
+            return await self._base.deep_search_edge_membership(scope, items, edges,
+                                                                context=context)
+        from .draft_search import MEMBERSHIP_NOT_DRAFT_AWARE
+        try:
+            search = await self._draft_search(context)
+        except Exception:
+            logger.warning("draft edge membership: answered as main", exc_info=True)
+            out = await self._base.deep_search_edge_membership(
+                scope, items, edges, context=self._main_context(context))
+            return {**out, "notes": [MEMBERSHIP_NOT_DRAFT_AWARE]}
+        if search is None:
+            return await self._base.deep_search_edge_membership(
+                scope, items, edges, context=self._main_context(context))
+        return await search.edge_membership(scope, items, edges, context.named or {})
+
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False, values_for=None, subject="entities"):
         """The property catalog — of the entities, or ``subject`` ``relationships`` of the

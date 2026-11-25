@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
+from pydantic import TypeAdapter
 
 from backend.app.providers import draft_search
 from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
@@ -28,8 +29,9 @@ from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import (
     DegreePredicate, DescendantOfPredicate, EntityTypePredicate, GroupPredicate,
-    HasPropertyPredicate, IsPredicate, NodeRef, PropertyPredicate, SearchCountsRequest,
-    SearchMembershipRequest, SearchOptions, SearchQuery, SearchScope, TagPredicate, TextPredicate,
+    HasPropertyPredicate, IsPredicate, NodeRef, Predicate, PropertyPredicate, SearchCountsRequest,
+    SearchMembershipEdge, SearchMembershipRequest, SearchOptions, SearchQuery, SearchScope,
+    TagPredicate, TextPredicate,
 )
 from backend.common.predicate_eval import NODE_FIELDS, matches
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
@@ -252,9 +254,9 @@ RULES = {
 }
 
 
-def _first_draft() -> Draft:
+def _first_draft(draft: Optional[Draft] = None) -> Draft:
     """A draft that changes c2, removes c3 and creates c4 under t2."""
-    draft = Draft()
+    draft = draft or Draft()
     draft.commit({"c2": {**draft.main["c2"], "tier": "gold", "rows": 50},
                   "c3": None,
                   "c4": {"entityType": "Column", "displayName": "phone", "tier": "gold",
@@ -515,6 +517,75 @@ async def test_membership_of_a_relationship_rule_is_mains_less_what_the_draft_re
         SCOPE, [("fed", rule)], ["c1", "c3", "c4"], context=CONTEXT)
     assert out["matches"]["fed"] == []       # c3 had lineage in, but the draft removed it
     assert out["notes"] == [draft_search.MEMBERSHIP_MAINS.format(n=1)]
+
+
+class EdgeDraft(Draft):
+    """A draft that serves its relationships' values as the versioning service does."""
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node",
+                               as_of_seq=None):
+        if kind != "edge":
+            return await super().overlay_payloads(graph_id=graph_id, branch_id=branch_id,
+                                                  entity_ids=entity_ids, kind=kind)
+        return [{"id": e, "sourceUrn": self.edges[e]["source"], "targetUrn": self.edges[e]["target"],
+                 "edgeType": self.edges[e]["type"], "properties": self.edges[e].get("properties") or {}}
+                for e in entity_ids if e in self.edges]
+
+
+P_EDGES = TypeAdapter(Predicate).validate_python
+
+
+def _flow(src, tgt, **props):
+    return {"id": f"e:{src}>{tgt}", "source": src, "target": tgt, "type": "FLOWS_TO", "properties": props}
+
+
+EDGE_RULES = {
+    "to_gold": P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "targetWhere": {
+        "kind": "property", "key": "tier", "op": "eq", "value": "gold"}}),
+    "streams": P_EDGES({"kind": "edges", "edgePredicate": {
+        "kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}}),
+}
+
+
+def _asked_edges(draft, ids):
+    held = {**{e["id"]: e for e in MAIN_EDGES}, **draft.edges}
+    return [SearchMembershipEdge(id=i, source=held[i]["source"], target=held[i]["target"]) for i in ids]
+
+
+async def test_edge_membership_judges_the_relationships_the_draft_changed_on_the_draft():
+    """c2 → c4 and c1 → c4 are new in the draft (c4 created gold), c1 → c3 lost its end (c3
+    removed): each is answered as the draft holds it — the truth over the draft's graph."""
+    draft = _first_draft(EdgeDraft())
+    draft.commit({}, add_edges=[_flow("c2", "c4", mode="stream"), _flow("c1", "c4", mode="batch")])
+    asked = _asked_edges(draft, ["e:c1>c3", "e:c2>c4", "e:c1>c4"])
+    items = list(EDGE_RULES.items())
+    out = await _overlay(draft).deep_search_edge_membership(SCOPE, items, asked, context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": ["e:c2>c4", "e:c1>c4"],
+                                                 "streams": ["e:c2>c4"]}
+    assert out["notes"] == []
+    # Main alone: c1 → c3 still reaches a gold column, and the draft's relationships are unknown.
+    main = await Main().deep_search_edge_membership(SCOPE, items, asked)
+    assert main["matches"] == {"to_gold": ["e:c1>c3"], "streams": []}
+
+
+async def test_edge_membership_of_a_relationship_the_draft_removed_is_nothing():
+    draft = EdgeDraft()
+    draft.commit({}, drop_edges=[_flow("c1", "c3")])
+    asked = _asked_edges(draft, ["e:c1>c3"])
+    out = await _overlay(draft).deep_search_edge_membership(
+        SCOPE, [("to_gold", EDGE_RULES["to_gold"])], asked, context=CONTEXT)
+    assert out["matches"] == {"to_gold": []}
+
+
+async def test_edge_membership_keeps_mains_answer_for_one_whose_end_alone_changed_and_says_so():
+    main = Main(edges=[*MAIN_EDGES, _flow("c1", "c2")])
+    draft = _first_draft_on(EdgeDraft())               # c2 changed to gold, c1 → c2 unchanged
+    asked = [SearchMembershipEdge(id="e:c1>c2", source="c1", target="c2")]
+    out = await _overlay(draft, main).deep_search_edge_membership(
+        SCOPE, list(EDGE_RULES.items()), asked, context=CONTEXT)
+    assert out["matches"] == {"to_gold": [], "streams": []}
+    assert out["notes"] == [draft_search.EDGE_MEMBERSHIP_ENDS.format(n=1)]
 
 
 async def test_membership_falls_back_to_main_when_the_draft_cant_be_read():
@@ -911,6 +982,8 @@ def test_what_cant_be_answered_on_the_drafts_values_is_said():
                                 set()) == draft_search.PLATFORM_FIELD
     assert draft_search.inexact(RULES["gold"], {"x"}, frozenset({"x"})) == \
         draft_search.NAMES_CHANGED
+    # A rule that styles relationships is counted on the published graph.
+    assert draft_search.inexact(EDGE_RULES["streams"], set()) == draft_search.RELATIONSHIP_COUNT
 
 
 # ---------------------------------------------------------------------------
