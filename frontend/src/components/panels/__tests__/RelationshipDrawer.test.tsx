@@ -69,6 +69,10 @@ vi.mock('@/providers/GraphProviderContext', async (importOriginal) => ({
 vi.mock('@/features/versioning/components/EntityHistory', () => ({
   EntityHistory: ({ entityId }: { entityId: string }) => <div data-testid="entity-history">{entityId}</div>,
 }))
+vi.mock('@/features/versioning/components/WatchButtons', () => ({
+  RelationshipWatchButton: (p: { graphId: string; edgeId: string; name: string }) =>
+    <button type="button">Watch {p.name} ({p.edgeId} in {p.graphId})</button>,
+}))
 vi.mock('@/hooks/useViewSchema', () => ({
   useViewRelationshipTypes: () => h.relTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
@@ -294,6 +298,13 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.queryByText('Updated')).not.toBeInTheDocument()
     expect(screen.getByText('History is available with version control.')).toBeInTheDocument()
     expect(screen.queryByTestId('entity-history')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Watch/ })).not.toBeInTheDocument()
+  })
+
+  it('offers Watch among its actions, by its id and named by its ends', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer />)
+    expect(screen.getByRole('button', { name: 'Watch Orders → Revenue (e1 in g)' })).toBeInTheDocument()
   })
 
   it('deletes through the canvas and closes', async () => {

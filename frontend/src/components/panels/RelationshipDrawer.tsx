@@ -44,6 +44,7 @@ import type { EntityFieldDefinition } from '@/types/schema'
 import { stageEdgeEdits } from '@/features/versioning/model/stageEdgeEdit'
 import { EntityChangeDigest } from './entity/EntityChangeDigest'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
+import { RelationshipWatchButton } from '@/features/versioning/components/WatchButtons'
 import { edgeIndexOf } from '@/lib/storeIndex'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -400,6 +401,11 @@ function RelationshipPanel({
             >
               Edge Explorer
             </Button>
+            {/* Watching it, as an entity is watched: by its id, once it has history to watch. */}
+            {historyOn && !unsaved && entityId && (
+              <RelationshipWatchButton wsId={scope.wsId!} graphId={scope.graphId!} edgeId={entityId}
+                name={`${source.name} → ${dest.name}`} />
+            )}
             {canReverse && (
               <Button size="sm" variant="subtle" leftIcon={ArrowLeftRight} onClick={reverseRelationship}>
                 Reverse direction

@@ -3074,15 +3074,22 @@ export interface DigestVersion {
 
 export interface DigestReview { id: string; title: string | null; url: string; author: DigestPerson; at: string }
 
-export interface DigestWatched {
-  urn: string
+interface DigestWatchedChange {
   entityId: string
-  name: string | null
   change: 'added' | 'changed' | 'removed'
   /** Its last change in the window. */
   seq: number
   at: string
 }
+
+/** An end of a watched relationship: `name` null where it was never named. */
+export interface DigestEnd { entityId: string; name: string | null }
+
+/** Something you watch that changed: an entity, by its urn; or a relationship, by its id (it has
+ *  no urn), with its type and its ends — a removed one as it was. */
+export type DigestWatched =
+  | (DigestWatchedChange & { kind: 'node'; urn: string; name: string | null })
+  | (DigestWatchedChange & { kind: 'edge'; edgeType: string | null; source: DigestEnd; target: DigestEnd })
 
 export interface GraphDigest {
   /** The reader's seen marker, or null: then `window` is the last 7 days. */
@@ -3113,6 +3120,9 @@ export function markDigestSeen(wsId: string, graphId: string, seq: number): Prom
 export interface GraphWatching {
   graph: boolean
   entities: Array<{ urn: string; since: string }>
+  /** Relationships, by id. */
+  edges: Array<{ id: string; since: string }>
+  /** Entities and relationships, in all. */
   entitiesMax: number
 }
 
@@ -3130,6 +3140,19 @@ export function watchGraph(wsId: string, graphId: string, entityUrn?: string): P
 export function unwatchGraph(wsId: string, graphId: string, entityUrn?: string): Promise<GraphWatching> {
   const qs = entityUrn ? `?entityUrn=${encodeURIComponent(entityUrn)}` : ''
   return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch${qs}`, { method: 'DELETE' })
+}
+
+/** Watch a relationship, by its id (it has no urn); a publish that changes it tells you. */
+export function watchEdge(wsId: string, graphId: string, edgeId: string): Promise<GraphWatching> {
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch`, {
+    method: 'PUT', body: JSON.stringify({ edgeId }),
+  })
+}
+
+export function unwatchEdge(wsId: string, graphId: string, edgeId: string): Promise<GraphWatching> {
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch?edgeId=${encodeURIComponent(edgeId)}`, {
+    method: 'DELETE',
+  })
 }
 
 /** Top-level groups of a PR's Files Changed as a containment tree. */
