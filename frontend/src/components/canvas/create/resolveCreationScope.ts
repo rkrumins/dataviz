@@ -13,7 +13,9 @@
  *                                               | own type (as it always was)     | top-level nodes
  *   Its types need a parent (an "Apps" layer)   | that type; the selection when   | —
  *                                               | it can hold it, else the only   |
- *                                               | candidate, else ask             |
+ *                                               | candidate, else ask (nothing to |
+ *                                               | ask about: the top level, as it |
+ *                                               | always was)                     |
  *
  * Pure: everything it reads is a lookup the canvas already holds (`node`, `layerOf`, the layer's own
  * rows), plus `parentsFor`, which is only called for a layer whose type needs a parent.
@@ -108,7 +110,8 @@ export function resolveCreationScope(layer: ScopeLayer | null | undefined, ctx: 
     return out
   }
 
-  /** A type that needs a parent: the selection when it can hold it, else the only candidate, else ask. */
+  /** A type that needs a parent: the selection when it can hold it, else the only candidate, else
+   *  ask — unless nothing can hold it yet (an empty model), when it is the top level as before. */
   const needsParent = (typeId: string): CreationScope => {
     const base = { kind: 'needs-parent' as const, preferredTypeId: typeId, topLevelTypeId: soleRoot }
     if (selection && canHold(selection, typeId)) {
@@ -116,7 +119,7 @@ export function resolveCreationScope(layer: ScopeLayer | null | undefined, ctx: 
     }
     const candidates = ctx.parentsFor(typeId).slice(0, SCOPE_CHOICE_LIMIT)
     if (candidates.length === 1) return { ...base, parentUrn: candidates[0].urn, askParent: false, choices: candidates }
-    return { ...base, parentUrn: null, askParent: true, choices: candidates }
+    return { ...base, parentUrn: null, askParent: candidates.length > 1, choices: candidates }
   }
 
   // Asked for by type: a top-level type at the top level (as it always was), any other inside something.

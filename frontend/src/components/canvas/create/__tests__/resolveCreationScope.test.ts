@@ -158,9 +158,9 @@ describe('resolveCreationScope', () => {
       expect(parentsFor).not.toHaveBeenCalled()
     })
 
-    it('no candidate at all: still asks — the picker says so, and offers the top level', () => {
+    it('nothing can hold it yet (an empty model): the top level, as it always was — no question with no answer', () => {
       const s = resolveCreationScope(apps, ctx({ parentsFor: () => [] }))
-      expect(s).toMatchObject({ askParent: true, parentUrn: null, choices: [] })
+      expect(s).toMatchObject({ askParent: false, parentUrn: null, choices: [] })
     })
   })
 
