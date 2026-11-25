@@ -933,6 +933,46 @@ export function useDecideBootstrapDuplicates(wsId: string, dataSourceId: string)
   })
 }
 
+/** A page at a time of what a paused copy held for review — `copies` (connections the source holds
+ *  more than once) or `values` — narrowed by `q`. */
+export function useBootstrapReview<K extends 'copies' | 'values'>(
+  wsId: string, dataSourceId: string, kind: K, q = '', opts: { enabled?: boolean } = {},
+) {
+  return useInfiniteQuery({
+    queryKey: [...VERSIONING_KEYS.bootstrap(wsId, dataSourceId), 'review', kind, q.trim()],
+    queryFn: ({ pageParam }) => api.getBootstrapReview(wsId, dataSourceId, {
+      kind, after: pageParam, limit: 50, q }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next,
+    enabled: opts.enabled ?? true,
+  })
+}
+
+/** Save how one held connection is copied (null: back to the review's rule). */
+export function useSaveBootstrapReviewChoice(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ entityId, choice }: { entityId: string; choice: api.BootstrapReviewChoice | null }) =>
+      api.saveBootstrapReviewChoice(wsId, dataSourceId, entityId, choice),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.bootstrap(wsId, dataSourceId), 'review'] })
+    },
+  })
+}
+
+/** Decide a paused copy's review (pass the review's `fingerprint`), so it carries on. Refetched on a
+ *  refusal too, as a duplicates decision is: the user must see what the copy holds now. */
+export function useDecideBootstrapReview(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ reason, ...body }: Parameters<typeof api.decideBootstrapReview>[2] & { reason?: string }) =>
+      api.decideBootstrapReview(wsId, dataSourceId, body, { reason }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
+    },
+  })
+}
+
 export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
   const qc = useQueryClient()
   return useMutation({

@@ -1412,8 +1412,8 @@ export interface BootstrapResult {
  *  more than once (see {@link BootstrapDuplicates}); it waits for a manager to decide. */
 export type BootstrapJobStatus = 'pending' | 'running' | 'needs_decision' | 'completed' | 'failed' | 'cancelled'
 export type BootstrapPhase =
-  | 'reset' | 'counting' | 'awaiting_decision' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle'
-  | 'finalize' | 'backfill'
+  | 'reset' | 'counting' | 'awaiting_decision' | 'nodes' | 'edges' | 'connections' | 'resolve'
+  | 'validate' | 'heads' | 'merkle' | 'finalize' | 'backfill'
 
 /** One integrity check from the job's report — rendered verbatim in the report card. */
 export interface BootstrapCheck {
@@ -1431,7 +1431,17 @@ export interface BootstrapReport {
   edgeTypes: Record<string, number>
   sampleChecked: number
   sampleMismatched: Array<Record<string, unknown>>
+  /** Copies of a connection that said the same thing as another: one kept, nothing lost. */
   mergedDuplicateConnections: number
+  /** Connections re-read from the source and compared, every property. */
+  edgeSampleChecked?: number
+  edgeSampleMismatched?: Array<Record<string, unknown>>
+  /** Connections held for review, copied as it decided (a version kept, or the versions merged). */
+  resolvedConnections?: number
+  /** Connections that shared an id with an item or another connection, given one of their own. */
+  reidentifiedConnections?: number
+  /** Values history can't hold as they were (NaN, ±Infinity, NUL), stored as text as decided. */
+  valuesStoredAsText?: number
   /** Entities with no urn, which the copy left out — only on a job from before an enable stopped
    *  on them instead. */
   skippedWithoutIdentifier?: { nodes: number; edges: number }
@@ -1461,11 +1471,22 @@ export interface BootstrapJob {
   stale?: boolean
   /** A failed job: why, and what can be done about it. */
   failure?: JobFailure | null
+  /** What a paused job (`needs_decision`) waits on: the identifiers the pre-flight found more than
+   *  once (`duplicates`), or what the copy couldn't keep exactly as the source has it (`review`). */
+  awaiting?: 'duplicates' | 'review' | null
+  /** What the copy held for review — kept as the record once decided; null if nothing was held. */
+  review?: BootstrapReview | null
   /** Identifiers the source uses more than once, found before anything is copied; null if none. */
   duplicates?: BootstrapDuplicates | null
   /** What the copy turned away: duplicates that appeared after the check, and connections whose
    *  ends are missing. */
-  rejected?: { duplicateUrns: number; danglingEdges: number; samples: Array<Record<string, unknown>> } | null
+  rejected?: {
+    duplicateUrns: number
+    danglingEdges: number
+    /** Items or connections whose properties the copy did not all keep (a fault in the copy). */
+    unaccountedProperties?: number
+    samples: Array<Record<string, unknown>>
+  } | null
   /** What collapsing the duplicates removed: the extra copies (by type), and the connections that
    *  only joined two copies of one item. */
   collapsed?: { nodes: number; byLabel: Record<string, number>; selfLoops: number } | null
@@ -1519,6 +1540,89 @@ export interface BootstrapDuplicates {
    *  Named only within this workspace; those in other workspaces are only counted. */
   sharedWith: Array<{ dataSourceId: string; name: string }>
   sharedWithOtherWorkspaces: number
+}
+
+/** How a connection held for review is copied: its first version as it is, one version chosen, or
+ *  its versions merged — every property any of them holds, a value picked where they disagree. */
+export type BootstrapReviewRule = 'keep_first' | 'keep' | 'merge'
+
+/** In a merge's `values`, the connection's own confidence (not one of its properties). */
+export const CONFIDENCE_PICK = '@confidence'
+
+/** A person's choice for one connection held for review, over the review's rule. */
+export interface BootstrapReviewChoice {
+  rule: BootstrapReviewRule
+  /** `keep`: the version kept. */
+  keep?: number
+  /** `merge`: versions left out of it. */
+  excludeCopies?: number[]
+  /** `merge`: per property (or {@link CONFIDENCE_PICK}), the version whose value it takes. */
+  values?: Record<string, number>
+  /** Properties left out of what the rule gives. */
+  excludeProperties?: string[]
+}
+
+/** One version of a connection the source holds more than once: what `count` copies of it say. */
+export interface BootstrapReviewVersion {
+  seq: number
+  count: number
+  ids: string[]
+  confidence: number | null
+  properties: Record<string, unknown>
+}
+
+/** A connection the source holds more than once with different properties. */
+export interface BootstrapReviewConnection {
+  entityId: string
+  edgeType: string | null
+  source: string | null
+  target: string | null
+  versions: BootstrapReviewVersion[]
+  /** The properties its versions disagree on ({@link CONFIDENCE_PICK} for its confidence). */
+  clashing: string[]
+  choice: BootstrapReviewChoice | null
+}
+
+/** A value history can't hold as it is, stored as text: what it was, and as what. */
+export interface BootstrapReviewValue {
+  entityId: string
+  seq: number
+  entityKind: 'node' | 'edge'
+  name?: string | null
+  entityType?: string | null
+  edgeType?: string | null
+  source?: string | null
+  target?: string | null
+  property: string
+  problem: 'nan' | 'infinity' | 'nul' | 'unsupported'
+  storedAs: string
+}
+
+/** What the copy couldn't keep exactly as the source has it, held before anything goes live:
+ *  connections the source holds more than once with different properties (`copies`), values
+ *  history can't hold as they are (`values`). `fingerprint` names exactly this list. */
+export interface BootstrapReview {
+  fingerprint: string
+  copies: {
+    connections: number
+    versions: number
+    copies: number
+    sample: Array<{ entityId: string; edgeType: string | null; source: string | null;
+      target: string | null; versions: number; copies: number }>
+  }
+  values: {
+    count: number
+    items: number
+    byProblem: Partial<Record<BootstrapReviewValue['problem'], number>>
+    sample: BootstrapReviewValue[]
+  }
+  decision: {
+    copies?: { rule: 'keep_first' | 'merge'; excludeProperties: string[] }
+    values?: 'as_text'
+    fingerprint: string
+    decidedBy: string
+    decidedAt: string
+  } | null
 }
 
 /** A row of the whole duplicate list: `copy` is its rank among its identifier's copies (1 = kept). */
@@ -1627,6 +1731,53 @@ export function decideBootstrapDuplicates(
   return vfetch<BootstrapJob>(
     `/api/v1/${wsId}/graph/bootstrap/decision?dataSourceId=${encodeURIComponent(dataSourceId)}`,
     withReason(jsonBody({ action: 'collapse', fingerprint }), opts?.reason),
+  )
+}
+
+/** A page of what the copy held for review — connections (`copies`) or values (`values`) — in id
+ *  order; pass `next` back as `after`. `q` narrows to what holds the text. 404 → nothing held. */
+export function getBootstrapReview<K extends 'copies' | 'values'>(
+  wsId: string, dataSourceId: string,
+  opts: { kind: K; after?: string | null; limit?: number; q?: string },
+): Promise<{
+  items: K extends 'copies' ? BootstrapReviewConnection[] : BootstrapReviewValue[]
+  next: string | null
+}> {
+  const q = new URLSearchParams({ dataSourceId, kind: opts.kind })
+  if (opts.after) q.set('after', opts.after)
+  if (opts.limit) q.set('limit', String(opts.limit))
+  if (opts.q?.trim()) q.set('q', opts.q.trim())
+  return vfetch(`/api/v1/${wsId}/graph/bootstrap/review?${q}`)
+}
+
+/** Everything held for review of `kind`, as a CSV download (the browser sends the session cookie). */
+export function bootstrapReviewCsvUrl(wsId: string, dataSourceId: string, kind: 'copies' | 'values'): string {
+  return `/api/v1/${wsId}/graph/bootstrap/review?${new URLSearchParams({ dataSourceId, kind, format: 'csv' })}`
+}
+
+/** Save how one held connection is copied (null clears it, back to the review's rule), while the
+ *  copy waits on the review. */
+export function saveBootstrapReviewChoice(
+  wsId: string, dataSourceId: string, entityId: string, choice: BootstrapReviewChoice | null,
+): Promise<{ entityId: string; choice: BootstrapReviewChoice | null }> {
+  return vfetch(
+    `/api/v1/${wsId}/graph/bootstrap/review/choice?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+    { method: 'PUT', body: JSON.stringify({ entityId, choice }) },
+  )
+}
+
+/** Decide the review and let the copy carry on: `copies` is the rule for every held connection
+ *  without a choice of its own, `values` stores the values as text. Every kind held must be
+ *  decided. `fingerprint` is the review's as it was shown ({@link BootstrapDecisionError} when it
+ *  changed). Repeating a recorded decision is harmless. */
+export function decideBootstrapReview(
+  wsId: string, dataSourceId: string,
+  body: { fingerprint: string; copies?: { rule: 'keep_first' | 'merge'; excludeProperties: string[] }; values?: 'as_text' },
+  opts?: ActivityOpts,
+): Promise<BootstrapJob> {
+  return vfetch<BootstrapJob>(
+    `/api/v1/${wsId}/graph/bootstrap/review/decision?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+    withReason(jsonBody(body), opts?.reason),
   )
 }
 
