@@ -4936,20 +4936,23 @@ export function ContextViewCanvas({
       layerOf: (id) => nodeLayerMap.get(id) ?? nodeLayerMap.get(urnToIdMap.get(id) ?? ''),
       layerRoots,
       childTypes: creationChildTypes,
-      // What the canvas shows (in some column) that can hold the type, up to what is offered.
+      // What the canvas shows (a row in some column, or a column's own entity) that can hold the
+      // type, up to what is offered, by name.
       parentsFor: (t) => {
-        const out: ScopeNode[] = []
+        const columns = new Set(sortedLayers.filter((l) => l.anchorUrn && !anchorIssueByLayer.has(l.id)).map((l) => l.anchorUrn!))
+        const out: Array<ScopeNode & { name: string }> = []
         for (const n of canvasNodes) {
           if (out.length >= SCOPE_CHOICE_LIMIT) break
           const nt = n.data?.type as string | undefined
-          if (!nt || n.data?.isPending === 'delete' || !nodeLayerMap.has(n.id)) continue
-          if (creationChildTypes(nt).includes(t)) out.push({ urn: (n.data?.urn as string) || n.id, typeId: nt })
+          const urn = (n.data?.urn as string) || n.id
+          if (!nt || n.data?.isPending === 'delete' || !(nodeLayerMap.has(n.id) || columns.has(urn))) continue
+          if (creationChildTypes(nt).includes(t)) out.push({ urn, typeId: nt, name: resolveEntityName(n.data, personaMode, n.id) })
         }
-        return out
+        return out.sort((a, b) => a.name.localeCompare(b.name)).map(({ urn, typeId }) => ({ urn, typeId }))
       },
       lastTypeIn: useHierarchyBuilderStore.getState().lastTypeIn,
     })
-  }, [sortedLayers, nodesByLayer, anchorIssueByLayer, scopeNodeOf, nodeLayerMap, urnToIdMap, creationChildTypes])
+  }, [sortedLayers, nodesByLayer, anchorIssueByLayer, scopeNodeOf, nodeLayerMap, urnToIdMap, creationChildTypes, personaMode])
   // N: in the selection's layer when it is in one; otherwise the top level, as it always was.
   const createFromKey = useCallback(() => {
     const { selectedNodeIds } = useCanvasStore.getState()

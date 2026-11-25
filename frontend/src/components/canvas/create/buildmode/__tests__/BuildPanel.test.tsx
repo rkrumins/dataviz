@@ -25,8 +25,16 @@ vi.mock('../stageBuildRows', () => ({ useStageBuildRows: () => ({ stageBuildRows
 vi.mock('../applyBuild', () => ({ filterStageableRows: (rows: unknown[]) => rows }))
 
 import { BuildPanel } from '../BuildPanel'
+import { useHierarchyBuilderStore } from '../../hierarchyBuilderStore'
+import { useCanvasStore } from '@/store/canvas'
+import { useSchemaStore } from '@/store/schema'
+import { usePersonaStore } from '@/store/persona'
 
-afterEach(() => useBuildRowsStore.getState().reset())
+afterEach(() => {
+  useBuildRowsStore.getState().reset()
+  useHierarchyBuilderStore.setState({ parentUrn: null, layerId: null, initialTypeId: null, askParent: false, choices: [], topLevelTypeId: null })
+  usePersonaStore.setState({ mode: 'technical' })
+})
 
 describe('BuildPanel', () => {
   it('hands contractRowLayer to the Grid and the Paste preview', () => {
@@ -74,5 +82,68 @@ describe('BuildPanel', () => {
     await act(async () => {})
     expect(useBuildRowsStore.getState().rows).toHaveLength(1)
     expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
+describe('BuildPanel — where its top-level rows go', () => {
+  const type = (id: string, name: string, canContain: string[], canBeContainedBy: string[], level: number) => ({
+    id, name, pluralName: `${name}s`, visual: {}, fields: [], behavior: {},
+    hierarchy: { level, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
+  })
+  const seed = () => {
+    useSchemaStore.setState({
+      activeViewId: null,
+      schema: {
+        id: 's', name: 's', version: '1', views: [], defaultViewId: '', globalVisuals: {},
+        entityTypes: [type('domain', 'Domain', ['app'], [], 0), type('app', 'App', [], ['domain'], 1)],
+        relationshipTypes: [{ id: 'CONTAINS', name: 'Contains', sourceTypes: [], targetTypes: [], isContainment: true }],
+        containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: [], rootEntityTypes: ['domain'],
+      },
+    } as never)
+    useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set() } as never)
+    useCanvasStore.getState().addNodes(['Finance', 'Sales'].map((name) => ({
+      id: `urn:${name}`, type: 'generic', position: { x: 0, y: 0 },
+      data: { label: name, businessLabel: `${name} team`, type: 'domain', urn: `urn:${name}` },
+    })))
+  }
+
+  it('asked where an "Apps" layer\'s rows go: the question first, Apply waits, and a pick answers it', () => {
+    seed()
+    useHierarchyBuilderStore.setState({
+      parentUrn: null, layerId: 'apps', initialTypeId: 'app', askParent: true,
+      choices: [{ urn: 'urn:Finance', typeId: 'domain' }, { urn: 'urn:Sales', typeId: 'domain' }], topLevelTypeId: 'domain',
+    })
+    useBuildRowsStore.getState().setRows([makeRow({ id: 'r', name: 'Billing' })])
+    render(<BuildPanel onClose={() => {}} layerId="apps" typeLayerMap={new Map([['app', 'apps']])} />)
+
+    expect(screen.getByTestId('build-scope')).toHaveTextContent('Choose a parent for these Apps')
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
+    expect(screen.getByText('Choose where these go to apply them')).toBeInTheDocument()
+    const picker = screen.getByRole('listbox', { name: 'Where to add' })
+    expect(picker).toHaveTextContent('Can hold an App')
+
+    fireEvent.click(screen.getByRole('option', { name: /Finance/ }))
+    expect(useHierarchyBuilderStore.getState()).toMatchObject({ parentUrn: 'urn:Finance', askParent: false })
+    expect(screen.getByTestId('build-scope')).toHaveTextContent('Adding inside Finance · Domain')
+    expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled()
+    // Not pinned to the Apps column: rows added inside an entity go where it is.
+    expect(screen.getByText('These go inside Finance.')).toBeInTheDocument()
+  })
+
+  it('inside a layer\'s node, Change moves it — to the top level too', () => {
+    seed()
+    usePersonaStore.setState({ mode: 'business' })
+    useHierarchyBuilderStore.setState({
+      parentUrn: 'urn:Finance', layerId: null, initialTypeId: 'app', askParent: false,
+      choices: [{ urn: 'urn:Finance', typeId: 'domain' }], topLevelTypeId: 'domain',
+    })
+    render(<BuildPanel onClose={() => {}} />)
+
+    // The business view names it as the business does, without its type.
+    expect(screen.getByTestId('build-scope')).toHaveTextContent(/^Adding inside Finance teamChange$/)
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }))
+    fireEvent.click(screen.getByRole('option', { name: /A new Domain, on its own/ }))
+    expect(useHierarchyBuilderStore.getState().parentUrn).toBeNull()
+    expect(screen.getByTestId('build-scope')).toHaveTextContent('Adding at the top level')
   })
 })

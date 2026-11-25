@@ -43,7 +43,8 @@ import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import { ContinueAddingPill } from './ContinueAddingPill'
 import { useHierarchyOutline, type OutlineRow } from './useHierarchyOutline'
 import { childTypesLookup } from './resolveCreationScope'
-import { ScopePickerPopover, article, useDismiss, useScopeName } from './ScopePicker'
+import { ScopePickerPopover } from './ScopePicker'
+import { article, useDismiss, useScopeName } from './scopePickerHooks'
 import { usePersonaMode } from '@/store/persona'
 import { useLayers } from '@/store/referenceModelStore'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
@@ -77,6 +78,9 @@ function TypeChip({ type, size = 'sm' }: { type?: EntityTypeSchema; size?: 'xs' 
 }
 
 const splitTags = (s: string): string[] => s.split(',').map((t) => t.trim()).filter(Boolean)
+
+/** How many of the scope's parents the "Or inside" row names; the picker has the rest. */
+const QUICK_CHOICES = 4
 
 /**
  * The entity types allowed directly under `parentType` (or root when null),
@@ -157,6 +161,8 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const [detailsRowUrn, setDetailsRowUrn] = useState<string | null>(null)
   const [blockFlash, setBlockFlash] = useState(0)
   const nameRef = useRef<HTMLInputElement>(null)
+  /** The "where it goes" banner: the parent picker opens under it. */
+  const scopeRef = useRef<HTMLDivElement>(null)
   const typeSearchRef = useRef<HTMLInputElement>(null)
   const typeListRef = useRef<HTMLDivElement>(null)
   const didInitialFocus = useRef(false)
@@ -489,7 +495,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
               </div>
             </div>
 
-            <div className="mt-3 relative" data-testid="builder-scope">
+            <div ref={scopeRef} className="mt-3 relative" data-testid="builder-scope">
               {awaitingParent ? (
                 <button
                   type="button"
@@ -532,53 +538,52 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                     </button>
                   </div>
                   {quickChoices.length > 0 && (
-                    <div className="flex items-center gap-1.5 px-1 min-w-0" role="group" aria-label="Or add inside">
+                    <div className="flex flex-wrap items-center gap-1.5 px-1 min-w-0" role="group" aria-label="Or add inside">
                       <span className="text-[11px] text-ink-muted flex-shrink-0">Or inside</span>
-                      {quickChoices.slice(0, 3).map((c) => (
+                      {quickChoices.slice(0, QUICK_CHOICES).map((c) => (
                         <button
                           key={c.urn}
                           type="button"
-                          onClick={() => { retarget(c.urn); focusName() }}
+                          onClick={() => { retarget(c.urn); setShowParentPicker(false); focusName() }}
                           title={`Add inside ${c.name}`}
-                          className="min-w-0 max-w-[110px] flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] text-[11px] text-ink hover:border-accent-lineage/50 hover:bg-accent-lineage/[0.06] transition-colors"
+                          className="min-w-0 max-w-[150px] flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] text-[11px] text-ink hover:border-accent-lineage/50 hover:bg-accent-lineage/[0.06] transition-colors"
                         >
                           <TypeChip type={typeById.get(c.typeId)} size="xs" />
                           <span className="truncate">{c.name}</span>
                         </button>
                       ))}
-                      {quickChoices.length > 3 && (
+                      {quickChoices.length > QUICK_CHOICES && (
                         <button
                           type="button"
                           onClick={() => setShowParentPicker(true)}
                           className="flex-shrink-0 text-[11px] font-medium text-accent-lineage hover:underline"
                         >
-                          +{quickChoices.length - 3} more
+                          +{quickChoices.length - QUICK_CHOICES} more
                         </button>
                       )}
                     </div>
                   )}
                 </div>
               )}
-              <AnimatePresence>
-                {showParentPicker && (
-                  <ScopePickerPopover
-                    nodes={canvasNodes}
-                    typeById={typeById}
-                    canHold={canHold}
-                    choices={scopeChoices}
-                    choicesLabel={awaitingParent
-                      ? `Can hold ${article(askedType?.name ?? 'entity')} ${askedType?.name ?? 'entity'}`
-                      : layerName ? `In ${layerName}` : undefined}
-                    emptyText={awaitingParent
-                      ? `Nothing on the canvas can hold ${article(askedType?.name ?? 'entity')} ${askedType?.name ?? 'entity'} yet.`
-                      : undefined}
-                    topLevel={{ label: topLevelLabel, typeId: topLevelTypeId, onPick: () => { toTopLevel(); setShowParentPicker(false); focusName() } }}
-                    selectedUrn={awaitingParent ? undefined : active.parentUrn}
-                    onPick={(urn) => { retarget(urn); setShowParentPicker(false); focusName() }}
-                    onClose={() => setShowParentPicker(false)}
-                  />
-                )}
-              </AnimatePresence>
+              {showParentPicker && (
+                <ScopePickerPopover
+                  anchorRef={scopeRef}
+                  nodes={canvasNodes}
+                  typeById={typeById}
+                  canHold={canHold}
+                  choices={scopeChoices}
+                  choicesLabel={awaitingParent
+                    ? `Can hold ${article(askedType?.name ?? 'entity')} ${askedType?.name ?? 'entity'}`
+                    : layerName ? `In ${layerName}` : undefined}
+                  emptyText={awaitingParent
+                    ? `Nothing on the canvas can hold ${article(askedType?.name ?? 'entity')} ${askedType?.name ?? 'entity'} yet.`
+                    : undefined}
+                  topLevel={{ label: topLevelLabel, typeId: topLevelTypeId, onPick: () => { toTopLevel(); setShowParentPicker(false); focusName() } }}
+                  selectedUrn={awaitingParent ? undefined : active.parentUrn}
+                  onPick={(urn) => { retarget(urn); setShowParentPicker(false); focusName() }}
+                  onClose={() => setShowParentPicker(false)}
+                />
+              )}
             </div>
           </div>
 

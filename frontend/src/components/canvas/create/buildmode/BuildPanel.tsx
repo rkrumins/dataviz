@@ -13,7 +13,7 @@
  * subtree (an unstaged parent can't be linked to), then the survivors are
  * committed via `stageBuildRows` in one O(n) pass.
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -40,7 +40,8 @@ import { BuildPaste } from './BuildPaste'
 import { useLayers } from '@/store/referenceModelStore'
 import { usePersonaMode } from '@/store/persona'
 import { childTypesLookup } from '../resolveCreationScope'
-import { ScopePickerPopover, article, useScopeName } from '../ScopePicker'
+import { ScopePickerPopover } from '../ScopePicker'
+import { article, useScopeName } from '../scopePickerHooks'
 
 /** Flag-on (One Placement Contract): the layer Apply draws a new top-level row in. */
 export type ContractRowLayer = (row: Pick<BuildRow, 'name' | 'typeId' | 'tags' | 'properties' | 'layerId'>) => string | undefined
@@ -128,6 +129,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
   const nameOf = useScopeName()
   const waiting = askParent && !parentUrn
   const [pickerOpen, setPickerOpen] = useState(waiting)
+  const scopeRef = useRef<HTMLDivElement>(null)
   const childTypes = useMemo(
     () => childTypesLookup(entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes),
     [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes],
@@ -175,8 +177,11 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
   const rawLayers = useLayers()
   const layerNameById = useMemo(() => new Map(rawLayers.map((l) => [l.id, l.name])), [rawLayers])
   const scopeLayerName = scopeLayerId ? layerNameById.get(scopeLayerId) : undefined
+  const parentName = parentNode ? nameOf(parentNode, (parentNode.data?.label as string) ?? parentUrn ?? '') : null
   const placementText = useMemo(() => {
     if (!typeLayerMap && !layerId) return null // non-layered canvas — nothing to say about columns
+    // Inside an entity, a row no one placed is not pinned anywhere: it goes where its parent is.
+    if (parentName && validated.every((r) => !r.layerId)) return `These go inside ${parentName}.`
     const targets = new Set(
       validated.map((r) => (contractRowLayer
         ? contractRowLayer(r)
@@ -187,7 +192,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
       if (name) return `These land in ${name}.`
     }
     return 'Top-level entities go to their column; nested items stay under their parent.'
-  }, [typeLayerMap, contractRowLayer, layerId, validated, layerNameById])
+  }, [typeLayerMap, contractRowLayer, layerId, validated, layerNameById, parentName])
 
   const { stageBuildRows } = useStageBuildRows()
   const [applying, setApplying] = useState(false)
@@ -234,7 +239,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
               </button>
             </div>
 
-            <div className="mt-3 relative" data-testid="build-scope">
+            <div ref={scopeRef} className="mt-3 relative" data-testid="build-scope">
               {waiting ? (
                 <button
                   type="button"
@@ -267,22 +272,21 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
                   </button>
                 </div>
               )}
-              <AnimatePresence>
-                {pickerOpen && (
-                  <ScopePickerPopover
-                    nodes={canvasNodes}
-                    typeById={typeById}
-                    canHold={canHold}
-                    choices={scopeChoices}
-                    choicesLabel={waiting ? `Can hold ${article(askedName)} ${askedName}` : scopeLayerName ? `In ${scopeLayerName}` : undefined}
-                    emptyText={waiting ? `Nothing on the canvas can hold ${article(askedName)} ${askedName} yet.` : undefined}
-                    topLevel={{ label: topLevelLabel, typeId: topLevelTypeId, onPick: () => rescope(null) }}
-                    selectedUrn={waiting ? undefined : parentUrn}
-                    onPick={(urn) => rescope(urn)}
-                    onClose={() => setPickerOpen(false)}
-                  />
-                )}
-              </AnimatePresence>
+              {pickerOpen && (
+                <ScopePickerPopover
+                  anchorRef={scopeRef}
+                  nodes={canvasNodes}
+                  typeById={typeById}
+                  canHold={canHold}
+                  choices={scopeChoices}
+                  choicesLabel={waiting ? `Can hold ${article(askedName)} ${askedName}` : scopeLayerName ? `In ${scopeLayerName}` : undefined}
+                  emptyText={waiting ? `Nothing on the canvas can hold ${article(askedName)} ${askedName} yet.` : undefined}
+                  topLevel={{ label: topLevelLabel, typeId: topLevelTypeId, onPick: () => rescope(null) }}
+                  selectedUrn={waiting ? undefined : parentUrn}
+                  onPick={(urn) => rescope(urn)}
+                  onClose={() => setPickerOpen(false)}
+                />
+              )}
             </div>
           </div>
 

@@ -5,31 +5,37 @@
  *
  * Fast on a canvas of thousands: the candidates are listed once when it opens (one pass over the
  * canvas, a lookup per node), and a keystroke filters that list, stopping at what it shows.
+ *
+ * Portalled to the body, fixed to its anchor's rect (as DisplayMenu is): both panels it opens in
+ * are blurred glass, whose stacking context — and `overflow-hidden` — would otherwise hold it.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
-import { resolveEntityName } from '@/lib/entityDisplayName'
-import { usePersonaMode } from '@/store/persona'
 import type { LineageNode } from '@/store/canvas'
 import type { EntityTypeSchema } from '@/types/schema'
 import type { ScopeNode } from './resolveCreationScope'
+import { Z_INDEX } from '@/lib/zIndex'
+import { useDismiss, useScopeName } from './scopePickerHooks'
 
 /** How many of the rest of the canvas a search shows. */
 const ELSEWHERE_LIMIT = 30
 /** How many it lists with no search and no scope of its own (a row's "+", a node's menu). */
 const UNSCOPED_LIMIT = 100
+/** Its widest, under a wide anchor (Build's banner). */
+const MAX_WIDTH = 420
 
-export interface ScopeOption {
+interface ScopeOption {
   urn: string
   name: string
   typeId: string
 }
 
 /** The ontology-coloured chip shown wherever a type appears. */
-export function ScopeTypeChip({ type }: { type?: EntityTypeSchema }) {
+function ScopeTypeChip({ type }: { type?: EntityTypeSchema }) {
   const color = type?.visual?.color
   return (
     <span className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${color}20`, color }}>
@@ -38,19 +44,13 @@ export function ScopeTypeChip({ type }: { type?: EntityTypeSchema }) {
   )
 }
 
-/** An entity's name as the current view shows it. */
-export function useScopeName() {
-  const persona = usePersonaMode()
-  return useCallback((node: LineageNode | undefined, fallback: string) =>
-    resolveEntityName(node?.data as Parameters<typeof resolveEntityName>[0], persona, fallback), [persona])
-}
 
-/** 'a' or 'an', for "an App". */
-export const article = (word: string) => (/^[aeiou]/i.test(word) ? 'an' : 'a')
 
 export function ScopePickerPopover({
-  nodes, typeById, canHold, choices, choicesLabel, topLevel, selectedUrn, emptyText, onPick, onClose,
+  anchorRef, nodes, typeById, canHold, choices, choicesLabel, topLevel, selectedUrn, emptyText, onPick, onClose,
 }: {
+  /** What it opens under: its left edge and width, and clicks inside it don't dismiss it. */
+  anchorRef: React.RefObject<HTMLElement | null>
   nodes: LineageNode[]
   typeById: Map<string, EntityTypeSchema>
   /** May something be added inside an entity of this type (of the type asked for, when one is)? */
@@ -73,9 +73,27 @@ export function ScopePickerPopover({
   const listRef = useRef<HTMLDivElement>(null)
   const [q, setQ] = useState('')
   const [hi, setHi] = useState(0)
+  const [at, setAt] = useState<{ top: number; left: number; width: number } | null>(null)
   const nameOf = useScopeName()
-  useDismiss(ref, onClose)
-  useEffect(() => { searchRef.current?.focus() }, [])
+  useDismiss(ref, onClose, anchorRef)
+  const placed = at !== null
+  useEffect(() => { if (placed) searchRef.current?.focus() }, [placed])
+
+  // After commit, not in layout: opened with its panel, the anchor's ref is attached only once this
+  // child's layout effects have run.
+  useEffect(() => {
+    const update = () => {
+      const r = anchorRef.current?.getBoundingClientRect()
+      if (r) setAt({ top: r.bottom + 4, left: r.left, width: Math.min(r.width, MAX_WIDTH) })
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [anchorRef])
 
   // Every candidate on the canvas, once per open (and per change to the canvas while open).
   const all = useMemo(() => {
@@ -99,7 +117,7 @@ export function ScopePickerPopover({
   const shownScoped = scoped.filter(matches)
   const scopedUrns = new Set(scoped.map((o) => o.urn))
   // The rest of the canvas: when searched — or, with no scope of its own, the first of it.
-  let elsewhere: ScopeOption[] = []
+  const elsewhere: ScopeOption[] = []
   let elsewhereMore = 0
   if (query || scoped.length === 0) {
     const limit = query ? ELSEWHERE_LIMIT : UNSCOPED_LIMIT
@@ -139,7 +157,7 @@ export function ScopePickerPopover({
         onClick={() => onPick(o.urn)}
         onMouseMove={() => setHi(i)}
         className={cn('w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors',
-          i === active ? 'bg-accent-lineage/10' : 'hover:bg-black/5 dark:hover:bg-white/5')}
+          i === active && 'bg-accent-lineage/10')}
       >
         <ScopeTypeChip type={type} />
         <span className="flex-1 min-w-0 text-sm text-ink truncate">{o.name}</span>
@@ -152,14 +170,16 @@ export function ScopePickerPopover({
     <div className="px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-muted">{text}</div>
   )
 
-  return (
+  if (!at || typeof document === 'undefined') return null
+  // No exit animation: it unmounts at once, so an interrupted exit can't strand a click-blocker.
+  return createPortal(
     <motion.div
       ref={ref}
       initial={{ opacity: 0, scale: 0.97, y: -4 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.97, y: -4 }}
       transition={{ duration: 0.12 }}
-      className="absolute left-0 right-0 top-full mt-1 z-50 bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-xl shadow-lg overflow-hidden"
+      style={{ position: 'fixed', top: at.top, left: at.left, width: at.width, zIndex: Z_INDEX.popover, maxHeight: `calc(100vh - ${at.top}px - 16px)` }}
+      className="flex flex-col bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-xl shadow-lg overflow-hidden"
     >
       <div className="p-2 border-b border-glass-border">
         <div className="relative">
@@ -174,7 +194,7 @@ export function ScopePickerPopover({
           />
         </div>
       </div>
-      <div ref={listRef} role="listbox" aria-label="Where to add" className="max-h-[280px] overflow-y-auto custom-scrollbar p-1.5 space-y-0.5">
+      <div ref={listRef} role="listbox" aria-label="Where to add" className="min-h-0 max-h-[280px] overflow-y-auto custom-scrollbar p-1.5 space-y-0.5">
         {shownScoped.length > 0 && (
           <>
             {choicesLabel && heading(choicesLabel)}
@@ -209,7 +229,7 @@ export function ScopePickerPopover({
                 onClick={() => topLevel!.onPick()}
                 onMouseMove={() => setHi(i)}
                 className={cn('w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors',
-                  i === active ? 'bg-accent-lineage/10' : 'hover:bg-black/5 dark:hover:bg-white/5')}
+                  i === active && 'bg-accent-lineage/10')}
               >
                 {topLevel!.typeId ? <ScopeTypeChip type={typeById.get(topLevel!.typeId)} /> : (
                   <span className="w-4 h-4 flex items-center justify-center flex-shrink-0 text-ink-muted"><LucideIcons.Globe className="w-3 h-3" /></span>
@@ -221,17 +241,7 @@ export function ScopePickerPopover({
           )
         })()}
       </div>
-    </motion.div>
+    </motion.div>,
+    document.body,
   )
-}
-
-/** Dismiss on outside-click + Escape (matches EdgeTypePickerPopover). */
-export function useDismiss(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    const t = window.setTimeout(() => document.addEventListener('mousedown', onDown), 0)
-    document.addEventListener('keydown', onKey)
-    return () => { window.clearTimeout(t); document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
-  }, [ref, onClose])
 }
