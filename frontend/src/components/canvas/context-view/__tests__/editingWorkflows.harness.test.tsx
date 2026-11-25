@@ -527,6 +527,27 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'Ledger', entityType: 'app', parentUrn: 'Finance' })])
   }, 30000)
 
+  it('an App added from the Apps column lands in the Apps column, though its parent is in Domains', async () => {
+    const h = await openDomains()
+    await click(h, within(headerOf('apps')).getByRole('button', { name: 'Add entity to Apps' }))
+    await click(h, within(screen.getByRole('listbox', { name: 'Where to add' })).getByRole('option', { name: /^Sales/ }))
+    await addNamed(h, 'Quotes')
+    expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'Quotes', entityType: 'app', parentUrn: 'Sales' })])
+    // The view is curated: left to containment, the App would follow Sales into Domains.
+    const column = (id: string) => document.querySelector<HTMLElement>(`[data-layer-id="${id}"]`)!
+    expect(within(column('apps')).getByText('Quotes')).toBeTruthy()
+    expect(within(column('domains')).queryByText('Quotes')).toBeNull()
+  }, 30000)
+
+  it('an App added with a Domain\'s row "+" stays under its Domain, as before', async () => {
+    const h = await openDomains()
+    await click(h, within(cardBody('Sales')).getByRole('button', { name: 'Add child entity' }))
+    await addNamed(h, 'Forecast')
+    const column = (id: string) => document.querySelector<HTMLElement>(`[data-layer-id="${id}"]`)!
+    expect(within(column('domains')).getByText('Forecast')).toBeTruthy()
+    expect(within(column('apps')).queryByText('Forecast')).toBeNull()
+  }, 30000)
+
   it('the palette\'s Create App: inside the selection when it can hold one, else it asks', async () => {
     const h = await openDomains()
     const createApp = async () => {

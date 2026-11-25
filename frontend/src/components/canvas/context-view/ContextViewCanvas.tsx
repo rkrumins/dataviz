@@ -8866,7 +8866,17 @@ export function ContextViewCanvas({
               // canonical view-config entry (keyed by the temp urn, remapped on save) plus the
               // optimistic session assignment.
               // Flag-on: pinned only when the view is curated or the contract would place it elsewhere.
-              const layer = parentUrn ? undefined : placementSpec
+              // One exception for a child: added from a column that holds its type (an App from the
+              // Apps column) under a parent drawn in another column, it is that column's by its own
+              // rule — pinned there, it lands where the reader added it rather than in the parent's.
+              const created = useCanvasStore.getState().nodes.find(n => n.id === tempUrn)
+              const createdType = typeof created?.data?.type === 'string' ? created.data.type : ''
+              const fromLayer = builderLayerId ? sortedLayers.find(l => l.id === builderLayerId) : undefined
+              const parentLayer = parentUrn ? renderedLayerRef.current.get(urnToIdMap.get(parentUrn) ?? parentUrn) : undefined
+              const holdsItsType = !!fromLayer && !!createdType && (fromLayer.entityTypes ?? []).includes(createdType)
+              const layer = parentUrn
+                ? (holdsItsType && parentLayer !== fromLayer!.id ? fromLayer!.id : undefined)
+                : placementSpec
                 ? contractPin(placementSpec,
                   factsFromCanvasData(useCanvasStore.getState().nodes.find(n => n.id === tempUrn)?.data, tempUrn),
                   builderLayerId, sortedLayers[0]?.id)
