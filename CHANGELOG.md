@@ -121,6 +121,13 @@ Every new capability ships behind its own switch, off by default.
 - **Bulk clean-ups reach relationships**: replace, normalize, map values and convert, previewed on
   the relationships' own values. A job over a Connections search covers the relationships the
   draft added or changed, and lists those that no longer match.
+- **Display rules for relationships**: a rule can apply to relationships — a Connections search,
+  its ends optional, through the types you pick, with an edge filter by any operator — and draws
+  their lines on the Graph canvas in its colour, dashed or dotted, thin or bold, with its chip. The
+  editor asks what a rule applies to, then its condition (with a count of what it matches), then
+  its look, shown as it will be drawn. A bundled line is styled when any relationship it stands
+  for matches; a roll-up never is. Library files carry them, warning of relationship types the
+  view's semantic layer doesn't have. Existing rules are unchanged.
 - **A versioned graph's health shows its property names**: how many it uses of the graph store's
   65,534, the budget past which new names are kept as values (still shown and exported), a warning
   near and at it, and which keys on items and on relationships were kept as values.
@@ -214,6 +221,10 @@ Every new capability ships behind its own switch, off by default.
   no flat file carries a property whose value is null.
 - A bulk job over a Connections search doesn't reach a relationship the draft didn't change whose
   ends it changed to match; the job's summary says so.
+- Relationship display rules style the Graph canvas's lines only (the Context View draws its own),
+  and can't be made from Advanced Search's "Make a rule" yet. On a draft, a relationship the draft
+  didn't change whose end it changed keeps the published look, and its count is the published
+  graph's; both say so. A view with more members than can be listed can't evaluate them.
 - One relationship per source, type and target, as before (both directions and several types per
   pair are supported). Several of one type between two items is proposed as an opt-in per type in
   `docs/versioning/20-parallel-relationships.md`.
