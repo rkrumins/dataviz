@@ -275,8 +275,9 @@ describe('relationships', () => {
     expect(opProblem(op({ key: 'displayName' }), true)).toBeNull()
     expect(opProblem(op({ kind: 'rename', key: 'owner', to: 'weight' }), true)).toMatch(/kept by the platform/)
     expect(opProblem(op({ key: 'confidence' }))).toBeNull()
-    // A clean-up previews catalogued values — entities' only.
-    expect(opProblem(op({ kind: 'normalize' }), true)).toMatch(/Clean-ups are for entities/)
+    // A relationship's values are cleaned up as an entity's are.
+    expect(opProblem(op({ kind: 'normalize', key: 'team' }), true)).toBeNull()
+    expect(opProblem(op({ kind: 'replace', key: 'team' }), true)).toBe('Say what to find')
   })
 
   it('Review counts a Connections search\'s relationships holding the key by the same search, each edge holding it', () => {

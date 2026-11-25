@@ -902,6 +902,40 @@ async def read_sample(graph_id: str, branch_id: str, op: Mapping[str, Any], keys
     return await asyncio.to_thread(rows)
 
 
+#: The relationships whose values a clean-up's preview reads (``…/property-jobs/preview/values``):
+#: fewer than a Connections search's page holds (``EDGES_PAGE_MAX``), so a page of one more says
+#: the search reaches more.
+VALUES_READ = 400
+
+
+async def read_edge_values(graph_id: str, branch_id: str, key: str, keys: Iterable[str], *,
+                           complete: bool) -> Dict[str, Any]:
+    """The values ``key`` holds on the relationships ``keys`` name in the draft, read as a window
+    reads them (:func:`edge_winners`; a roll-up left out, as a job leaves it) — what a clean-up
+    previews for relationships, which no catalog counts. Counted as a view's catalog counts an
+    entity's (``CatalogStats``: each value by its kind, a list's each distinct element), by
+    relationship type, every value listed: ``{property, read}`` — ``property`` the catalog's shape,
+    or None where none holds ``key``; ``read`` how many relationships were read. ``complete``:
+    ``keys`` are all the target reaches, so its distinct values are known exactly."""
+    from backend.app.providers.falkordb_search.catalog import VALUES_MAX, CatalogStats
+
+    winners, _deleted, _missing = await edge_winners(await open_snapshot(graph_id=graph_id, branch_id=branch_id),
+                                                     keys)
+
+    def tally() -> Dict[str, Any]:
+        stats, seen = CatalogStats(), set()
+        for w in winners.values():
+            if w.entity_id in seen or is_derived_edge_type(w.edge_type or ""):
+                continue
+            seen.add(w.entity_id)
+            props = (json.loads(w.payload) if w.payload else {}).get("properties") or {}
+            stats.add_entity(w.edge_type or "", {key: props[key]} if key in props else {}, None, frozenset())
+        return {"property": stats.describe(key, complete, shown=VALUES_MAX) if key in stats.keys else None,
+                "read": len(seen)}
+
+    return await asyncio.to_thread(tally)
+
+
 async def window_commits(s, graph_id: str, branch_id: str, job) -> List[List[Any]]:
     """The commits a bulk property job's windows wrote on its draft, newest first, as
     ``[commit id, seq]`` — found as a publish's audit finds them: on the draft between its first

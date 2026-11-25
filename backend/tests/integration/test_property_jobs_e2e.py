@@ -1043,6 +1043,82 @@ def test_the_sample_shows_relationships_before_and_after_never_a_roll_up_changed
     asyncio.run(_edge_sample(monkeypatch))
 
 
+async def _edge_cleanups(monkeypatch) -> None:
+    """A relationship's values are cleaned up as an entity's are — counted on the draft, written
+    in the kind asked for, what won't convert counted and listed, never a roll-up's — and the values
+    a clean-up previews are read from the relationships it reaches, as no catalog counts them."""
+    from httpx import ASGITransport, AsyncClient
+    from backend.app.services.versioning.import_export import property_job
+    from .test_versioning_main_write_publish import PAT, V1, _app
+
+    svc, ds, gid, draft = await _draft(owner="pat", nodes=[_node(i) for i in range(3)] + [
+        _edge("E1", "N0", "N1", team=" Finance", rank="42"), _edge("E2", "N1", "N2", team="finance", rank="n/a"),
+        _edge("E3", "N0", "N2", "FEEDS", team=["Finance", "ops"], rank=7),
+        _edge("R1", "N0", "N2", "AGGREGATED", team="finance", rank="1")])
+    ie = ImportExportService(versioning=svc)
+    ids = ["E1", "E2", "E3", "R1"]
+
+    async def run(op, key):
+        job_id = (await ie.create_property_job(
+            workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="pat", op=op,
+            target={"ids": ids}, message=None, key=key, entity_kind="edge"))["job_id"]
+        return job_id, await ie.run_property(job_id)
+
+    convert = _cleanup("convert", "rank", toKind="Integer", onFail="skip")
+    counts = await ie.preview_property_counts(graph_id=gid, branch_id=draft, op=convert, ids=ids, entity_kind="edge")
+    assert (counts["wouldChange"], counts["unconvertible"], counts["derived"]) == (1, 1, 1), counts
+    job_id, summary = await run(convert, "key-edge-convert1")
+    assert (summary["changed"], summary["unchanged"], summary["unconvertible"]) == (1, 1, 1), summary
+    assert summary["refused"]["byReason"] == {"unconvertible": 1, "derived": 1}
+    assert [(await _props(svc, gid, draft, e))["rank"] for e in ("E1", "E2", "E3", "R1")] == [42, "n/a", 7, "1"]
+    assert (await _props(svc, gid, None, "E1"))["rank"] == "42"                       # main untouched
+    _job, summary = await run(_cleanup("normalize", "team", trim=True, case="title", dedupeList=True),
+                              "key-edge-normal1")
+    assert (summary["changed"], summary["unchanged"]) == (3, 0), summary
+    assert [(await _props(svc, gid, draft, e))["team"] for e in ("E1", "E2", "E3", "R1")] == [
+        "Finance", "Finance", ["Finance", "Ops"], "finance"]
+
+    app, _G = _app()
+    values = f"{V1}/graphs/{gid}/branches/{draft}/property-jobs/preview/values"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(values, json={"key": "team", "target": {"edgeIds": ids + ["nope"]}}, headers=PAT)
+        assert r.status_code == 200, r.text
+        got = r.json()
+        assert (got["read"], got["truncated"]) == (3, False), "a roll-up is never read, nor what isn't there"
+        prop = got["property"]
+        assert (prop["key"], prop["count"], prop["kinds"], prop["byEntityType"]) == (
+            "team", 3, {"String": 2, "List": 1}, {"FLOWS_TO": 2, "FEEDS": 1})
+        assert prop["values"] == [{"value": "Finance", "kind": "String", "count": 3},
+                                  {"value": "Ops", "kind": "String", "count": 1}]
+        assert (prop["distinct"], prop["distinctExact"]) == (2, True)
+        r = await c.post(values, json={"key": "nothing", "target": {"edgeIds": ids}}, headers=PAT)
+        assert r.json() == {"property": None, "read": 3, "truncated": False}, r.text
+
+        # A Connections search's: its first page of relationships.
+        monkeypatch.setattr(property_job, "VALUES_READ", 2)
+        asked = _sample_search(monkeypatch, edges=["E1", "E2", "E3"])
+        search = {"viewId": "v1", "scopeMode": "view", "predicate": {"kind": "edges", "edgeTypes": ["FLOWS_TO", "FEEDS"]}}
+        r = await c.post(values, json={"key": "rank", "target": search}, headers=PAT)
+        assert r.status_code == 200, r.text
+        assert (r.json()["read"], r.json()["truncated"]) == (2, True) and asked[0].options.page_size == 3
+        assert r.json()["property"]["values"] == [{"value": 42, "kind": "Integer", "count": 1},
+                                                  {"value": "n/a", "kind": "String", "count": 1}]
+        assert r.json()["property"]["distinctExact"] is False, "only some of what it reaches was read"
+
+        # Entities' values are the view's catalog's; and a draft's, never main's.
+        r = await c.post(values, json={"key": "team", "target": {"ids": ["urn:n0"]}}, headers=PAT)
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "entity_target", r.text
+        main = await svc.main_branch_id(gid)
+        r = await c.post(f"{V1}/graphs/{gid}/branches/{main}/property-jobs/preview/values",
+                         json={"key": "team", "target": {"edgeIds": ids}}, headers=PAT)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "main_write_forbidden", r.text
+    await db.dispose_engine()
+
+
+def test_a_relationships_values_are_cleaned_up_and_previewed_from_what_it_reaches(monkeypatch):
+    asyncio.run(_edge_cleanups(monkeypatch))
+
+
 # ── undo a bulk job, from the draft's history ─────────────────────────────────
 async def _undo(ie, ds, gid, job_id, key="key-undo-00001", actor="alice"):
     return (await ie.create_undo_job(workspace_id="ws1", data_source_id=ds, graph_id=gid, job_id=job_id,

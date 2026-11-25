@@ -964,6 +964,24 @@ def test_what_an_edge_job_refuses_before_it_is_made(V):
     assert _code(V, {"kind": "set", "key": "code", "value": "X"}, search, rules=rules) is None
 
 
+def test_a_relationships_values_are_cleaned_up_as_an_entitys_are(V):
+    """Every clean-up is made over relationships, named or a Connections search's — a merge into
+    one value too, where an entity type keeps that key unique: a relationship's are never unique —
+    and planned for an edge as for an entity, by the same rules."""
+    rules = OntologyRules(entity_types={"Dataset": EntityRule(unique_fields=frozenset({"code"}))})
+    merge = {"kind": "mapValues", "key": "code", "map": [{"from": "a", "to": "A"}, {"from": "a ", "to": "A"}]}
+    for target in ({"edgeIds": ["e1", "e2"]}, {"viewId": "v", "predicate": {"kind": "edges"}}):
+        for op in (merge, {"kind": "replace", "key": "code", "find": "a", "replaceWith": "b"},
+                   {"kind": "normalize", "key": "code", "case": "upper"},
+                   {"kind": "convert", "key": "code", "toKind": "Integer"}):
+            assert _code(V, op, target, rules=rules) is None, (op["kind"], target)
+    found = {"e1": ("e1", {"rank": "42"}, None), "e2": ("e2", {"rank": "n/a"}, None)}
+    ops, counts, refused = pj.plan_window(_op("convert", "rank", toKind="Integer", onFail="skip"), found, "edge")
+    assert ops == [{"op": "update", "entity_kind": "edge", "entity_id": "e1", "payload": {"properties": {"rank": 42}}}]
+    assert (counts["changed"], counts["unconvertible"]) == (1, 1)
+    assert [r["reason"] for r in refused] == ["unconvertible"]
+
+
 async def test_an_edge_key_costs_the_graph_no_property_name(monkeypatch, V):
     """An edge keeps its user properties in one JSON text: however full the graph's names, a new
     edge key is ok — and the store isn't asked."""

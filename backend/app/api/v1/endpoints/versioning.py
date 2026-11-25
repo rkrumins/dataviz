@@ -7906,7 +7906,7 @@ def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> 
     # A merge of two or more values into one on a unique field gives entities one value. (A normalize
     # or a replace may too — what it collapses is only known from the data, and publishing the
     # draft refuses the values that collide.)
-    if op.kind == "mapValues" and many and rules is not None and any(
+    if op.kind == "mapValues" and many and not edges and rules is not None and any(
             op.key in rule.unique_fields for rule in rules.entity_types.values()):
         into = [json.dumps([m["toKind"], m["to"]]) for m in (e.wire() for e in op.map or ())]
         if len(set(into)) < len(into):
@@ -8186,6 +8186,58 @@ async def preview_property_job_sample(
     rows = await pj.read_sample(graph_id, branch_id, body.op.wire(), keys[:pj.SAMPLE_ROWS],
                                 entity_kind=target.entity_kind, recheck=recheck)
     return {"rows": rows, "truncated": len(keys) > pj.SAMPLE_ROWS}
+
+
+class PropertyValuesRequest(_ApiModel):
+    key: str = Field(min_length=1, max_length=128)
+    target: PropertyJobTarget
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs/preview/values")
+async def preview_property_job_values(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyValuesRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """The values ``key`` holds on the relationships a bulk job's target reaches, nothing written —
+    what a clean-up previews for relationships, as a view's catalog lists an entity's values (no
+    catalog counts a relationship's): its first ``VALUES_READ`` (400) named relationships, or a
+    Connections search's first page of them, read on the draft as a window reads them. ``property``:
+    as a catalog lists one (``key``, ``count``, ``kinds``, ``byEntityType`` — by relationship type —
+    and every value with how many hold it, ``values``), or null when none holds it; ``read``: how
+    many relationships were read (never a roll-up); ``truncated``: it reaches more. 422
+    ``entity_target`` for entities, whose values the view's catalog lists; otherwise refused as
+    ``…/preview/sample`` is."""
+    from backend.app.services.versioning.import_export import property_job as pj
+
+    target = body.target
+    if target.entity_kind != "edge":
+        raise HTTPException(status_code=422, detail=_refusal_detail(
+            (422, "entity_target", "An entity's values are the view's property catalog's.")))
+    main = branch_id == "main"
+    if not main:
+        with _property_job_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            main = branch_id == await svc.main_branch_id(graph_id)
+    if main:
+        raise HTTPException(status_code=409, detail=_refusal_detail(
+            (409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")))
+    if target.named is not None:
+        keys = list(dict.fromkeys(target.named))
+    else:
+        if not await _property_job_view_readable(session, ws_id, meta, target.view_id, user, claims):
+            raise HTTPException(status_code=404, detail=_refusal_detail(
+                (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
+        keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
+                                              target, pj.VALUES_READ + 1)
+    truncated = len(keys) > pj.VALUES_READ
+    values = await pj.read_edge_values(graph_id, branch_id, body.key, keys[:pj.VALUES_READ],
+                                       complete=not truncated)
+    return {**values, "truncated": truncated}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs", status_code=202,

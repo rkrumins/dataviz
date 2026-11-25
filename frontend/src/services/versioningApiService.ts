@@ -14,7 +14,7 @@
  */
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
-import type { Predicate } from '@/types/search'
+import type { Predicate, SearchCatalogProperty } from '@/types/search'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { remember, sendNdjsonInParts } from './importExportApiService'
 import { pollJob } from './importExportApiService'
@@ -2416,6 +2416,27 @@ export function previewPropertyJobSample(
 ): Promise<PropertyJobSample> {
   return vfetch<PropertyJobSample>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview/sample`, {
     method: 'POST', body: JSON.stringify({ op, target }), signal,
+  })
+}
+
+/** The values a property holds on the relationships a change reaches, read on the draft — what a
+ *  clean-up previews for relationships, which no catalog counts: its first 400 named ones, or a
+ *  Connections search's first page of them. */
+export interface PropertyJobValues {
+  /** As a catalog lists a property — by relationship type — or null when none of them holds it. */
+  property: SearchCatalogProperty | null
+  /** How many relationships were read (never a roll-up). */
+  read: number
+  /** It reaches more than were read. */
+  truncated: boolean
+}
+
+/** The values `key` holds on the relationships `target` names or matches, read on the draft. */
+export function previewPropertyJobValues(
+  wsId: string, graphId: string, branchId: string, key: string, target: PropertyJobTarget, signal?: AbortSignal,
+): Promise<PropertyJobValues> {
+  return vfetch<PropertyJobValues>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-jobs/preview/values`, {
+    method: 'POST', body: JSON.stringify({ key, target }), signal,
   })
 }
 
