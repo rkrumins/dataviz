@@ -113,6 +113,11 @@ interface FlatTreeItemProps {
    *  band keeps the existing reparent drop. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
+  /** Whether a dragged entity is one of this row's siblings — the set custom order arranges. A row
+   *  from another set gets no before/after band: there is nothing to arrange it among. */
+  reorderAccepts?: (draggedId: string, targetId: string) => boolean
+  /** The entity this row's column is mapped to: a drop this row can't hold goes inside it. */
+  forwardTo?: { id: string; name: string }
   /** The canvas takes moves (a draft open and writable, editing on): every row can be picked up
    *  and dropped inside another — a data change. */
   moveEnabled?: boolean
@@ -224,6 +229,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
+  reorderAccepts,
+  forwardTo,
   moveEnabled = false,
   ports,
   portStrengthLeft = 0,
@@ -481,12 +488,23 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // this one), and kept on the row as the column scrolls under a held drag.
   const hintChipRef = useRef<HTMLDivElement>(null)
   const chipAt = (row: DOMRect): ChipAt => ({ top: row.top - 11, left: row.right - 10, width: row.width - 20 })
+  /** Where `dragged` goes if dropped on this row: inside it — or, when it can't hold it, inside the
+   *  entity this row's column is mapped to (the column IS that entity). */
+  const moveTargetFor = (dragged: string): string => {
+    if (!forwardTo || verdict(dragged, node.id).kind !== 'blocked') return node.id
+    return verdict(dragged, forwardTo.id).kind === 'data' ? forwardTo.id : node.id
+  }
   const hintFor = (): DropHintSpec | null => {
     if (isLogical && groupActions) return { kind: 'view', title: `Into ${node.name}`, detail: 'only this view' }
     const dragged = draggedEntity()
     // A drag this canvas did not start (nothing recorded): its drop is a move.
-    return moveHint(dragged ? verdict(dragged, node.id) : { kind: 'data', edgeType: null }, displayName)
+    if (!dragged) return moveHint({ kind: 'data', edgeType: null }, displayName)
+    const target = moveTargetFor(dragged)
+    return moveHint(verdict(dragged, target), target === node.id ? displayName : forwardTo!.name)
   }
+  /** Before/after bands, for the rows custom order arranges among: this row's own siblings. */
+  const bandsFor = (dragged: string | null) =>
+    reorderBandsActive && (!dragged || !reorderAccepts || reorderAccepts(dragged, node.id))
 
   // Drag-cancel cleanup: dragleave only fires on the TARGET row, so an
   // Escape-cancelled drag (dragend fires on the source) could strand the
@@ -523,7 +541,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
-        if (reorderBandsActive) {
+        if (bandsFor(draggedEntity())) {
           const rect = e.currentTarget.getBoundingClientRect()
           const y = e.clientY - rect.top
           const band = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
@@ -532,7 +550,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             if (dropHint) setDropHint(null)
             return
           }
-        }
+        } else if (dropIndicator) setDropIndicator(null)
         const hint = hintFor()
         const at = hint ? chipAt(e.currentTarget.getBoundingClientRect()) : null
         if (!sameHint(hint, dropHint)) setDropHint(hint && at ? { ...hint, at } : null)
@@ -570,11 +588,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           groupActions.place(draggedId, node.id.replace(/^logical:/, ''), node.name)
           return
         }
-        if (indicator && reorderBandsActive) {
+        if (indicator && bandsFor(draggedId)) {
           if (draggedId !== node.id) onReorderDrop!(draggedId, node.id, indicator)
           return
         }
-        if (draggedId !== node.id) reparent(draggedId, node.id)
+        if (draggedId !== node.id) reparent(draggedId, moveTargetFor(draggedId))
       }}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl transition-[background-color,background-image,box-shadow] duration-150 group/item relative z-[2]",

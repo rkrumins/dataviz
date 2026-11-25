@@ -13,7 +13,7 @@
  *     the column's entities one click away, or "where?" for a type that needs a
  *     parent — and what the rail and Build say about it.
  */
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, createEvent, fireEvent, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
@@ -660,6 +660,13 @@ describe('moving an entity: a data change, said as one — and the view\'s own a
     await act(async () => { if (document.getElementById(`layer-node-${id}`)) fireEvent.dragEnd(cardBody(id)) })
     await h.settle()
   }
+  /** A drag event at a height on a 40px row — jsdom has no DragEvent, so the event is given the
+   *  pointer's height itself (an edge band is the top or bottom 30%). */
+  const at = (kind: 'dragOver' | 'drop', target: HTMLElement, id: string, clientY: number) => {
+    const ev = createEvent[kind](target, { dataTransfer: carrying(id) })
+    Object.defineProperty(ev, 'clientY', { value: clientY })
+    fireEvent(target, ev)
+  }
   /** Open a row (in a draft its first button is the connect handle, so not `h.toggle`). */
   const expand = async (h: TraceCanvasHarness, id: string) => {
     const chevron = cardBody(id).querySelector('svg.lucide-chevron-right')?.closest('button')
@@ -719,6 +726,50 @@ describe('moving an entity: a data change, said as one — and the view\'s own a
     expect(columnOfCard('CRM')).toBe('fin')
     expect([count('Finance'), count('Sales')]).toEqual([3, 1])
     expect(within(bodyOf('fin')).queryByText(/^Load /)).toBeNull()
+  }, 30000)
+
+  it('A — dropped on a row of the mapped column that cannot hold it: it goes inside the column\'s entity', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    // An App holds Datasets, not Apps — but the column it sits in IS Finance, which holds Apps.
+    await act(async () => { fireEvent.dragStart(cardBody('CRM'), { dataTransfer: carrying('CRM') }) })
+    for (const clientY of [2, 20, 38]) {
+      await act(async () => { at('dragOver', cardBody('Billing'), 'CRM', clientY) })
+      await h.settle()
+      expect(hint(), `at y ${clientY}`).toEqual({ kind: 'data', text: 'Move inside Finance·changes the data' })
+      await act(async () => { fireEvent.dragLeave(cardBody('Billing')) })
+    }
+    await act(async () => { at('drop', cardBody('Billing'), 'CRM', 38) })
+    await act(async () => { fireEvent.dragEnd(cardBody('CRM')) })
+    await h.settle()
+
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'CRM', parentId: 'Finance' })])
+    expect(columnOfCard('CRM')).toBe('fin')
+  }, 30000)
+
+  it('B — a row from another set gets no reorder band at a row\'s edge: the drop there is the move it says', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    // CRM is Sales's; Marketing is a root of Domains — not CRM's siblings, so nothing to reorder.
+    await act(async () => { fireEvent.dragStart(cardBody('CRM'), { dataTransfer: carrying('CRM') }) })
+    await act(async () => { at('dragOver', cardBody('Marketing'), 'CRM', 2) })
+    await h.settle()
+    expect(hint()).toEqual({ kind: 'data', text: 'Move inside Marketing·changes the data' })
+    await act(async () => { at('drop', cardBody('Marketing'), 'CRM', 2) })
+    await act(async () => { fireEvent.dragEnd(cardBody('CRM')) })
+    await h.settle()
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'CRM', parentId: 'Marketing' })])
+
+    // Its siblings still arrange at the edge — a view change, no move.
+    useStagedChangesStore.setState({ changes: [], redoStack: [], past: [] })
+    await act(async () => { fireEvent.dragStart(cardBody('Sales'), { dataTransfer: carrying('Sales') }) })
+    await act(async () => { at('dragOver', cardBody('Marketing'), 'Sales', 2) })
+    await h.settle()
+    expect(hint()).toEqual({ kind: 'view', text: 'Before Marketing·only this view' })
+    await act(async () => { at('drop', cardBody('Marketing'), 'Sales', 2) })
+    await act(async () => { fireEvent.dragEnd(cardBody('Sales')) })
+    await h.settle()
+    expect(moves()).toHaveLength(0)
   }, 30000)
 
   it('A — the only child moved out of a mapped column: it stays a column, with no page left to load', async () => {

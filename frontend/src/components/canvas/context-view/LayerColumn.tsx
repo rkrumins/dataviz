@@ -224,6 +224,8 @@ interface LayerColumnProps {
   /** Keyboard reorder nudge (⌥↑/↓) — resolves the sibling set canvas-side so it
    *  works for roots and children alike. */
   onReorderNudge?: (nodeId: string, dir: 'up' | 'down') => void
+  /** Whether a dragged entity is among a row's siblings — the set custom order arranges. */
+  reorderAccepts?: (draggedId: string, targetId: string) => boolean
   /** The canvas takes moves (a draft open and writable, editing on): any row can be dropped inside
    *  another, a data change. */
   moveEnabled?: boolean
@@ -445,6 +447,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   reorderEnabled = false,
   onReorderDrop,
   onReorderNudge,
+  reorderAccepts,
   moveEnabled = false,
   isHydratingInitial = false,
   revealTarget,
@@ -1825,6 +1828,9 @@ export const LayerColumn = React.memo(function LayerColumn({
     ruleCount: layer.rules?.length,
     handPlaced,
   })
+  // A row that can't hold what is dropped on it passes the drop to the entity the column is.
+  const anchorId = anchorNode?.id
+  const forwardTo = useMemo(() => (anchorId && anchorName ? { id: anchorId, name: anchorName } : undefined), [anchorId, anchorName])
   const openAnchor = kind === 'mapped' && anchorNode ? () => {
     const id = anchorNode.id
     useCanvasStore.getState().requestDrawerMove(() => {
@@ -3510,6 +3516,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
+                        reorderAccepts={reorderAccepts}
+                        forwardTo={forwardTo}
                         moveEnabled={moveEnabled}
                         ports={showLineageIndicators ? lineagePorts?.get(node.id) : undefined}
                         portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}

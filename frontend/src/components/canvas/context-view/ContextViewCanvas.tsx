@@ -4084,6 +4084,11 @@ export function ContextViewCanvas({
   // minted between the drop-position neighbors — key order always matches the
   // current visual order. A cross-set drop is a safe no-op; the MIDDLE band
   // still reparents (nest into a node).
+  // Custom order arranges a row among its own siblings; any other row has nothing to be arranged
+  // among there, so the row offers it the move it would make instead.
+  const reorderAccepts = useCallback((draggedId: string, targetId: string) =>
+    !!siblingContext(targetId, reorderTreeRef.current)?.siblings.includes(draggedId), [])
+
   const handleReorderNode = useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
     if (traceWriteLocked()) return                  // read-only while tracing
     if (draggedId === targetId) return
@@ -8855,6 +8860,7 @@ export function ContextViewCanvas({
                 // so neighbor keys wouldn't match what's shown).
                 reorderEnabled={nodeSortingEnabled && isDraft && !traceActive && !serverPlaced}
                 onReorderDrop={handleReorderNode}
+                reorderAccepts={reorderAccepts}
                 onReorderNudge={nudgeReorder}
                 // A move is a data change: the same gates as the menus that change the data.
                 moveEnabled={canvasWritable && !serverPlaced}
