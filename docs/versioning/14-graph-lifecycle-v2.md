@@ -991,7 +991,7 @@ Integration issues applied: X-01, X-02, X-03, X-04, X-06, X-07, X-08, X-09, X-11
 1. **Requested §6 additions:** `409 data_source_has_data {next}` and `422 bundle_invalid {file, expectedSha, gotSha}`. Every other lifecycle condition is folded into the canonical codes with a `reason` field (`reverify_required:{preflight_stale, source_moved, parity_stale, shadow_blocking, rollups_missing, projection_unhealthy}`, `source_stale:{released}`, `source_unreachable:{missing}`).
 2. **Requested access.py Actions beyond X-04:** `LIFECYCLE_CANCEL` (M), `LIFECYCLE_RELEASE` (A), `LIFECYCLE_DELETE` (A), `LIFECYCLE_TRASH` (P; A when protected), `DRIFT_SYNC` (P), `DRIFT_DISMISS` (A).
 3. **§13 refinement for INGEST to confirm:** when a triple has more than one live head and one head id equals the deterministic import mint (a converted parallel group), conversion and adopt reuse it. INGEST still raises `ambiguous_identity` for any >1 case.
-4. **Divergent parallel edges** stay collapsed in the projection. Revisit after the preflight fleet report.
+4. **Divergent parallel edges** stay collapsed in the projection. Revisit after the preflight fleet report. The proposed opt-in per relationship type is in [20](20-parallel-relationships.md).
 5. **Release default:** stay with `forget`, or switch to `delete_key` after 14 healthy days? Should large graphs on tight shards get a shorter period?
 6. **Detached data sources become read-only on the canvas** when `GRAPHVER_VERSIONED_WRITES=1` (`versioned_write_provider.py:118 _graph_id`). Is that intended?
 7. **Synthetic identity uses FalkorDB internal IDs**, which are reused after deletes. Drift on URN-less entities may read a delete+create as a change. Accept?

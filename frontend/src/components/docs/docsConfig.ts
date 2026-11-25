@@ -640,6 +640,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/versioning/19-change-streams.md?raw'),
   },
   {
+    slug: 'versioning-parallel-relationships',
+    section: 'versioning',
+    title: 'Versioning: Parallel Relationships',
+    description: 'Several relationships of one type between two items: today\'s rule, how to model it, and the proposed opt-in',
+    importFn: () => import('@docs/versioning/20-parallel-relationships.md?raw'),
+  },
+  {
     slug: 'versioning-e2e',
     section: 'versioning',
     title: 'Versioning: End-to-End Walkthrough',

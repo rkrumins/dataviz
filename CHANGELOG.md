@@ -128,6 +128,8 @@ Every new capability ships behind its own switch, off by default.
   they disagree), leave versions or properties out, per connection or for all — or fix the source
   and re-check it. Values JSON can't hold (NaN, ±Infinity, a NUL character) pause it the same way,
   to be stored as text. Connections that shared an id with another are given one of their own.
+- **Reversing a relationship onto one of the same type already there the other way** is refused at
+  once, with the message drawing one gives, instead of only when the draft is saved.
 - **An export re-imports every property as it was**, into the same graph or a new one: a value a
   cell can't give back (a blank, padding, a `\N`, text that reads as a list, a control
   character) travels in `properties_json`.
@@ -183,6 +185,9 @@ Every new capability ships behind its own switch, off by default.
   no flat file carries a property whose value is null.
 - A bulk job over a Connections search doesn't reach a relationship the draft didn't change whose
   ends it changed to match; the job's summary says so.
+- One relationship per source, type and target, as before (both directions and several types per
+  pair are supported). Several of one type between two items is proposed as an opt-in per type in
+  `docs/versioning/20-parallel-relationships.md`.
 - A connection kept or merged by a review is one connection in history; the source graph keeps
   every copy until it is rebuilt from history.
 
