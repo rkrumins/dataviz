@@ -3749,19 +3749,16 @@
       "description": "A relationship on screen: its id \u2014 the canvas's, the one an edge read answers with \u2014 and\nits ends, which it is found through (by their urns), never by a scan of every edge.",
       "properties": {
         "id": {
-          "maxLength": 1024,
           "minLength": 1,
           "title": "Id",
           "type": "string"
         },
         "source": {
-          "maxLength": 1024,
           "minLength": 1,
           "title": "Source",
           "type": "string"
         },
         "target": {
-          "maxLength": 1024,
           "minLength": 1,
           "title": "Target",
           "type": "string"

@@ -1706,9 +1706,9 @@ SEARCH_MEMBERSHIP_EDGES_MAX = 1000
 class SearchMembershipEdge(_Base):
     """A relationship on screen: its id — the canvas's, the one an edge read answers with — and
     its ends, which it is found through (by their urns), never by a scan of every edge."""
-    id: str = Field(min_length=1, max_length=1024)
-    source: str = Field(min_length=1, max_length=1024)
-    target: str = Field(min_length=1, max_length=1024)
+    id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    target: str = Field(min_length=1)
 
 
 class SearchMembershipRequest(_Base):
