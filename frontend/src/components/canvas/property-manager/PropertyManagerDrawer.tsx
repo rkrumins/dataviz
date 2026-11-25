@@ -39,6 +39,7 @@ import { DisplayRuleEditor } from './DisplayRuleEditor'
 import { DisplayRuleList } from './DisplayRuleList'
 import { LibraryImportDialog } from './LibraryImportDialog'
 import { PropertyBrowser } from './PropertyBrowser'
+import { SelectedRelationshipsEntry } from './SelectedRelationshipsEntry'
 import { saveLibraryFile } from './libraryFile'
 import { MOTION } from '@/lib/motion'
 
@@ -239,6 +240,7 @@ export function PropertyManagerDrawer({
                             shell and clips — the Properties tab "won't scroll"
                             bug). */}
                         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4">
+                            {tab === 'properties' && <SelectedRelationshipsEntry />}
                             {tab === 'properties' && (
                                 <PropertyBrowser
                                     viewId={viewId}
