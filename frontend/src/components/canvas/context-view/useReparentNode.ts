@@ -15,7 +15,8 @@
  *     open and writable, editing on, no trace, not a view the server places); the
  *     canvas's move host says which;
  *   • into one of its own descendants (cycle);
- *   • under a parent whose type may not contain it (ontology), or with no
+ *   • under a parent whose type holds nothing (as its row offers no "+"), or may
+ *     not contain this type (ontology), or with no
  *     containment relationship for that parent→child pair (forward orientation:
  *     the new edge is stored parent→child and the backend validates it that way);
  *   • outside a draft (a move is a draft-save op).
@@ -52,7 +53,7 @@ import {
   normalizeEdgeType,
   isContainmentEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, setHasId, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, setHasId, isClosedToNesting, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
 
 /** What a move replaced, for discard: the parent links the canvas showed, and the moved entity's
  *  own placement in the view (null: it had none) — only that, so a layout edit made since stays. */
@@ -375,6 +376,11 @@ export function useReparentNode() {
 
     const childType = dragged.data?.type as string
     const parentType = newParent.data?.type as string
+    // A type that holds nothing takes nothing — as a row offers no "+" for a child (isClosedToNesting).
+    if (isClosedToNesting(parentType, entityTypes, hierarchyMap)) {
+      const p = typeName(parentType)
+      return refused({ hint: `${p[0].toUpperCase()}${p.slice(1)} holds nothing`, message: `A ${parentType} can't contain other entities.` }, 'error')
+    }
     if (!setHasId(allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap), childType)) {
       const p = typeName(parentType)
       return refused({ hint: `${p[0].toUpperCase()}${p.slice(1)} can't hold ${typeName(childType)}`, message: `A ${parentType} can't contain a ${childType}.` }, 'error')

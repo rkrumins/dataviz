@@ -32,7 +32,7 @@ import {
 } from '@/hooks/useViewSchema'
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
-import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
+import { registerLayoutWriter, registerMoveHost } from '@/store/canvasLayoutBridge'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
@@ -2330,6 +2330,48 @@ export function ContextViewCanvas({
     whereTheySit: fedView && showWhereTheySit,
   })
   useEffect(() => { renderedLayerRef.current = nodeLayerMap }, [nodeLayerMap])
+
+  // A move made below the canvas (a row's drop, an anchored column's, the drawer's picker) asks
+  // through the move host: the same gates as the menus, what this view draws, and to open the new
+  // parent once moved. Registered once; it answers for the latest render through this ref.
+  const moveStateRef = useRef({ isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap })
+  moveStateRef.current = { isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap }
+  useEffect(() => registerMoveHost({
+    blocked: () => {
+      const s = moveStateRef.current
+      if (traceWriteLocked()) {
+        return { hint: 'A trace is read-only', message: 'A trace is read-only — leave it to move an entity to a different parent.' }
+      }
+      if (!s.isDraft) return { hint: 'Open a draft to move it', message: 'Switch to a draft to move an entity to a different parent.' }
+      if (!s.editModeEnabled) {
+        return { hint: 'Editing is turned off', message: 'Editing is turned off for this workspace, so entities can’t be moved. An administrator can turn it back on.' }
+      }
+      if (!s.draftWritable) {
+        return { hint: 'This draft is read-only for you', message: 'This draft is read-only for you — open a draft of your own to move entities.' }
+      }
+      if (s.serverPlaced) {
+        return { hint: 'This view places its own entities', message: 'This view places its entities for you — move them in the view it comes from.' }
+      }
+      return null
+    },
+    columnOf: (id) => renderedLayerRef.current.get(id),
+    isDrawn: (id) => renderedLayerRef.current.has(id) || moveStateRef.current.promotedAnchors.has(id)
+      || moveStateRef.current.sortedLayers.some((l) => l.anchorUrn === id),
+    moved: (_childId, parentId) => {
+      if (!parentId) return
+      // The new parent and the way down to it: the moved entity stays in sight.
+      const up = moveStateRef.current.parentMap
+      setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        const seen = new Set<string>()
+        for (let at: string | undefined = parentId; at && !seen.has(at); at = up.get(at)) {
+          seen.add(at)
+          next.add(at)
+        }
+        return next.size === prev.size ? prev : next
+      })
+    },
+  }), [traceWriteLocked])
 
   // The orphans panel's "where": the column an entity is drawn in, else where this view would put
   // it — flag on, by the canvas's own spec; off, by the wizard's resolver (its explicit entry, then
@@ -8800,6 +8842,8 @@ export function ContextViewCanvas({
                 reorderEnabled={nodeSortingEnabled && isDraft && !traceActive && !serverPlaced}
                 onReorderDrop={handleReorderNode}
                 onReorderNudge={nudgeReorder}
+                // A move is a data change: the same gates as the menus that change the data.
+                moveEnabled={canvasWritable && !serverPlaced}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
                 geometryRegistry={columnGeometryRegistry}

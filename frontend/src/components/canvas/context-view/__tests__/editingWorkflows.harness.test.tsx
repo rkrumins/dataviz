@@ -17,13 +17,17 @@ import { act, fireEvent, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
-import { anchoredEstate, cfoEstate } from '@/test/fixtures/traceEstates'
+import { anchoredEstate, cfoEstate, movesEstate } from '@/test/fixtures/traceEstates'
 import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaStore } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useFeaturesStore } from '@/store/features'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
+import { useBuildRowsStore } from '@/components/canvas/create/buildmode/buildRowsStore'
+import { makeRow } from '@/components/canvas/create/buildmode/buildRow'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -406,6 +410,22 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
     await h.settle()
   }
+  /** The entity just added: inside `parent` by exactly ONE containment link, drawn in `column`. */
+  const landed = (name: string, parent: string, column: string) => {
+    const c = staged().find((x) => x.type === 'create_entity' && (x.after as { displayName?: string }).displayName === name)
+    if (!c) throw new Error(`nothing named ${name} was added`)
+    const temp = c.targetUrn!
+    const links = useCanvasStore.getState().edges.filter((e) => e.target === temp && e.type === 'containment')
+    expect(links.map((e) => e.source)).toEqual([parent])
+    expect(document.getElementById(`layer-node-${temp}`)?.closest<HTMLElement>('[data-layer-id].group\\/column')?.dataset.layerId).toBe(column)
+  }
+  /** Build's grid, given rows (its grid is a keyboard surface of its own), then Apply. */
+  const buildRows = async (h: TraceCanvasHarness, rows: Array<{ id: string; name: string; typeId: string }>) => {
+    act(() => useBuildRowsStore.getState().setRows(rows.map((r) => makeRow(r))))
+    await h.settle()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Apply' })) })
+    await h.settle()
+  }
 
   beforeEach(() => {
     useStagedChangesStore.setState({ changes: [], redoStack: [], isReviewPanelOpen: false })
@@ -422,6 +442,7 @@ describe('where a layer\'s ways of adding put a new entity', () => {
 
     await addNamed(h, 'events')
     expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'events', entityType: 'dataset', parentUrn: 'SRC' })])
+    landed('events', 'SRC', 'src')
     // A child follows its parent's column: nothing is pinned for it.
     expect(staged().some((c) => c.type === 'layer_config')).toBe(false)
 
@@ -439,6 +460,8 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await click(h, within(headerOf('src')).getByRole('button', { name: 'Build a lot at once in Source' }))
     expect(builder()).toMatchObject({ isOpen: true, surface: 'build', parentUrn: 'SRC', layerId: 'src' })
     expect(screen.getByTestId('build-scope')).toHaveTextContent('Adding inside SRC · Data Platform')
+    await buildRows(h, [{ id: 'b1', name: 'payments', typeId: 'dataset' }])
+    landed('payments', 'SRC', 'src')
     act(() => builder().close())
     await h.settle()
 
@@ -446,6 +469,8 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await h.settle()
     await click(h, screen.getByText('Add inside DST'))
     expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'DST', layerId: 'dst' })
+    await addNamed(h, 'margin')
+    landed('margin', 'DST', 'dst')
     act(() => builder().close())
     await h.settle()
 
@@ -454,6 +479,8 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await h.settle()
     await click(h, screen.getByText('Add inside DST'))
     expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'DST', layerId: 'dst' })
+    await addNamed(h, 'churn')
+    landed('churn', 'DST', 'dst')
     act(() => builder().close())
     await h.settle()
 
@@ -462,6 +489,8 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await act(async () => { fireEvent.keyDown(document, { key: 'n' }) })
     await h.settle()
     expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'SRC', layerId: 'src' })
+    await addNamed(h, 'refunds')
+    landed('refunds', 'SRC', 'src')
   }, 30000)
 
   it('asked where a type goes, the columns\' own entities are among the parents offered, by name', async () => {
@@ -472,6 +501,9 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     expect(builder()).toMatchObject({ isOpen: true, parentUrn: null, initialTypeId: 'dataset', askParent: true })
     // Neither is drawn as a row — each IS its column — yet both can hold a dataset.
     expect(builder().choices.map((c) => c.urn)).toEqual(['DST', 'SRC'])
+    await click(h, within(screen.getByRole('listbox', { name: 'Where to add' })).getByRole('option', { name: /^DST/ }))
+    await addNamed(h, 'forecast')
+    landed('forecast', 'DST', 'dst')
   }, 30000)
 
   it('a column of several top-level entities adds at the top level, as before — inside one of them one click away', async () => {
@@ -486,6 +518,7 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     expect(scope()).toHaveTextContent('Adding inside Sales')
     await addNamed(h, 'Payroll')
     expect(createdAfter()).toEqual([expect.objectContaining({ entityType: 'app', parentUrn: 'Sales' })])
+    landed('Payroll', 'Sales', 'domains')
   }, 30000)
 
   it('with one of a column\'s entities selected, its "+" (and N) adds inside it', async () => {
@@ -501,6 +534,8 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await act(async () => { fireEvent.keyDown(document, { key: 'n' }) })
     await h.settle()
     expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'Sales', layerId: 'domains' })
+    await addNamed(h, 'Pipeline')
+    landed('Pipeline', 'Sales', 'domains')
 
     // Nothing selected, N opens at the top level as it always did.
     act(() => builder().close())
@@ -525,6 +560,7 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     expect(scope()).toHaveTextContent('Adding inside Finance')
     await addNamed(h, 'Ledger')
     expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'Ledger', entityType: 'app', parentUrn: 'Finance' })])
+    landed('Ledger', 'Finance', 'apps')
   }, 30000)
 
   it('an App added from the Apps column lands in the Apps column, though its parent is in Domains', async () => {
@@ -543,9 +579,20 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     const h = await openDomains()
     await click(h, within(cardBody('Sales')).getByRole('button', { name: 'Add child entity' }))
     await addNamed(h, 'Forecast')
+    landed('Forecast', 'Sales', 'domains')
     const column = (id: string) => document.querySelector<HTMLElement>(`[data-layer-id="${id}"]`)!
     expect(within(column('domains')).getByText('Forecast')).toBeTruthy()
     expect(within(column('apps')).queryByText('Forecast')).toBeNull()
+  }, 30000)
+
+  it('an entity\'s Add Child Entity adds inside it, in its column', async () => {
+    const h = await openDomains()
+    await act(async () => { fireEvent.contextMenu(cardBody('Ops')) })
+    await h.settle()
+    await click(h, screen.getByText('Add Child Entity'))
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'Ops' })
+    await addNamed(h, 'Rostering')
+    landed('Rostering', 'Ops', 'domains')
   }, 30000)
 
   it('the palette\'s Create App: inside the selection when it can hold one, else it asks', async () => {
@@ -558,6 +605,8 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     act(() => useCanvasStore.getState().setSelection(['Ops']))
     await createApp()
     expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'Ops', initialTypeId: 'app', askParent: false })
+    await addNamed(h, 'Rota')
+    landed('Rota', 'Ops', 'domains')
     act(() => builder().close())
     await h.settle()
 
@@ -572,5 +621,312 @@ describe('where a layer\'s ways of adding put a new entity', () => {
     await h.settle()
     await click(h, screen.getByText('Add entity'))
     expect(scope()).toHaveTextContent('Where does an App go?')
+  }, 30000)
+})
+
+// ─── Moving an entity (a data change) — and arranging the view (a view change) ─
+
+describe('moving an entity: a data change, said as one — and the view\'s own arranging', () => {
+  const staged = () => useStagedChangesStore.getState().changes
+  const moves = () => staged().filter((c) => c.type === 'move_entity')
+  const links = (child: string) => useCanvasStore.getState().edges.filter((e) =>
+    e.target === child && String(e.data?.edgeType ?? '').toUpperCase() === 'CONTAINS')
+  const count = (id: string) => useCanvasStore.getState().nodes.find((n) => n.id === id)?.data?.childCount
+  const columnOfCard = (id: string) =>
+    document.getElementById(`layer-node-${id}`)?.closest<HTMLElement>('[data-layer-id].group\\/column')?.dataset.layerId
+  const bodyOf = (layerId: string) =>
+    document.querySelector<HTMLElement>(`[data-layer-id="${layerId}"].group\\/column .custom-scrollbar`)!
+  const notices = () => useNotificationStore.getState().notifications.map((n) => n.message)
+  const LINEAGE = [
+    { id: 'l:leads>invoices', source: 'leads', target: 'invoices', type: 'lineage', data: { edgeType: 'TRANSFORMS' } },
+    { id: 'l:journal>invoices', source: 'journal', target: 'invoices', type: 'lineage', data: { edgeType: 'TRANSFORMS' } },
+  ] as never[]
+
+  /** A row drag, as the browser gives it: what is carried is readable only on the drop. */
+  const carrying = (id: string) => ({
+    types: ['text/x-entity-id', 'text/x-entity-name'],
+    getData: (k: string) => (k === 'text/x-entity-id' || k === 'text/x-entity-name' ? id : ''),
+    setData: () => {}, setDragImage: () => {}, dropEffect: 'move', effectAllowed: 'move',
+  })
+  /** Pick up `id`'s row and hold it over `target` (clientY 20 of a 40px row: its middle band). */
+  const dragOver = async (h: TraceCanvasHarness, id: string, target: HTMLElement) => {
+    const dataTransfer = carrying(id)
+    await act(async () => { fireEvent.dragStart(cardBody(id), { dataTransfer }) })
+    await act(async () => { fireEvent.dragOver(target, { dataTransfer, clientY: 20 }) })
+    await h.settle()
+  }
+  const dropOn = async (h: TraceCanvasHarness, id: string, target: HTMLElement) => {
+    await act(async () => { fireEvent.drop(target, { dataTransfer: carrying(id), clientY: 20 }) })
+    await act(async () => { if (document.getElementById(`layer-node-${id}`)) fireEvent.dragEnd(cardBody(id)) })
+    await h.settle()
+  }
+  /** Open a row (in a draft its first button is the connect handle, so not `h.toggle`). */
+  const expand = async (h: TraceCanvasHarness, id: string) => {
+    const chevron = cardBody(id).querySelector('svg.lucide-chevron-right')?.closest('button')
+    if (!chevron) throw new Error(`no chevron on ${id}`)
+    await act(async () => { fireEvent.click(chevron) })
+    await h.settle()
+  }
+  const hint = (within: ParentNode = document) => {
+    const el = within.querySelector<HTMLElement>('[data-drop-hint]')
+    return el ? { kind: el.dataset.dropHint, text: el.textContent } : null
+  }
+
+  const openMoves = async (opts: { persona?: 'business'; rootApps?: boolean } = {}) => {
+    const h = await renderCanvasWithTrace(movesEstate(), {
+      focus: 'CRM', draft: true, deferTrace: true, persona: opts.persona,
+      entityTypes: [
+        ontologyType('domain', 'Domain', ['app'], [], 0),
+        ontologyType('app', 'App', ['dataset'], ['domain'], 1),
+        ontologyType('dataset', 'Dataset', [], ['app'], 2),
+      ],
+    })
+    allowNesting()
+    if (opts.rootApps) {
+      act(() => useSchemaStore.setState((s) => ({ schema: { ...s.schema!, rootEntityTypes: ['domain', 'app'] } }) as never))
+    }
+    act(() => useCanvasStore.getState().addEdges(LINEAGE))
+    await h.settle()
+    return h
+  }
+
+  beforeEach(() => {
+    useStagedChangesStore.setState({ changes: [], redoStack: [], past: [], isReviewPanelOpen: false })
+    useNotificationStore.setState({ notifications: [] })
+    useHierarchyBuilderStore.getState().close()
+  })
+
+  it('A — dropped on the body of the column mapped to Finance: one move inside Finance, subtree and lineage intact', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    expect(columnOfCard('CRM')).toBe('domains')
+
+    await dragOver(h, 'CRM', bodyOf('fin'))
+    expect(document.querySelector('[data-body-drop]')?.getAttribute('data-body-drop')).toBe('data')
+    expect(hint()).toEqual({ kind: 'data', text: 'Move inside Finance·changes the data' })
+    await dropOn(h, 'CRM', bodyOf('fin'))
+
+    expect(moves()).toHaveLength(1)
+    expect(staged()).toHaveLength(1)
+    expect(moves()[0].after).toMatchObject({ childId: 'CRM', parentId: 'Finance', edgeType: 'CONTAINS' })
+    expect((moves()[0].before as { removedLinks: Array<{ id: string }> }).removedLinks.map((e) => e.id)).toEqual(['c:Sales>CRM'])
+    expect(links('CRM').map((e) => [e.source, e.data?.isPending])).toEqual([['Finance', 'create']])
+    // Its subtree follows; its lineage is untouched.
+    expect(links('leads').map((e) => e.id)).toEqual(['c:CRM>leads'])
+    expect(useCanvasStore.getState().edges.some((e) => e.id === 'l:leads>invoices')).toBe(true)
+    // Drawn where its new parent is: a row of the column mapped to Finance — which stays a column,
+    // counting the child it gained and the one Sales lost.
+    expect(columnOfCard('CRM')).toBe('fin')
+    expect([count('Finance'), count('Sales')]).toEqual([3, 1])
+    expect(within(bodyOf('fin')).queryByText(/^Load /)).toBeNull()
+  }, 30000)
+
+  it('A — the only child moved out of a mapped column: it stays a column, with no page left to load', async () => {
+    const h = await renderCanvasWithTrace(anchoredEstate(), {
+      focus: 'SRC.orders', draft: true, deferTrace: true,
+      entityTypes: [
+        ontologyType('dataPlatform', 'Data Platform', ['dataset'], [], 0),
+        ontologyType('dataset', 'Dataset', [], ['dataPlatform'], 1),
+      ],
+    })
+    allowNesting()
+    await h.settle()
+    expect(columnOfCard('DST.revenue')).toBe('dst')
+    await dragOver(h, 'DST.revenue', bodyOf('src'))
+    expect(hint()).toEqual({ kind: 'data', text: 'Move inside SRC·changes the data' })
+    await dropOn(h, 'DST.revenue', bodyOf('src'))
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'DST.revenue', parentId: 'SRC' })])
+    expect(columnOfCard('DST.revenue')).toBe('src')
+    expect(count('DST')).toBe(0)
+    expect(document.getElementById('layer-node-DST')).toBeNull()     // still the column, not a row
+    expect(within(bodyOf('dst')).queryByText(/^Load /)).toBeNull()
+  }, 30000)
+
+  it('A — a row moved out of the mapped column leaves no phantom page behind it', async () => {
+    const h = await openMoves()
+    await dragOver(h, 'Billing', cardBody('Sales'))
+    await dropOn(h, 'Billing', cardBody('Sales'))
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Billing', parentId: 'Sales' })])
+    expect(columnOfCard('Billing')).toBe('domains')
+    expect(count('Finance')).toBe(1)
+    expect(within(bodyOf('fin')).queryByText(/^Load /)).toBeNull()
+  }, 30000)
+
+  it('B — a row dropped on another row: one move inside it, its new parent opened to show it', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await dragOver(h, 'CRM', cardBody('Marketing'))
+    expect(hint()).toEqual({ kind: 'data', text: 'Move inside Marketing·changes the data' })
+    await dropOn(h, 'CRM', cardBody('Marketing'))
+
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'CRM', parentId: 'Marketing' })])
+    expect(links('CRM').map((e) => e.source)).toEqual(['Marketing'])
+    expect(links('leads').map((e) => e.source)).toEqual(['CRM'])
+    // Marketing was closed: it opens, so the moved App is in sight under it.
+    expect(columnOfCard('CRM')).toBe('domains')
+    expect([count('Sales'), count('Marketing')]).toEqual([1, 2])
+  }, 30000)
+
+  it('B — an App placed by hand in the Apps column stays there when it moves to another Domain', async () => {
+    const h = await openMoves()
+    expect(columnOfCard('Quotes')).toBe('apps')
+    await dragOver(h, 'Quotes', cardBody('Marketing'))
+    await dropOn(h, 'Quotes', cardBody('Marketing'))
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Quotes', parentId: 'Marketing' })])
+    expect(columnOfCard('Quotes')).toBe('apps')
+    expect(notices()).toContain('Moved under Marketing. It stays in Apps, the column that holds its type.')
+  }, 30000)
+
+  it('onto its own parent while placed elsewhere: back under it — only this view', async () => {
+    const h = await openMoves()
+    await dragOver(h, 'Quotes', cardBody('Sales'))
+    expect(hint()).toEqual({ kind: 'view', text: 'Back under Sales·only this view' })
+    await dropOn(h, 'Quotes', cardBody('Sales'))
+    expect(moves()).toHaveLength(0)
+    expect(staged().map((c) => c.type)).toEqual(['assign_layer'])
+    expect(links('Quotes').map((e) => e.id)).toEqual(['c:Sales>Quotes'])
+  }, 30000)
+
+  it('the header only arranges the view: "Show in this column · only this view", and no data changes', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await dragOver(h, 'CRM', headerOf('apps'))
+    expect(hint()).toEqual({ kind: 'view', text: 'Show in this column·only this view' })
+    expect(headerOf('apps').style.outline).toMatch(/dashed/)
+    await dropOn(h, 'CRM', headerOf('apps'))
+    expect(staged().map((c) => c.type)).toEqual(['assign_layer'])
+    expect(links('CRM').map((e) => e.id)).toEqual(['c:Sales>CRM'])
+    expect(columnOfCard('CRM')).toBe('apps')
+  }, 30000)
+
+  it('the Business view names the entity as it reads there', async () => {
+    const h = await openMoves({ persona: 'business' })
+    act(() => useCanvasStore.getState().updateNode('Finance', { businessLabel: 'Money', properties: { businessLabel: 'Money' } }))
+    await expand(h, 'Sales')
+    await dragOver(h, 'CRM', bodyOf('fin'))
+    expect(hint()).toEqual({ kind: 'data', text: 'Move inside Money·changes the data' })
+  }, 30000)
+
+  it('refuses where the canvas refuses edits — and says why: in a trace', async () => {
+    const h = await openMoves()
+    await h.startTrace('CRM')
+    await dropOn(h, 'CRM', bodyOf('fin'))
+    expect(staged()).toHaveLength(0)
+    expect(notices()).toContain('A trace is read-only — leave it to move an entity to a different parent.')
+  }, 30000)
+
+  it('refuses where the canvas refuses edits — and says why: with editing off', async () => {
+    const h = await openMoves()
+    act(() => useFeaturesStore.setState((s) => ({ values: { ...s.values, editModeEnabled: false } }) as never))
+    await h.settle()
+    await expand(h, 'Sales')
+    await dragOver(h, 'CRM', cardBody('Marketing'))
+    expect(hint()).toEqual({ kind: 'blocked', text: 'Editing is turned off' })
+    await dropOn(h, 'CRM', cardBody('Marketing'))
+    expect(staged()).toHaveLength(0)
+    expect(notices()).toContain('Editing is turned off for this workspace, so entities can’t be moved. An administrator can turn it back on.')
+  }, 30000)
+
+  it('the drawer\'s "Choose a new parent…" offers what this view draws, and moves there', async () => {
+    const h = await openMoves()
+    // Loaded, but this curated view places it nowhere: not offered.
+    act(() => useCanvasStore.getState().addNodes([{ id: 'Elsewhere', type: 'generic', position: { x: 0, y: 0 }, data: { label: 'Elsewhere', urn: 'Elsewhere', type: 'domain' } }]))
+    await h.openDrawer('Billing')
+    const drawer = document.querySelector<HTMLElement>('[data-panel="entity-drawer"]')!
+    await act(async () => { fireEvent.mouseDown(within(drawer).getByRole('tab', { name: /^Edit/ })) })
+    await h.settle()
+    await act(async () => { fireEvent.click(within(drawer).getByRole('button', { name: 'Choose a new parent…' })) })
+    await h.settle()
+    const options = within(drawer).getByRole('listbox', { name: 'Possible parents' })
+    expect(within(options).getAllByRole('option').map((o) => o.textContent)).toEqual(['Marketingdomain', 'Salesdomain'])
+    await act(async () => { fireEvent.mouseDown(within(options).getByRole('option', { name: /Sales/ })) })
+    await h.settle()
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Billing', parentId: 'Sales' })])
+    expect(links('Billing').map((e) => e.source)).toEqual(['Sales'])
+    expect(links('invoices').map((e) => e.source)).toEqual(['Billing'])
+    expect(columnOfCard('Billing')).toBe('domains')   // Sales opened to show it
+  }, 30000)
+
+  it('to the top level, where the ontology lets an App stand alone: shown in the Apps column', async () => {
+    const h = await openMoves({ rootApps: true })
+    await h.openDrawer('Billing')
+    const drawer = document.querySelector<HTMLElement>('[data-panel="entity-drawer"]')!
+    await act(async () => { fireEvent.mouseDown(within(drawer).getByRole('tab', { name: /^Edit/ })) })
+    await h.settle()
+    await act(async () => { fireEvent.click(within(drawer).getByRole('button', { name: 'Choose a new parent…' })) })
+    await h.settle()
+    const top = within(drawer).getByRole('option', { name: /On its own, at the top/ })
+    await act(async () => { fireEvent.mouseDown(top) })
+    await h.settle()
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Billing', parentId: null, edgeId: null })])
+    expect(links('Billing')).toHaveLength(0)
+    expect(links('invoices').map((e) => e.source)).toEqual(['Billing'])
+    expect(columnOfCard('Billing')).toBe('apps')
+    expect(count('Finance')).toBe(1)
+  }, 30000)
+
+  it('is not offered for a type that needs a parent', async () => {
+    const h = await openMoves()
+    await h.openDrawer('Billing')
+    const drawer = document.querySelector<HTMLElement>('[data-panel="entity-drawer"]')!
+    await act(async () => { fireEvent.mouseDown(within(drawer).getByRole('tab', { name: /^Edit/ })) })
+    await h.settle()
+    await act(async () => { fireEvent.click(within(drawer).getByRole('button', { name: 'Choose a new parent…' })) })
+    await h.settle()
+    expect(within(drawer).queryByRole('option', { name: /On its own, at the top/ })).toBeNull()
+  }, 30000)
+
+  it('an App new in this draft moves too: its create goes under the new parent — one link, no move', async () => {
+    const h = await openMoves()
+    await act(async () => { fireEvent.click(within(cardBody('Sales')).getByRole('button', { name: 'Add child entity' })) })
+    await h.settle()
+    const input = screen.getByPlaceholderText('Enter display name...')
+    await act(async () => { fireEvent.change(input, { target: { value: 'Payroll' } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await h.settle()
+    act(() => useHierarchyBuilderStore.getState().close())
+    await h.settle()
+    const create = staged().find((c) => c.type === 'create_entity')!
+    const temp = create.targetUrn!
+    await dragOver(h, temp, cardBody('Marketing'))
+    await dropOn(h, temp, cardBody('Marketing'))
+    expect(moves()).toHaveLength(0)
+    expect(staged().find((c) => c.id === create.id)!.after).toMatchObject({ parentUrn: 'Marketing', parentLabel: 'Marketing' })
+    expect(links(temp).map((e) => [e.source, e.data?.isPending])).toEqual([['Marketing', 'create']])
+    expect(columnOfCard(temp)).toBe('domains')
+  }, 30000)
+
+  it('discarding a new parent sends what was moved into it back; discarding a move keeps a later layout edit', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    // A new Domain, then CRM moved into it.
+    await act(async () => { fireEvent.click(within(headerOf('domains')).getByRole('button', { name: 'Add entity to Domains' })) })
+    await h.settle()
+    const input = screen.getByPlaceholderText('Enter display name...')
+    await act(async () => { fireEvent.change(input, { target: { value: 'Ventures' } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await h.settle()
+    act(() => useHierarchyBuilderStore.getState().close())
+    await h.settle()
+    const ventures = staged().find((c) => c.type === 'create_entity')!
+    await dragOver(h, 'CRM', cardBody(ventures.targetUrn!))
+    await dropOn(h, 'CRM', cardBody(ventures.targetUrn!))
+    expect(links('CRM').map((e) => e.source)).toEqual([ventures.targetUrn])
+    act(() => useStagedChangesStore.getState().discard(ventures.id))
+    await h.settle()
+    expect(staged()).toHaveLength(0)
+    expect(links('CRM').map((e) => e.id)).toEqual(['c:Sales>CRM'])
+
+    // A move, then a layout edit (Campaigns shown in the Apps column), then the move discarded.
+    await expand(h, 'Marketing')
+    await dragOver(h, 'CRM', cardBody('Marketing'))
+    await dropOn(h, 'CRM', cardBody('Marketing'))
+    await dragOver(h, 'Campaigns', headerOf('apps'))
+    await dropOn(h, 'Campaigns', headerOf('apps'))
+    expect(columnOfCard('Campaigns')).toBe('apps')
+    act(() => useStagedChangesStore.getState().discard(moves()[0].id))
+    await h.settle()
+    expect(links('CRM').map((e) => e.id)).toEqual(['c:Sales>CRM'])
+    expect(columnOfCard('Campaigns')).toBe('apps')
   }, 30000)
 })

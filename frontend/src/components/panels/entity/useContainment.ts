@@ -16,8 +16,9 @@ import {
   useRootEntityTypes,
   normalizeEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, deriveContainmentEdges, setHasId } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, deriveContainmentEdges, isClosedToNesting, setHasId } from '@/services/ontologyPreflightService'
 import { childrenOf, containmentIndexOf, nodeIndexOf } from '@/lib/storeIndex'
+import { moveHost } from '@/store/canvasLayoutBridge'
 import { useEndpoints } from '../relationship/useEndpoints'
 
 export function useContainmentParent(nodeId: string) {
@@ -55,8 +56,10 @@ export interface MoveTarget {
 const NO_NODES: readonly LineageNode[] = []
 const NO_EDGES: readonly LineageEdge[] = []
 
-/** Loaded entities `nodeId` could move under — not itself, its subtree or its current parent.
- *  Computed only while `enabled` (the picker is open). */
+/** Loaded entities `nodeId` could move under — not itself, its subtree or its current parent. On
+ *  the Context View, only those the view draws (as a row, or as the column mapped to it): a parent
+ *  a curated view leaves out would take the moved entity out of sight with it. Computed only while
+ *  `enabled` (the picker is open). */
 export function useMoveTargets(nodeId: string, enabled: boolean): MoveTarget[] {
   const entityTypes = useEntityTypes()
   const rootEntityTypes = useRootEntityTypes()
@@ -82,12 +85,15 @@ export function useMoveTargets(nodeId: string, enabled: boolean): MoveTarget[] {
     // One allowed-children answer per candidate TYPE, not per node.
     const canContain = new Map<string, boolean>()
     const out: MoveTarget[] = []
+    const drawn = moveHost()?.isDrawn
     for (const n of nodes) {
       if (subtree.has(n.id) || n.id === parentId || n.id.startsWith('logical:')) continue
+      if (drawn && !drawn(n.id)) continue
       const type = n.data.type as string
       let ok = canContain.get(type)
       if (ok === undefined) {
-        ok = setHasId(allowedChildTypeIds(type, entityTypes, rootEntityTypes, hierarchyMap), childType)
+        ok = !isClosedToNesting(type, entityTypes, hierarchyMap)
+          && setHasId(allowedChildTypeIds(type, entityTypes, rootEntityTypes, hierarchyMap), childType)
         canContain.set(type, ok)
       }
       if (ok) out.push({ id: n.id, label: (n.data.label as string) || n.id, type })

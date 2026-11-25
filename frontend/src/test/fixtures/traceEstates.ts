@@ -227,6 +227,45 @@ export function anchoredEstate() {
 }
 
 /**
+ * A draft to move things around in, three levels deep with lineage across
+ * apps: a column MAPPED to the Finance domain (its apps are the rows), a
+ * column of the other domains, and a column of apps placed there by hand.
+ *
+ *   Finance   ⊃ Billing ⊃ invoices     ← column "Finance" (anchored)
+ *             ⊃ Ledger  ⊃ journal
+ *   Sales     ⊃ CRM     ⊃ leads        ← column "Domains"
+ *             ⊃ Quotes                 ← placed in column "Apps" by hand
+ *   Marketing ⊃ Campaigns
+ *   leads → invoices, journal → invoices
+ */
+export function movesEstate() {
+  const nodes = [
+    wn('Finance', 'domain', 2), wn('Billing', 'app', 1), wn('invoices', 'dataset'), wn('Ledger', 'app', 1), wn('journal', 'dataset'),
+    wn('Sales', 'domain', 2), wn('CRM', 'app', 1), wn('leads', 'dataset'), wn('Quotes', 'app'),
+    wn('Marketing', 'domain', 1), wn('Campaigns', 'app'),
+  ]
+  const containmentEdges = [
+    has('Finance', 'Billing'), has('Billing', 'invoices'), has('Finance', 'Ledger'), has('Ledger', 'journal'),
+    has('Sales', 'CRM'), has('CRM', 'leads'), has('Sales', 'Quotes'), has('Marketing', 'Campaigns'),
+  ]
+  const lineageEdges = [raw('leads', 'invoices'), raw('journal', 'invoices')]
+  const model: LensWalkModel = {
+    focusUrn: 'CRM', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'fin', name: 'Finance', order: 0, entityTypes: [], anchorUrn: 'Finance' },
+    { id: 'domains', name: 'Domains', order: 1, entityTypes: ['domain'] },
+    { id: 'apps', name: 'Apps', order: 2, entityTypes: ['app'] },
+  ]
+  const assignments = {
+    Finance: { layerId: 'fin' }, Sales: { layerId: 'domains' }, Marketing: { layerId: 'domains' }, Quotes: { layerId: 'apps' },
+  }
+  return { model, layers, assignments }
+}
+
+/**
  * An anchored view where every card has its own lineage story: what each
  * card's lineage ports must say on open.
  *
