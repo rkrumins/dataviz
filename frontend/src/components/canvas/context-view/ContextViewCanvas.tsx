@@ -2335,7 +2335,9 @@ export function ContextViewCanvas({
   // through the move host: the same gates as the menus, what this view draws, and to open the new
   // parent once moved. Registered once; it answers for the latest render through this ref.
   const moveStateRef = useRef({ isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap })
-  moveStateRef.current = { isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap }
+  useEffect(() => {
+    moveStateRef.current = { isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap }
+  })
   useEffect(() => registerMoveHost({
     blocked: () => {
       const s = moveStateRef.current
