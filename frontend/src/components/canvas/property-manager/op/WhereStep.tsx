@@ -3,7 +3,8 @@
  * every entity with the property, the canvas selection, a layer, a container's children or
  * everything inside it, a search's matches — or criteria built like any search. In the view by
  * default; the whole data source on purpose, behind a warning. A change of relationships reaches
- * the ones it was opened on: those picked, or a Connections search's.
+ * the ones it was opened on: those picked, or a Connections search's — or, opened from Property
+ * Manager, every relationship in the view, or those of them holding the property.
  */
 import { useMemo, type ComponentType, type ReactNode } from 'react'
 import { AlertTriangle, Filter, FolderTree, Globe2, Layers, ListChecks, ListTree, MousePointerSquareDashed, ScanSearch, Tag, Waypoints } from 'lucide-react'
@@ -12,7 +13,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import type { Predicate } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { VisualQueryBuilder } from '../../search/panel/VisualQueryBuilder'
-import { scopeFixedToView, sentence, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
+import { isEdgeTarget, scopeFixedToView, sentence, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset } from './opModel'
 import { FIELD, LABEL } from './styles'
 
 export interface LayerOption { id: string; name: string }
@@ -55,6 +56,16 @@ export function WhereStep({
         ? { id: seed.kind, icon: Waypoints, title: `The ${seed.ids.length.toLocaleString()} relationships`, detail: 'Exactly the relationships picked', preset: seed }
         : { id: seed.kind, icon: ScanSearch, title: 'The search’s relationships',
           detail: `Every relationship it matches${seed.count !== undefined ? ` — ${seed.count.toLocaleString()}` : ''}, on every page`, preset: seed })
+      return out
+    }
+    // Relationships from Property Manager: every one in the view, or those holding the property.
+    if (seed?.kind === 'viewRelationships' || seed?.kind === 'relationshipsWithKey') {
+      out.push({ id: 'viewRelationships', icon: Waypoints, title: 'Every relationship in the view',
+        detail: 'Between its entities, however many — not just the ones loaded', preset: { kind: 'viewRelationships' } })
+      if (key) {
+        out.push({ id: 'relationshipsWithKey', icon: Tag, title: `Every relationship with ${key}`,
+          detail: 'The relationships that hold it already', preset: { kind: 'relationshipsWithKey', key } })
+      }
       return out
     }
     if (seed && (seed.kind === 'children' || seed.kind === 'inside' || seed.kind === 'search')) {
@@ -104,12 +115,13 @@ export function WhereStep({
   }, [seed, selectionIds, key, layers, preset])
 
   const fixed = scopeFixedToView(preset)
+  const edges = isEdgeTarget(preset)
   // Too many to name by id: the other ways in, as they are titled here.
   const tooMany = tooManyIds(preset, choices.filter((c) => c.id !== 'selection').map((c) => c.title))
   return (
     <div className="space-y-6">
       {/* Two columns on a wide screen; criteria, once chosen, take both so the builder has room. */}
-      <div role="radiogroup" aria-label="Which entities" className="grid gap-2 md:grid-cols-2">
+      <div role="radiogroup" aria-label={edges ? 'Which relationships' : 'Which entities'} className="grid gap-2 md:grid-cols-2">
         {choices.map((c) => {
           const on = preset.kind === c.id
           const Icon = c.icon
@@ -176,7 +188,7 @@ export function WhereStep({
             <div className="mt-3 rounded-lg border border-amber-500/35 bg-amber-500/[0.07] p-3">
               <p className="flex items-start gap-1.5 text-[13px] text-amber-800 dark:text-amber-200">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-                Entities outside this view are changed too — ones you can’t see from here.
+                {edges ? 'Relationships' : 'Entities'} outside this view are changed too — ones you can’t see from here.
               </p>
               <label className="mt-2 flex items-center gap-2 text-[13px] text-ink">
                 <input type="checkbox" checked={sourceConfirmed} onChange={(e) => onConfirmSource(e.target.checked)} className="accent-amber-500" />

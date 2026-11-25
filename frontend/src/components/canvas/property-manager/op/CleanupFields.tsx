@@ -12,8 +12,9 @@
  *   convert (left as they are, or removed).
  *
  * The preview reads the values the catalog lists, the server's rule written again (`cleanup.ts`);
- * the server's reading of every entity is the one applied. A clean-up of relationships, whose values
- * no catalog counts, previews those read from the relationships it reaches (`relationships`).
+ * the server's reading of every entity is the one applied. A clean-up of relationships reads the
+ * view's relationship catalog (`subject`) — or, where no catalog counts their values, previews those
+ * read from the relationships it reaches (`relationships`).
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ArrowRight, Info, RotateCw } from 'lucide-react'
@@ -24,7 +25,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { DrawerScrollContext } from '@/components/panels/shell/drawerScroll'
 import { useDrawerList } from '@/components/panels/entity/multi/useDrawerList'
 import type { ValueKind } from '@/services/versioningApiService'
-import type { SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
+import type { CatalogSubject, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 import { cleanValue, mergeMap, similarGroups, type SimilarGroup } from './cleanup'
 import { VALUE_KIND_LABEL, type OpDraft } from './opModel'
 import { FIELD, LABEL } from './styles'
@@ -36,20 +37,23 @@ const SHOWN = 6
 /** A merge group's height before it is measured: a few values, one per line. */
 const GROUP_ESTIMATE = 96
 
-export function CleanupFields({ op, onChange, known, viewId, relationships }: {
+export function CleanupFields({ op, onChange, known, viewId, subject = 'entities', relationships }: {
   op: OpDraft
   onChange: (patch: Partial<OpDraft>) => void
   /** The property as the catalog reads it in this view, if any entity holds it — for relationships,
-   *  as those read hold it. */
+   *  as their catalog reads it, or as those read hold it. */
   known: SearchCatalogProperty | null
   viewId: string
-  /** A clean-up of relationships: the values read from those it reaches, which `known` holds. */
+  /** Whose catalog `known` is — the view's entities', or its relationships'. */
+  subject?: CatalogSubject
+  /** A clean-up of relationships no catalog counts: the values read from those it reaches, which
+   *  `known` holds. */
   relationships?: RelationshipValues
 }) {
   if (relationships?.loading && !known) {
     return <div className="space-y-1.5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-8 w-full rounded-lg" />)}</div>
   }
-  const who = holders(relationships)
+  const who = holders(relationships, subject)
   const fields = (() => {
     switch (op.kind) {
       case 'replace': return <ReplaceFields op={op} onChange={onChange} known={known} who={who} />
@@ -75,17 +79,24 @@ interface Holders {
   every: string
   /** Its values are the view's catalog's, where values are picked to merge. */
   catalog: boolean
+  /** Whose catalog. */
+  subject: CatalogSubject
 }
 
-/** The view's entities — the catalog's values — or the relationships read for a clean-up of them. */
-function holders(relationships?: RelationshipValues): Holders {
+/** The view's entities or relationships — their catalog's values — or the relationships read for a
+ *  clean-up of them. */
+function holders(relationships: RelationshipValues | undefined, subject: CatalogSubject): Holders {
+  if (!relationships && subject === 'relationships') {
+    return { some: 'relationships in this view', values: 'the values this view’s relationships hold', every: 'every relationship holding one',
+      catalog: true, subject, none: 'This view’s relationships hold none of its values yet, so there is nothing to preview.' }
+  }
   if (!relationships) {
-    return { some: 'entities in this view', values: 'the values this view holds', every: 'every entity holding one', catalog: true,
+    return { some: 'entities in this view', values: 'the values this view holds', every: 'every entity holding one', catalog: true, subject,
       none: 'This view’s entities hold none of its values yet, so there is nothing to preview.' }
   }
   const read = relationships.truncated ? `the first ${relationships.read.toLocaleString()} relationships it reaches` : 'the relationships it reaches'
   return { some: relationships.truncated ? `of ${read}` : 'relationships it reaches', values: `the values ${read} hold`,
-    every: 'every relationship holding one', catalog: false, none: `None of ${read} holds a value of it, so there is nothing to preview.` }
+    every: 'every relationship holding one', catalog: false, subject, none: `None of ${read} holds a value of it, so there is nothing to preview.` }
 }
 
 // ── Find & replace ─────────────────────────────────────────────────────────────
@@ -174,7 +185,7 @@ function MergeFields({ op, onChange, known, viewId, who }: {
   op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string; who: Holders
 }) {
   // A relationship's values are only those read for it (`known`): no catalog lists more.
-  const all = useAllValues(viewId, op.key.trim(), who.catalog)
+  const all = useAllValues(viewId, op.key.trim(), who.catalog, who.subject)
   const values = useMemo(() => all.values ?? known?.values ?? [], [all.values, known?.values])
   // How many entities hold each value, by value: what the counts here look up.
   const held = useMemo(() => new Map(values.map((v) => [key(v), v.count])), [values])
@@ -318,7 +329,7 @@ const KINDS: ValueKind[] = ['Integer', 'Float', 'String', 'Boolean']
 function ConvertFields({ op, onChange, known, viewId, who }: {
   op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string; who: Holders
 }) {
-  const all = useAllValues(viewId, op.key.trim(), who.catalog)
+  const all = useAllValues(viewId, op.key.trim(), who.catalog, who.subject)
   const values = useMemo(() => all.values ?? known?.values ?? [], [all.values, known?.values])
   const kinds = Object.entries(known?.kinds ?? {}).sort((a, b) => b[1] - a[1])
   const fails = useMemo(

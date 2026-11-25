@@ -45,8 +45,10 @@ vi.mock('../WhatStep', async (importOriginal) => {
     },
   }
 })
+// The relationships' catalog can't be read here (a provider without one): their keys come from
+// discovery, their values from those a change reaches (PropertyOpDialog.relationships.spec reads one).
 vi.mock('@/hooks/usePropertyCatalog', () => ({
-  usePropertyCatalog: () => ({
+  usePropertyCatalog: (_viewId: string, subject = 'entities') => subject === 'relationships' ? { catalog: null, unavailable: true } : ({
     catalog: {
       status: catalogStatus,
       properties: [
