@@ -35,8 +35,8 @@ export function digest(over: Partial<GraphDigest> = {}): GraphDigest {
     ],
     reviewsMore: false,
     watchedChanged: [
-      { urn: 'urn:li:dataset:orders', entityId: 'urn:uuid:orders', name: 'Orders', change: 'changed', seq: 215, at: '2026-11-16T14:15:00+00:00' },
-      { urn: 'urn:li:dataset:ledger_v1', entityId: 'urn:uuid:ledger', name: 'Legacy ledger', change: 'removed', seq: 213, at: '2026-11-16T12:15:00+00:00' },
+      { kind: 'node', urn: 'urn:li:dataset:orders', entityId: 'urn:uuid:orders', name: 'Orders', change: 'changed', seq: 215, at: '2026-11-16T14:15:00+00:00' },
+      { kind: 'node', urn: 'urn:li:dataset:ledger_v1', entityId: 'urn:uuid:ledger', name: 'Legacy ledger', change: 'removed', seq: 213, at: '2026-11-16T12:15:00+00:00' },
     ],
     ...over,
   }
@@ -65,5 +65,5 @@ export const NOTHING_NEW: GraphDigest = digest({
 })
 
 export function watching(over: Partial<GraphWatching> = {}): GraphWatching {
-  return { graph: false, entities: [], entitiesMax: 200, ...over }
+  return { graph: false, entities: [], edges: [], entitiesMax: 200, ...over }
 }

@@ -3,7 +3,8 @@
  * entities carry, with how many carry it), and its value or new name. A value is typed as what it
  * is — text, a number, yes/no, a date, a link — and the values the property already holds are a
  * click away. A clean-up of the values it holds (find & replace, normalize, merge, convert) is
- * set up with a live before → after (`CleanupFields`).
+ * set up with a live before → after (`CleanupFields`) — of relationships, on the values read from
+ * those it reaches (`relationshipValues`).
  */
 import { useEffect, useMemo, useRef, useState, type ComponentType, type KeyboardEvent } from 'react'
 import { ArrowRightLeft, CaseSensitive, Combine, CopyPlus, Eraser, PencilLine, Replace, TextCursorInput, Trash2 } from 'lucide-react'
@@ -19,6 +20,7 @@ import type { PropertyOpKind, ValueKind } from '@/services/versioningApiService'
 import { CleanupFields } from './CleanupFields'
 import { OP_LABEL, isCleanup, nameProblem, needsTo, needsValue, type OpDraft } from './opModel'
 import { FIELD, LABEL } from './styles'
+import type { RelationshipValues } from './useRelationshipValues'
 
 type ValueType = 'text' | 'number' | 'boolean' | 'date' | 'url'
 
@@ -50,6 +52,9 @@ const OPS: Array<{ group: string; kinds: Array<{ value: PropertyOpKind; icon: Co
   ] },
 ]
 
+/** Relationships' values not read: never the view's entities' catalog in their place. */
+const UNREAD: RelationshipValues = { property: null, values: null, read: 0, truncated: false, loading: false, error: null, retry: () => {} }
+
 /** The kind most of a property's entities store it as — what a convert offers first. */
 function dominantKind(known: SearchCatalogProperty | null): ValueKind {
   const kinds = Object.entries(known?.kinds ?? {}).filter(([k]) => ['Integer', 'Float', 'String', 'Boolean'].includes(k))
@@ -65,7 +70,7 @@ function typeOfValue(v: unknown): ValueType {
   return 'text'
 }
 
-export function WhatStep({ op, onChange, properties, viewId, edges = false, entityTypes, keySeeded = false }: {
+export function WhatStep({ op, onChange, properties, viewId, edges = false, entityTypes, keySeeded = false, relationshipValues }: {
   op: OpDraft
   onChange: (op: OpDraft) => void
   /** Every property the view's entities carry, most carried first. */
@@ -81,6 +86,9 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
   /** It was opened with its property named: the focus goes to what is still to give — the new
    *  name, or the value — not to the property. */
   keySeeded?: boolean
+  /** A clean-up of relationships: the values read from those it reaches (`properties` holds the
+   *  property as they hold it), which its before → after previews. */
+  relationshipValues?: RelationshipValues
 }) {
   const set = (patch: Partial<OpDraft>) => onChange({ ...op, ...patch })
   const valueFirst = keySeeded && (needsValue(op.kind) || needsTo(op.kind))
@@ -112,7 +120,7 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
     <div ref={root} className="space-y-6">
       <div>
         <span className={LABEL} id="op-kind-label">Operation</span>
-        <OpPicker value={op.kind} onChange={pick} edges={edges} />
+        <OpPicker value={op.kind} onChange={pick} />
         <p className="mt-2 text-[13px] text-ink-muted">
           {edges ? KIND_HINT[op.kind].replace(/entities/g, 'relationships').replace(/entity/g, 'relationship') : KIND_HINT[op.kind]}
         </p>
@@ -168,7 +176,7 @@ export function WhatStep({ op, onChange, properties, viewId, edges = false, enti
         )}
       </div>
       {isCleanup(op.kind) && op.key.trim() && !keyError && (
-        <CleanupFields op={op} onChange={set} known={known} viewId={viewId} />
+        <CleanupFields op={op} onChange={set} known={known} viewId={viewId} relationships={edges ? relationshipValues ?? UNREAD : undefined} />
       )}
     </div>
   )
@@ -210,11 +218,9 @@ function AllowedValues({ field, value, only, edges, onPick }: {
 }
 
 /** The operation: a change of the property, or a clean-up of its values — one choice, in two rows.
- *  A radiogroup: one tab stop, arrow keys move the choice. A relationship's values aren't
- *  catalogued, so its clean-ups (which preview them) aren't offered. */
-function OpPicker({ value, onChange, edges }: { value: PropertyOpKind; onChange: (kind: PropertyOpKind) => void; edges: boolean }) {
-  const groups = edges ? OPS.slice(0, 1) : OPS
-  const all = groups.flatMap((g) => g.kinds.map((k) => k.value))
+ *  A radiogroup: one tab stop, arrow keys move the choice. */
+function OpPicker({ value, onChange }: { value: PropertyOpKind; onChange: (kind: PropertyOpKind) => void }) {
+  const all = OPS.flatMap((g) => g.kinds.map((k) => k.value))
   const refs = useRef(new Map<PropertyOpKind, HTMLButtonElement | null>())
   const move = (e: KeyboardEvent, from: PropertyOpKind) => {
     const at = all.indexOf(from)
@@ -228,7 +234,7 @@ function OpPicker({ value, onChange, edges }: { value: PropertyOpKind; onChange:
   }
   return (
     <div role="radiogroup" aria-labelledby="op-kind-label" className="space-y-2">
-      {groups.map((g) => (
+      {OPS.map((g) => (
         <div key={g.group} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
           <span className="shrink-0 text-xs text-ink-muted sm:w-28">{g.group}</span>
           <div className="inline-flex flex-wrap items-center gap-0.5 self-start rounded-lg bg-black/[0.05] p-0.5 dark:bg-white/[0.05]">

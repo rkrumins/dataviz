@@ -179,7 +179,9 @@ _FIELD_SCHEMA: Dict[str, Dict[str, Any]] = {
 def json_schema(ontology: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The record format's JSON Schema (draft 2020-12), describing one NDJSON line or JSON
     object. With a data source's ``ontology`` (as the import reads it, with ``fields`` and
-    ``edge_ends``), its entity and edge types are enumerated and its properties typed."""
+    ``edge_fields`` and ``edge_ends``), its entity and edge types are enumerated and its
+    properties typed: a node row's by its entity types' fields, an edge row's by its relationship
+    types'."""
     schema = _RECORD.json_schema()
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -206,6 +208,8 @@ def json_schema(ontology: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
             **edge["properties"]["edgeType"], "enum": sorted(set(ontology["edge_types"]))}
     for prop, spec in sorted(_typed_properties(ontology).items()):
         node["properties"][prop] = spec
+    for prop, spec in sorted(_typed_properties(ontology, kinds=("edge",)).items()):
+        edge["properties"][prop] = spec
     return _canonical(schema)
 
 
@@ -223,16 +227,22 @@ def _canonical(node: Any) -> Any:
     return node
 
 
-def _typed_properties(ontology: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """``prop.<field>`` → its schema, for every field an entity type of ``ontology`` defines."""
+def _typed_properties(ontology: Mapping[str, Any],
+                      kinds: Sequence[str] = ("node",)) -> Dict[str, Dict[str, Any]]:
+    """``prop.<field>`` → its schema, for every field a type of ``ontology`` defines, of each of
+    ``kinds``: an entity type's (``node``, its ``fields``), a relationship type's (``edge``, its
+    ``edge_fields``)."""
     out: Dict[str, Dict[str, Any]] = {}
-    for etype, fields in sorted((ontology.get("fields") or {}).items()):
+    types = [(etype, fields, etype if kind == "node" else f"{etype} relationship") for kind in kinds
+             for etype, fields in sorted((ontology.get("fields" if kind == "node" else "edge_fields")
+                                          or {}).items())]
+    for etype, fields, one in types:
         for f in fields:
             column = f"prop.{f['id']}"
             typed = _FIELD_SCHEMA.get(str(f.get("type") or "").lower(), {"type": "string"})
             notes = [f"{f.get('name') or f['id']} ({f.get('type') or 'text'})"]
             if f.get("required"):
-                notes.append(f"required for a new {etype}")
+                notes.append(f"required for a new {one}")
             if f.get("key"):
                 notes.append(f"{etype} rows are matched by it")
             if f.get("unique"):
@@ -259,24 +269,28 @@ def _example_urn(etype: str) -> str:
     return f"urn:example:{re.sub(r'[^A-Za-z0-9_.-]+', '-', etype).lower()}:1"
 
 
+def _examples(fields: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """A template row's ``prop.<field>`` cells: an example of each field's type."""
+    return {f"prop.{f['id']}": _EXAMPLE_VALUE.get(str(f.get("type") or "").lower(),
+                                                  f"example {f.get('name') or f['id']}")
+            for f in fields}
+
+
 def template_records(ontology: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Worked rows for the import template from the data source's ``ontology``: a node of each
-    entity type, its properties filled with an example of each field's type, and an edge of each
-    relationship type between example nodes of types it may join. Each row points at its nodes
-    by an example urn (a pointer). ``[]`` without an ontology."""
+    entity type, and an edge of each relationship type between example nodes of types it may
+    join, each row's properties filled with an example of each of its type's fields. Each row
+    points at its nodes by an example urn (a pointer). ``[]`` without an ontology."""
     if not ontology or not ontology.get("node_types"):
         return []
     fields = ontology.get("fields") or {}
     node_types = sorted(dict.fromkeys(ontology["node_types"]))[:_TEMPLATE_CAP]
     rows: List[Dict[str, Any]] = []
     for etype in node_types:
-        row: Dict[str, Any] = {"kind": "node", "urn": _example_urn(etype), "entityType": etype,
-                               "displayName": f"Example {etype}", "_op": ""}
-        for f in fields.get(etype) or []:
-            row[f"prop.{f['id']}"] = _EXAMPLE_VALUE.get(str(f.get("type") or "").lower(),
-                                                        f"example {f.get('name') or f['id']}")
-        rows.append(row)
-    ends = ontology.get("edge_ends") or {}
+        rows.append({"kind": "node", "urn": _example_urn(etype), "entityType": etype,
+                     "displayName": f"Example {etype}", "_op": "",
+                     **_examples(fields.get(etype) or [])})
+    ends, edge_fields = ontology.get("edge_ends") or {}, ontology.get("edge_fields") or {}
     for etype in sorted(dict.fromkeys(ontology.get("edge_types") or []))[:_TEMPLATE_CAP]:
         allowed = ends.get(etype) or {}
         source = next((t for t in allowed.get("source") or node_types if t in node_types), None)
@@ -284,21 +298,26 @@ def template_records(ontology: Optional[Mapping[str, Any]]) -> List[Dict[str, An
                        if t in node_types), None)
         if source and target:
             rows.append({"kind": "edge", "edgeType": etype, "sourceUrn": _example_urn(source),
-                         "targetUrn": _example_urn(target), "_op": ""})
+                         "targetUrn": _example_urn(target), "_op": "",
+                         **_examples(edge_fields.get(etype) or [])})
     return rows
 
 
 def template_columns(ontology: Optional[Mapping[str, Any]],
                      identity_property: Optional[str] = None) -> Dict[str, List[str]]:
-    """The property and end-key columns a template carries beyond its rows' own, as
-    ``column_order`` takes them: every field the ontology defines, the identifier property, and
-    for edges the identifier and the fields types are matched by, at either end."""
-    node = sorted({f"prop.{f['id']}" for fs in ((ontology or {}).get("fields") or {}).values()
-                   for f in fs} | ({f"prop.{identity_property}"} if identity_property else set()))
-    keyed = sorted({k for ks in ((ontology or {}).get("keys") or {}).values() for k in ks}
+    """The columns a template carries beyond its rows' own: the property columns of node rows
+    (``node``: every field an entity type defines, and the identifier property) and of edge rows
+    (``edge``: every field a relationship type defines), as ``column_order`` takes them; and
+    ``ends``, the end-key columns of edge rows — the identifier and the fields types are matched
+    by, at either end."""
+    onto = ontology or {}
+    node = sorted({f"prop.{f['id']}" for fs in (onto.get("fields") or {}).values() for f in fs}
+                  | ({f"prop.{identity_property}"} if identity_property else set()))
+    edge = sorted({f"prop.{f['id']}" for fs in (onto.get("edge_fields") or {}).values() for f in fs})
+    keyed = sorted({k for ks in (onto.get("keys") or {}).values() for k in ks}
                    | ({identity_property} if identity_property else set()))
-    edge = [f"{end}.{k}" for k in keyed for end in ("source", "target")]
-    return {"node": node, "edge": edge}
+    ends = [f"{end}.{k}" for k in keyed for end in ("source", "target")]
+    return {"node": node, "edge": edge, "ends": ends}
 
 
 def columns_guide(columns: Sequence[str], ontology: Optional[Mapping[str, Any]] = None,
@@ -312,7 +331,7 @@ def columns_guide(columns: Sequence[str], ontology: Optional[Mapping[str, Any]] 
     for name in ImportEdgeRecord.model_fields:
         alias = spec[name][0]
         applies[alias] = "node, edge" if applies.get(alias) == "node" else "edge"
-    typed = _typed_properties(ontology or {})
+    typed = _typed_properties(ontology or {}, kinds=("node", "edge"))
     out: List[Tuple[str, str, str, str]] = []
     for column in columns:
         if column == "kind":

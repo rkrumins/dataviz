@@ -22,7 +22,8 @@ from backend.app.api.v1.endpoints import versioned_graph_health as vgh
 from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.auth import api_key_surface
 from backend.app.auth.dependencies import get_permission_claims
-from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+from backend.app.db.models import (DataSourceStatsORM, ProviderORM, WorkspaceDataSourceORM,
+                                   WorkspaceORM)
 from backend.app.main import app
 from backend.app.services.graph_store import topology
 from backend.app.services.permission_service import PermissionClaims
@@ -47,7 +48,7 @@ GRAPHS = [Graph("g_1", "ws_1", "ds_1", None, True),
           Graph("g_fork", "ws_1", "dsfork_1", "g_1", False),
           Graph("g_9", "ws_2", "ds_9", None, True)]
 CONTRACT = {"asOf", "head", "serving", "versionsBehind", "readMode", "progress", "lastUpdate",
-            "memory", "lastBuild", "signals", "follows", "problems"}
+            "memory", "lastBuild", "signals", "propertyNames", "follows", "problems"}
 
 
 def _rev(seq: int) -> dict:
@@ -330,11 +331,11 @@ async def test_each_part_that_cant_be_read_is_null_with_its_problem(world, test_
     body = (await test_client.get(_HEALTH.format("g_1"))).json()
     assert set(body) == CONTRACT
     for part in ("head", "serving", "versionsBehind", "readMode", "progress", "lastUpdate",
-                 "memory", "lastBuild", "signals"):
+                 "memory", "lastBuild", "signals", "propertyNames"):
         assert body[part] is None, part
     assert [p["part"] for p in body["problems"]] == [
         "head", "serving", "versionsBehind", "readMode", "progress", "lastUpdate", "memory",
-        "lastBuild", "signals"]
+        "lastBuild", "signals", "propertyNames"]
     assert all(p["message"] for p in body["problems"])
     # The graph store's nodes not read yet: its copy is known, the node holding it is not.
     world.versioning.unreadable.clear()
@@ -342,6 +343,45 @@ async def test_each_part_that_cant_be_read_is_null_with_its_problem(world, test_
     body = (await test_client.get(_HEALTH.format("g_1"))).json()
     assert body["memory"]["node"] is None and body["memory"]["bytes"] == 4 * _GB
     assert "memory.node" in {p["part"] for p in body["problems"]}
+
+
+# ── Property names ────────────────────────────────────────────────────────────────────────────────
+async def test_property_names_are_not_made_up_before_anything_measured_them(world, test_client):
+    names = (await test_client.get(_HEALTH.format("g_1"))).json()["propertyNames"]
+    assert (names["registered"], names["measuredBy"], names["state"]) == (None, None, "unknown")
+    assert names["ceiling"] == 65_534 and names["budget"] > 0
+
+
+async def test_property_names_its_last_update_recorded_say_which_keys_are_kept_as_values(
+        world, test_client):
+    world.versioning.watermarks["g_1"]["property_names"] = {
+        "registered": 46_000, "platform": 90, "budget": 50_000, "ceiling": 65_534,
+        "at": "2026-11-16T12:30:00+00:00",
+        "demoted": {"nodes": ["rare"], "edges": ["my prop"], "count": 2}}
+    names = (await test_client.get(_HEALTH.format("g_1"))).json()["propertyNames"]
+    assert names == {"registered": 46_000, "platform": 90, "budget": 50_000, "ceiling": 65_534,
+                     "measuredAt": "2026-11-16T12:30:00+00:00", "measuredBy": "update",
+                     "storedAsValues": {"nodes": ["rare"], "edges": ["my prop"], "count": 2},
+                     "state": "near_budget"}
+    world.versioning.watermarks["g_1"]["property_names"]["registered"] = 50_000
+    names = (await test_client.get(_HEALTH.format("g_1"))).json()["propertyNames"]
+    assert names["state"] == "at_budget"
+
+
+async def test_a_graph_not_updated_since_reads_its_data_sources_last_count(
+        world, test_client, db_session):
+    """A graph its updates haven't measured yet — one enabled before the reading was kept — shows
+    the count its data source's statistics poll last took, which names no keys."""
+    db_session.add(DataSourceStatsORM(data_source_id="ds_1", property_key_count=1_200,
+                                      updated_at="2026-11-16T11:00:00+00:00"))
+    await db_session.commit()
+    names = (await test_client.get(_HEALTH.format("g_1"))).json()["propertyNames"]
+    assert (names["registered"], names["measuredBy"], names["measuredAt"], names["state"]) == (
+        1_200, "poll", "2026-11-16T11:00:00+00:00", "ok")
+    assert names["storedAsValues"] is None
+    # A fork's copy is its root's: so is the count.
+    fork = (await test_client.get(_HEALTH.format("g_fork"))).json()["propertyNames"]
+    assert fork["registered"] == 1_200
 
 
 # ── The last build ────────────────────────────────────────────────────────────────────────────────

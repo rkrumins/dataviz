@@ -77,11 +77,15 @@ class TestValidation:
 
     @pytest.mark.parametrize("op, value", [("gt", 1), ("contains", "x"), ("startsWith", "x"),
                                            ("between", [1, 2])])
-    def test_other_operators_are_refused_with_why(self, op, value):
-        with pytest.raises(ValidationError, match=r"\(mode\): an edge keeps its own properties "
-                                                  r"as JSON text.*is set, is, is not or is one of"):
-            _validate_predicate(self.hops({"kind": "edgeProperty", "key": "mode", "op": op,
-                                           "value": value}))
+    def test_other_operators_read_a_users_key_natively(self, op, value):
+        """An edge's properties are native within the name budget, as a node's are."""
+        _validate_predicate(self.hops({"kind": "edgeProperty", "key": "mode", "op": op,
+                                       "value": value}))
+
+    def test_a_value_that_cannot_be_compared_is_still_refused(self):
+        with pytest.raises(ValidationError, match=r"\(mode\)"):
+            _validate_predicate(self.hops({"kind": "edgeProperty", "key": "mode", "op": "gt",
+                                           "value": "abc", "valueType": "number"}))
 
     def test_a_native_field_takes_every_operator(self):
         _validate_predicate(self.hops({"kind": "edgeProperty", "key": "confidence",

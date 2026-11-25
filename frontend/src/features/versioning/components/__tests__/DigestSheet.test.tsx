@@ -1,7 +1,8 @@
 /**
  * DigestSheet — what changed since the reader last looked, in every state: loading, the versions
  * with who published them and what each recorded ("—" where a version recorded nothing, never 0),
- * the reviews waiting on them, the entities they watch that changed, the last 7 days for a reader
+ * the reviews waiting on them, the entities and relationships they watch that changed (a
+ * relationship by its ends and its type), the last 7 days for a reader
  * with no marker, the cap ("50 of 214", or "there are more"), nothing new, and an error with a
  * retry. Each way on: a version's changes in place (ChangeList), its comparison (RevisionCompare,
  * through `onCompare`), a watched entity's history (EntityHistory), a review's page. Opening it
@@ -25,7 +26,8 @@ vi.mock('../ChangeList', () => ({
   ChangeList: (p: { origin: { fromSeq: number; toSeq: number } }) => <p>Changes of {p.origin.fromSeq}→{p.origin.toSeq}</p>,
 }))
 vi.mock('../EntityHistory', () => ({
-  EntityHistory: (p: { entityId: string; mainBranchId: string | null }) => <p>History of {p.entityId} on {p.mainBranchId}</p>,
+  EntityHistory: (p: { entityId: string; mainBranchId: string | null; kind?: string }) =>
+    <p data-kind={p.kind}>History of {p.entityId} on {p.mainBranchId}</p>,
 }))
 
 import { getGraphDigest, markDigestSeen } from '@/services/versioningApiService'
@@ -135,7 +137,25 @@ describe('DigestSheet', () => {
     expect(rows[1]).toHaveTextContent('Legacy ledger')
     expect(rows[1]).toHaveTextContent('Removed')
     await userEvent.setup().click(within(rows[1]).getByRole('button', { name: 'History' }))
-    expect(within(rows[1]).getByText('History of urn:uuid:ledger on br_main')).toBeInTheDocument()
+    expect(within(rows[1]).getByText('History of urn:uuid:ledger on br_main')).toHaveAttribute('data-kind', 'node')
+  })
+
+  it('names a watched relationship by its ends and its type, with its history', async () => {
+    mockDigest.mockResolvedValue(digest({ watchedChanged: [{
+      kind: 'edge', entityId: 'urn:uuid:feeds', edgeType: 'DEPENDS_ON', change: 'removed', seq: 214,
+      at: '2026-11-16T13:15:00+00:00',
+      source: { entityId: 'urn:uuid:orders', name: 'Orders' },
+      target: { entityId: 'urn:uuid:revenue', name: null },              // never named: its id
+    }] }))
+    renderSheet()
+    const watched = within(await screen.findByRole('region', { name: /Things you watch/ }))
+    const [row] = watched.getAllByRole('listitem')
+    expect(row).toHaveTextContent('Orders → urn:uuid:revenue')
+    expect(row).toHaveTextContent('Depends on')
+    expect(row).toHaveTextContent('Removed')
+    expect(row).toHaveTextContent('in #214')
+    await userEvent.setup().click(within(row).getByRole('button', { name: 'History' }))
+    expect(within(row).getByText('History of urn:uuid:feeds on br_main')).toHaveAttribute('data-kind', 'edge')
   })
 
   it('opening it marks nothing seen; “Mark as seen” marks the version shown and reads it again', async () => {

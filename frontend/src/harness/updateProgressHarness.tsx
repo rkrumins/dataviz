@@ -115,6 +115,13 @@ function progressFetch(): typeof fetch {
             const fromDatabase = PROGRESS?.phase === 'seeding' || PROGRESS?.phase === 'loading'
             return json({
                 ...HEALTH, progress: PROGRESS,
+                // Close to the platform's budget, with keys on items and relationships kept as values.
+                propertyNames: {
+                    registered: 46_210, platform: 92, budget: 50_000, ceiling: 65_534,
+                    measuredAt: PROGRESS?.startedAt ?? HEALTH.asOf, measuredBy: 'update',
+                    storedAsValues: { nodes: ['legacy_ref', 'import_batch'], edges: ['my prop', 'join hint', 'sql_text'], count: 5 },
+                    state: 'near_budget',
+                },
                 ...(beside ? {
                     readMode: { effective: 'beside', declared: 'beside', source: 'graph', why: [] },
                     lastBuild: { outcome: 'running', at: PROGRESS!.startedAt, why: null },

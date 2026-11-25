@@ -330,6 +330,28 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 > The synthetic `gv:src:<ID>` identity below is not built: a node with no identifier stops the
 > enable. See [18 · Entity Identity §3a](18-identity.md#3a-across-the-lifecycle-external-and-versioned-graphs).
 
+> **As built (properties, 2026-12):** the copy keeps every property it reads.
+> - **Edges** (`falkordb_provider._edge_from_row`, the one decoder the canvas and the copy share):
+>   native `r.*` keys are folded into `properties`, the `r.properties` bag winning a name both hold.
+>   A relationship the projector wrote (`gvHash`) and a rollup (`AGGREGATED`) are read from the bag
+>   alone. Only a finite number is `confidence`; anything else is the property `confidence`. Ids are
+>   text. History still stores an edge's properties as one bag, and so does the projector.
+> - **Nodes** (`entity_serde.source_node_payload`, the copy only): reserved keys a field can't take
+>   go to `properties['__src.<k>']`; `SOURCE_DERIVED_NODE_KEYS` (plus `urnSource`/`nameSource`, an
+>   `entityId` equal to the urn and an `entityType` equal to the label) are left out; `properties` /
+>   `propertiesRaw` bags are decoded and merged, native keys winning.
+> - **Values** (`entity_serde.storable`): temporal values are stored as `moments` text. NaN, ±Inf,
+>   NUL and non-JSON kinds are stored as text and **held for review** — not the `{"$f": …}` encodings.
+> - **Copies of one connection** (same source, upper-cased type and target, whatever their ids) are
+>   settled after the copy (`connections`): identical ones read twice under one source id fold,
+>   identical ones with ids of their own stay (as before); differing ones are held
+>   (`bootstrap_review`) and the job pauses for a person to keep or merge them (`resolve`) — no
+>   `#hash` ids, no `__src.multiplicity`. A connection sharing a raw id gets `edge:<id>` (repeated as
+>   needed; `projection._graph_edge_id` strips them for the graph's own id).
+> - **Proof:** `properties_kept` (every raw key accounted for, by name) and `edge_sample_matches`
+>   (a sample of connections re-read from the source) block the enable. Bring into history
+>   (`BootstrapRunner.read_graph`) reads the same way.
+
 **Nodes (§13)**
 - Identity: `urn`, else `n[identity_property]`, else synthetic `urn='gv:src:<ID>'` with **`entity_id='src:<ID>'`**.
 - So `urn == 'gv:' + eid`, which matches the stand-in convention stripped by `graph.py:3664-3671 _ref`. Today `bootstrap_worker.py:955` sets `eid = node.urn`; v2 keeps that for URN nodes only.
@@ -969,7 +991,7 @@ Integration issues applied: X-01, X-02, X-03, X-04, X-06, X-07, X-08, X-09, X-11
 1. **Requested §6 additions:** `409 data_source_has_data {next}` and `422 bundle_invalid {file, expectedSha, gotSha}`. Every other lifecycle condition is folded into the canonical codes with a `reason` field (`reverify_required:{preflight_stale, source_moved, parity_stale, shadow_blocking, rollups_missing, projection_unhealthy}`, `source_stale:{released}`, `source_unreachable:{missing}`).
 2. **Requested access.py Actions beyond X-04:** `LIFECYCLE_CANCEL` (M), `LIFECYCLE_RELEASE` (A), `LIFECYCLE_DELETE` (A), `LIFECYCLE_TRASH` (P; A when protected), `DRIFT_SYNC` (P), `DRIFT_DISMISS` (A).
 3. **§13 refinement for INGEST to confirm:** when a triple has more than one live head and one head id equals the deterministic import mint (a converted parallel group), conversion and adopt reuse it. INGEST still raises `ambiguous_identity` for any >1 case.
-4. **Divergent parallel edges** stay collapsed in the projection. Revisit after the preflight fleet report.
+4. **Divergent parallel edges** stay collapsed in the projection. Revisit after the preflight fleet report. The proposed opt-in per relationship type is in [20](20-parallel-relationships.md).
 5. **Release default:** stay with `forget`, or switch to `delete_key` after 14 healthy days? Should large graphs on tight shards get a shorter period?
 6. **Detached data sources become read-only on the canvas** when `GRAPHVER_VERSIONED_WRITES=1` (`versioned_write_provider.py:118 _graph_id`). Is that intended?
 7. **Synthetic identity uses FalkorDB internal IDs**, which are reused after deletes. Drift on URN-less entities may read a delete+create as a change. Accept?

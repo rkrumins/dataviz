@@ -5,6 +5,7 @@
  * does.
  *
  *   ok         three new versions since the last visit, a review waiting, two watched entities
+ *              and a watched relationship
  *   week       no marker yet: the last 7 days
  *   truncated  50 of 214 versions since the last visit
  *   cut        the 7-day window cut short (50+)
@@ -12,7 +13,7 @@
  *   loading    the digest never answers
  *   error      the digest fails
  */
-import type { GraphDigest, GraphWatching } from '../services/versioningApiService'
+import type { DigestWatched, GraphDigest, GraphWatching } from '../services/versioningApiService'
 import { NOTHING_NEW, digest, truncated, watching } from '../features/versioning/components/__fixtures__/digest'
 
 export type Scenario = 'ok' | 'week' | 'truncated' | 'cut' | 'empty' | 'loading' | 'error'
@@ -22,6 +23,12 @@ export const DS = 'ds_sales'
 export const GRAPH = 'g1'
 export const VIEW = 'view_sales'
 export const ENTITY_URN = 'urn:li:dataset:orders'
+/** A watched relationship that changed: named by its ends and its type. */
+const WATCHED_RELATIONSHIP: DigestWatched = {
+  kind: 'edge', entityId: 'rel_orders_revenue', edgeType: 'FEEDS', change: 'changed', seq: 214,
+  at: '2026-11-16T13:40:00+00:00',
+  source: { entityId: 'urn:uuid:orders', name: 'Orders' }, target: { entityId: 'urn:uuid:revenue', name: 'Revenue' },
+}
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
@@ -31,13 +38,17 @@ function first(scenario: Scenario): GraphDigest {
     case 'truncated': return truncated(214)
     case 'cut': return truncated(null)
     case 'empty': return NOTHING_NEW
-    default: return digest()
+    default: {
+      const d = digest()
+      return { ...d, watchedChanged: [...d.watchedChanged, WATCHED_RELATIONSHIP] }
+    }
   }
 }
 
 export function digestFetch(scenario: Scenario): typeof fetch {
   let current = first(scenario)
-  let watched: GraphWatching = watching({ entities: [{ urn: ENTITY_URN, since: '2026-11-12T09:30:00+00:00' }] })
+  let watched: GraphWatching = watching({ entities: [{ urn: ENTITY_URN, since: '2026-11-12T09:30:00+00:00' }],
+    edges: [{ id: 'rel_orders_revenue', since: '2026-11-12T09:31:00+00:00' }] })
   return async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin)
     const method = (init?.method ?? 'GET').toUpperCase()

@@ -15,6 +15,7 @@ import type { ReviewCounts } from '../useReviewCounts'
 const api = vi.hoisted(() => ({
   preview: vi.fn(),
   sample: vi.fn(),
+  values: vi.fn(),
   create: vi.fn(),
   get: vi.fn(),
   /** The What step fails to draw. */
@@ -30,6 +31,7 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   previewPropertyJob: api.preview,
   previewPropertyJobSample: api.sample,
+  previewPropertyJobValues: api.values,
   createPropertyJob: api.create,
   getPropertyJob: api.get,
 }))
@@ -101,6 +103,7 @@ beforeEach(() => {
   localStorage.clear()
   api.preview.mockReset().mockResolvedValue({ refusal: null, nameBudget: { registered: 10, nativeBudget: 50000, ceiling: 65534, isNew: false, verdict: 'ok' }, activeJobId: null, counts: null })
   api.sample.mockReset().mockResolvedValue({ rows: [{ id: 'N1', urn: 'u1', name: 'orders', type: 'Table', after: 'gold', outcome: 'change' }], truncated: true })
+  api.values.mockReset().mockResolvedValue({ property: null, read: 0, truncated: false })
   catalogStatus = 'complete'
   api.create.mockReset().mockResolvedValue({ jobId: 'job-1', status: 'pending' })
   api.get.mockReset().mockResolvedValue({ jobId: 'job-0', status: 'running', progress: 0.3, op: { kind: 'rename', key: 'owner', to: 'steward' },
@@ -538,6 +541,26 @@ describe('PropertyOpDialog — cleaning up a property’s values', () => {
     await user.click(screen.getByRole('button', { name: 'Apply to 2' }))
     expect(api.create.mock.calls[0][4]).toEqual({ edgeIds: ['e1', 'e2', 'r1'] })
     expect(usePropertyJobsStore.getState().jobs[0]).toMatchObject({ entityKind: 'edge', targetLabel: 'the 3 selected relationships' })
+  })
+
+  it('cleans up picked relationships’ values — previewed on the values read from them, counted on the draft', async () => {
+    const user = userEvent.setup()
+    api.values.mockResolvedValue({ read: 3, truncated: false, property: {
+      key: 'owner', count: 3, distinct: 2, distinctExact: true, byEntityType: { FLOWS_TO: 3 }, kinds: { String: 3 }, residual: 0,
+      values: [{ value: 'ana ', kind: 'String', count: 2 }, { value: 'bo', kind: 'String', count: 1 }] } })
+    api.preview.mockResolvedValue({ refusal: null, nameBudget: null, activeJobId: null,
+      counts: { matched: 3, haveKey: 3, haveTo: null, missing: 0, wouldChange: 2, derived: 0 } })
+    open({ kind: 'normalize', key: 'owner', target: { kind: 'relationships', ids: ['e1', 'e2', 'e3'] } })
+    expect(screen.getByRole('radio', { name: /Normalize/ })).toHaveAttribute('aria-checked', 'true')
+    const preview = within(await screen.findByRole('list', { name: 'Before and after' }))
+    expect(preview.getByText('“ana ”')).toBeInTheDocument()
+    expect(api.values).toHaveBeenCalledWith('ws', 'g1', 'd1', 'owner', { edgeIds: ['e1', 'e2', 'e3'] }, expect.any(AbortSignal))
+    expect(screen.getByText(/change — on/)).toHaveTextContent('1 value change — on 2 relationships it reaches.')
+    await user.click(next())
+    await user.click(next())
+    await user.click(await screen.findByRole('button', { name: 'Apply to 2' }))
+    expect(api.create.mock.calls[0].slice(3, 5)).toEqual([
+      { kind: 'normalize', key: 'owner', trim: true, collapseSpaces: false, case: null, dedupeList: false }, { edgeIds: ['e1', 'e2', 'e3'] }])
   })
 
   it('a Connections search\'s relationships are its predicate, in the view or the whole data source', async () => {

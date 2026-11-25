@@ -210,8 +210,6 @@ export function nameProblem(name: string, edges = false): string | null {
 export function opProblem(op: OpDraft, edges = false): string | null {
   const keyProblem = nameProblem(op.key, edges)
   if (keyProblem) return keyProblem
-  // A clean-up previews the values the catalog holds — entities' only.
-  if (edges && isCleanup(op.kind)) return 'Clean-ups are for entities — choose a change'
   if (needsTo(op.kind)) {
     const toProblem = nameProblem(op.to, edges)
     if (toProblem) return toProblem === 'Name the property' ? 'Name the new property' : toProblem

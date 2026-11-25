@@ -25,6 +25,10 @@ FalkorDB can answer is pinned here:
   not the graph's spelling of a type, not the empty fields the projector writes. Over HTTP, the
   route finds the graph through the projection's pin, clears the flag and queues the summaries'
   rebuild.
+* L8 — a graph another tool built keeps a relationship's properties on it: the enable copies
+  every one (an integer id too), the graph serves them, a property history removes is not served
+  though the relationship keeps its old copy, a delete reaches an integer-id relationship, and an
+  edit on a graph that isn't versioned removes what it removes from the relationship itself.
 * L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
   that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
   every publish after the enable lands on the graph's own labels and goes out fresh. A graph
@@ -43,7 +47,7 @@ import pytest
 from falkordb.asyncio import FalkorDB
 from redis.asyncio import ConnectionPool
 
-from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.app.providers.falkordb_provider import FalkorDBProvider, _edge_from_row
 from backend.app.services.versioning import bootstrap_worker as bw
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.bootstrap_worker import (
@@ -434,9 +438,10 @@ async def test_an_edge_whose_id_was_a_node_keeps_it_and_a_delete_reaches_it(grap
         assert res.get("verify_error") is None and await _fresh(gid), (message, res)
 
     rels = await _rows(client, "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' "
-                               "RETURN type(r), r.id, r.properties")
+                               "RETURN type(r), r.id, properties(r)")
     assert [r[:2] for r in rels] == [["FLOWS", "X"]], rels
-    assert json.loads(rels[0][2]) == {"w": 2}
+    # Read as the app reads it: its own properties, and the JSON field for any past the budget.
+    assert _edge_from_row("", "", rels[0][0], rels[0][2]).properties == {"w": 2}
     assert await _rows(client, "MATCH (n:Table) RETURN n.urn ORDER BY n.urn") == [
         ["X"], ["Y"], ["urn:a"], ["urn:b"]], "only the edge was deleted"
     # The id the graph uses names the edge, never the node that shares it.
@@ -457,6 +462,95 @@ async def test_an_anchor_an_earlier_graph_left_on_the_key_is_put_right(graph):
     assert out["status"] == "completed", out
     assert await _rows(client, "MATCH (n:Table) RETURN n.urn, n.entityId ORDER BY n.urn") == [
         ["urn:a", "urn:a"], ["urn:b", "urn:b"]]
+
+
+# ── L8: a relationship's own properties ─────────────────────────────────────
+
+#: What another tool's graph keeps ON a relationship: names with spaces, unicode and dots too.
+_NATIVE = {"my prop": "val1", "MyProp": "a", "MySpecialProp": "b", "MyLogicalProp": True,
+           "weight": 3, "score": 0.7, "naïve ü": "x", "dotted.key": "y", "tags list": ["a", "b"],
+           "since": "2024-01-01"}
+
+
+async def test_a_relationships_own_properties_are_copied_served_and_kept_as_history_says(graph):
+    """A graph another tool built keeps a relationship's properties on the relationship itself.
+    The enable copies every one — under an integer id too — and the graph serves them; once
+    history removes one, the projector removes it from the relationship (it was one history held);
+    and a delete in history reaches the relationship whose id is a number."""
+    from backend.common.models.graph import EdgeQuery
+    from backend.common.property_patch import PROP_DELETE
+    from backend.app.providers.falkordb_provider import _edge_from_row
+
+    name, client = graph
+    await client.query("CREATE (:Table {urn: 'urn:a'}), (:Table {urn: 'urn:b'}), "
+                       "(:Table {urn: 'urn:c'})")
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[r:FEEDS {id: 'r1'}]->(b) SET r += $p", {"p": _NATIVE})
+    await client.query("MATCH (b:Table {urn: 'urn:b'}), (c:Table {urn: 'urn:c'}) "
+                       "CREATE (b)-[:FEEDS {id: 42, weight: 1}]->(c)")
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    report = (await bootstrap_status(data_source_id=ds))["report"]
+    assert all(c["ok"] for c in report["checks"]), report["checks"]
+    assert report["edgeSampleChecked"] == 2
+
+    svc = GraphVersioningService()
+    async with db.graphver_session() as s:
+        main_id = (await s.execute(select(BranchORM.id).where(
+            BranchORM.graph_id == gid, BranchORM.kind == "main"))).scalars().one()
+    st = await svc.materialize_state(graph_id=gid, branch_id=main_id)
+    assert st["edges"]["r1"]["properties"] == _NATIVE, "history holds all ten"
+    assert st["edges"]["42"]["properties"] == {"weight": 1}
+
+    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
+                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=name)
+    try:
+        served = {e.id: e for e in await provider.get_edges(EdgeQuery(limit=100))}
+        assert served["r1"].properties == _NATIVE, "and the graph serves all ten"
+    finally:
+        await provider.close()
+
+    projector = FalkorProjector(lambda _n, _p=None: client)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="drop MyProp", ops=[
+        {"op": "update", "entity_kind": "edge", "entity_id": "r1",
+         "payload": {"properties": {"MyProp": PROP_DELETE}}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    (raw,) = [r[0] for r in await _rows(
+        client, "MATCH ()-[r:FEEDS]->() WHERE r.id = 'r1' RETURN properties(r)")]
+    assert "MyProp" not in raw, "history removed it, and it was history's: the projector removes it"
+    assert raw.get("my prop") == "val1", "the rest stay on the relationship, natively"
+    expected = {k: v for k, v in _NATIVE.items() if k != "MyProp"}
+    assert _edge_from_row("urn:a", "urn:b", "FEEDS", raw).properties == expected
+
+    await svc.apply_ops(graph_id=gid, actor="bob", message="drop 42", ops=[
+        {"op": "delete", "entity_kind": "edge", "entity_id": "42", "payload": None}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _rows(client, "MATCH ()-[r:FEEDS]->() RETURN r.id") == [["r1"]], \
+        "a delete in history reaches the relationship whose id is a number"
+
+
+async def test_an_edit_of_a_relationship_another_tool_wrote_removes_what_it_removes(falkor):
+    """On a graph that isn't versioned, an edge edit keeps the properties it doesn't name — the
+    relationship's own ones too — and a property it removes is removed from the relationship."""
+    from backend.common.property_patch import PROP_DELETE
+
+    client = falkor()
+    await client.query("CREATE (:Table {urn: 'urn:a'})-[:FEEDS {id: 'x1', `my prop`: 'v', "
+                       "old: 'x', weight: 1}]->(:Table {urn: 'urn:b'})")
+    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
+                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=client.name)
+    try:
+        edge = await provider.update_edge("x1", {"weight": 2, "old": PROP_DELETE})
+        assert edge.properties == {"my prop": "v", "weight": 2}
+    finally:
+        await provider.close()
+    (raw,) = [r[0] for r in await _rows(client, "MATCH ()-[r]->() RETURN properties(r)")]
+    assert "old" not in raw, "removed from the relationship itself"
+    assert _edge_from_row("urn:a", "urn:b", "FEEDS", raw).properties == {"my prop": "v", "weight": 2}
 
 
 # ── L7: something else keeps writing to the graph ────────────────────────────
@@ -837,9 +931,9 @@ async def test_a_graph_keeps_its_own_spelling_of_its_types(graph, monkeypatch):
     assert await _rows(client, "MATCH (n:table) RETURN n.urn, n.displayName ORDER BY n.urn") == [
         ["urn:t1", "t1 renamed"], ["urn:t2", "urn:t2"]]
     rels = await _rows(client, "MATCH (a)-[r:flows_to]->(b) "
-                               "RETURN a.urn, r.id, b.urn, r.properties ORDER BY r.id")
+                               "RETURN a.urn, r.id, b.urn, properties(r) ORDER BY r.id")
     assert [r[:3] for r in rels] == [["urn:t1", "f1", "urn:t2"], ["urn:t2", "f2", "urn:t1"]], rels
-    assert json.loads(rels[0][3]) == {"w": 2}
+    assert _edge_from_row(rels[0][0], rels[0][2], "flows_to", rels[0][3]).properties == {"w": 2}
     report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
         gid, deep=True)
     assert report.in_sync and not report.mismatched and not report.edge_mismatched, report

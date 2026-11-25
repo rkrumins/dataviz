@@ -465,6 +465,128 @@ async def bootstrap_decision_endpoint(
     return status
 
 
+@router.get("/bootstrap/review")
+async def bootstrap_review_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose enablement job to read."),
+    kind: str = Query("copies", description="copies (connections held more than once) or values"),
+    after: Optional[str] = Query(None, description="The previous page's `next`."),
+    limit: int = Query(50, ge=1, le=500),
+    q: Optional[str] = Query(None, description="Only what holds this text (any case)."),
+    fmt: Optional[str] = Query(None, alias="format",
+                               description="csv: the whole list, as a download"),
+    _user=Depends(requires("workspace:datasource:read", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What an enablement held for review, a page at a time: connections the source holds more
+    than once with different properties (``kind=copies`` — each version side by side, the
+    properties they disagree on, a person's choice) or values history can't store as they are
+    (``kind=values``), or with ``format=csv`` the whole list as a download. Kept after the job
+    ends, as the record of what was decided. 404 when nothing was held. Workspace read permission,
+    as the duplicate list takes."""
+    from backend.app.services.versioning.bootstrap_worker import review_csv, review_page
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        if fmt == "csv":
+            stream = await review_csv(data_source_id=dataSourceId, kind=kind, workspace_id=ws_id)
+            name = "connections-held-more-than-once" if kind == "copies" else "values-stored-as-text"
+            return StreamingResponse(stream, media_type="text/csv", headers={
+                "Content-Disposition": f'attachment; filename="{name}-{dataSourceId}.csv"'})
+        return await review_page(data_source_id=dataSourceId, kind=kind, after=after,
+                                 limit=limit, q=q, workspace_id=ws_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+class BootstrapReviewChoice(BaseModel):
+    entityId: str = Field(..., description="The connection held for review.")
+    choice: Optional[Dict[str, Any]] = Field(
+        None, description="{rule: keep_first|keep|merge, keep?, excludeCopies?, values?, "
+                          "excludeProperties?}; null clears it.")
+
+
+@router.put("/bootstrap/review/choice")
+async def bootstrap_review_choice_endpoint(
+    ws_id: str,
+    body: BootstrapReviewChoice,
+    dataSourceId: str = Query(...),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Save how one connection held for review is to be copied — a version kept, or its versions
+    merged with some versions or properties left out and a value picked where they disagree —
+    while the job waits on the review. 409 ``not_awaiting_decision`` once it doesn't; 404 for a
+    connection that wasn't held; 422 for a choice naming what it doesn't hold."""
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, save_review_choice)
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        return await save_review_choice(data_source_id=dataSourceId, entity_id=body.entityId,
+                                        choice=body.choice, workspace_id=ws_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+class BootstrapReviewDecision(BaseModel):
+    fingerprint: str = Field(..., description="The `review.fingerprint` that was shown.")
+    copies: Optional[Dict[str, Any]] = Field(
+        None, description="{rule: keep_first|merge, excludeProperties}: how to copy every "
+                          "connection held more than once that has no choice of its own.")
+    values: Optional[str] = Field(None, description="as_text: store the values as text.")
+
+
+@router.post("/bootstrap/review/decision", status_code=202)
+async def bootstrap_review_decision_endpoint(
+    ws_id: str,
+    response: Response,
+    body: BootstrapReviewDecision,
+    dataSourceId: str = Query(...),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Decide what a paused enablement held for review, and let the copy carry on: each
+    connection held more than once is copied as its own choice says, else as ``body.copies``
+    does; values history can't store are kept as text. ``body.fingerprint`` must be the list as
+    it was shown: 409 ``stale_decision`` if it has changed, 409 ``not_awaiting_decision`` if the
+    job is not waiting on a review; 422 when a kind held is left undecided. 202 with the job; 200
+    when this same decision was already recorded."""
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, bootstrap_status, decide_review)
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        res = await decide_review(data_source_id=dataSourceId, fingerprint=body.fingerprint,
+                                  actor=user.id if user else "system", copies=body.copies,
+                                  values=body.values, workspace_id=ws_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if res["already"]:
+        response.status_code = 200
+    status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
+    if not res["already"]:
+        # What a person decided about their data — kept, merged, stored as text: recorded once.
+        review = (status or {}).get("review") or {}
+        await _record_versioning(
+            session, "workspace.versioning.review_decided", dataSourceId,
+            {"jobId": res["jobId"], "connections": (review.get("copies") or {}).get("connections"),
+             "valuesAsText": (review.get("values") or {}).get("count"),
+             "copies": body.copies, "values": body.values},
+        )
+    return status
+
+
 @router.post("/bootstrap/retry", status_code=202)
 async def bootstrap_retry_endpoint(
     ws_id: str,
@@ -696,8 +818,11 @@ async def resync_versioned_graph_endpoint(
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
-    except BootstrapFailure as exc:                 # a server that cuts replies short
-        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",
+    except BootstrapFailure as exc:
+        if exc.code != "infrastructure":            # what the graph holds, said as such
+            raise HTTPException(status_code=422, detail={"type": "integrity",
+                                                         "message": exc.reason})
+        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",  # replies cut short
                                                      "message": str(exc)})
     except AmbiguousSpelling as exc:                # a type the graph spells two ways
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)

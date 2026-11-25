@@ -2626,16 +2626,22 @@ class TestEdgePredicateCompile:
         }))
         # Edge property keys are backtick-quoted by ``_safe_property_name``
         # exactly like node property keys — same safety story — and the
-        # comparison is the node property's, typed.
-        assert (c.hoisted_path["edge_where"], c.params) == _typed(
-            "rel.`confidence`", "eq", 0.5)
-        assert c.params == {"p0": 0.5}
+        # comparison is the node property's, typed; equality also reads the
+        # edge's JSON, where a relationship written before edges were stored
+        # natively keeps it.
+        typed, params = _typed("rel.`confidence`", "eq", 0.5)
+        raw, n = "coalesce(rel.properties, '')", len(params)
+        assert c.hoisted_path["edge_where"] == (
+            f"({typed} OR ({raw} CONTAINS $p{n} OR {raw} ENDS WITH $p{n + 1}))")
+        assert c.params == {**params, f"p{n}": '"confidence": 0.5,',
+                            f"p{n + 1}": '"confidence": 0.5}'}
 
-    def test_a_users_edge_property_is_read_from_the_edges_json(self):
-        """An edge keeps a user's properties as JSON text (ADR-026): equal
-        is ``"key": <value>`` followed by a comma or ending the object — a
-        key with spaces, like ``Edge Weight`` from a Looker export,
-        included."""
+    def test_a_users_edge_property_is_read_natively_and_from_the_edges_json(self):
+        """An edge keeps a user's properties natively within the graph's
+        name budget, and the rest (and every one, on a relationship written
+        before that) as JSON text: equal there is ``"key": <value>`` followed
+        by a comma or ending the object — a key with spaces, like ``Edge
+        Weight`` from a Looker export, included."""
         c = _degree_compiler()
         c.compile(PathPredicate.model_validate({
             "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
@@ -2643,10 +2649,12 @@ class TestEdgePredicateCompile:
                               "key": "Edge Weight", "op": "eq",
                               "value": 0.5},
         }))
-        raw = "coalesce(rel.properties, '')"
+        typed, params = _typed("rel.`Edge Weight`", "eq", 0.5)
+        raw, n = "coalesce(rel.properties, '')", len(params)
         assert c.hoisted_path["edge_where"] == (
-            f"({raw} CONTAINS $p0 OR {raw} ENDS WITH $p1)")
-        assert c.params == {"p0": '"Edge Weight": 0.5,', "p1": '"Edge Weight": 0.5}'}
+            f"({typed} OR ({raw} CONTAINS $p{n} OR {raw} ENDS WITH $p{n + 1}))")
+        assert c.params == {**params, f"p{n}": '"Edge Weight": 0.5,',
+                            f"p{n + 1}": '"Edge Weight": 0.5}'}
 
     def test_a_whole_number_and_ignoring_case(self):
         c = _degree_compiler()
@@ -2658,10 +2666,11 @@ class TestEdgePredicateCompile:
                 {"kind": "edgeProperty", "key": "mode", "op": "in",
                  "value": ["Stream", "batch"], "valueType": "string"}]},
         }))
-        rows, mode = c.hoisted_path["edge_where"][1:-1].split(" AND ")
-        assert rows.count("CONTAINS") == 2      # 5 and 5.0
-        assert mode.startswith("(toLower(coalesce(rel.properties, '')) CONTAINS $p")
-        assert {'"mode": "stream",', '"mode": "batch"}'} <= set(c.params.values())
+        where = c.hoisted_path["edge_where"]
+        assert where.count("coalesce(rel.properties, '') CONTAINS") == 2      # 5 and 5.0
+        assert "toLower(coalesce(rel.properties, '')) CONTAINS $p" in where
+        assert {'"rows": 5,', '"rows": 5.0,', '"mode": "stream",', '"mode": "batch"}'} <= {
+            v for v in c.params.values() if isinstance(v, str)}
 
     def test_is_not_passes_a_missing_key_only_when_asked(self):
         def where(include_missing):
@@ -2673,18 +2682,20 @@ class TestEdgePredicateCompile:
             }))
             return c.hoisted_path["edge_where"]
 
-        assert where(True).startswith("NOT (toLower(")
-        assert where(False).startswith(
-            "(coalesce(rel.properties, '') CONTAINS $p2 AND NOT (toLower(")
+        assert where(True).startswith("NOT ((")
+        held = "(rel.`mode` IS NOT NULL OR coalesce(rel.properties, '') CONTAINS $p"
+        assert where(False).startswith(f"({held}") and " AND NOT ((" in where(False)
 
-    def test_a_users_edge_property_takes_presence_and_equality_only(self):
+    def test_every_operator_reads_a_users_edge_property_natively(self):
+        """Ordering, text and range operators read the native value: a value an edge still keeps
+        in its JSON is reached by presence and equality (discovery's ``storedAs`` says which)."""
         c = _degree_compiler()
-        with pytest.raises(CompileError, match="kept in the edge's JSON.*'gt'"):
-            c.compile(PathPredicate.model_validate({
-                "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
-                "edgePredicate": {"kind": "edgeProperty", "key": "rows", "op": "gt",
-                                  "value": 5},
-            }))
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeProperty", "key": "rows", "op": "gt",
+                              "value": 5},
+        }))
+        assert (c.hoisted_path["edge_where"], c.params) == _typed("rel.`rows`", "gt", 5)
 
     def test_edge_property_between(self):
         c = _degree_compiler()
@@ -2715,16 +2726,17 @@ class TestEdgePredicateCompile:
             "edgePredicate": {"kind": "edgeHasProperty",
                               "key": "verified"},
         }))
-        assert c.hoisted_path["edge_where"] == "coalesce(rel.properties, '') CONTAINS $p0"
+        assert c.hoisted_path["edge_where"] == (
+            "(EXISTS(rel.`verified`) OR coalesce(rel.properties, '') CONTAINS $p0)")
         assert c.params == {"p0": '"verified": '}
 
-    def test_a_native_edge_field_is_tested_where_it_is_stored(self):
+    def test_an_edges_identity_is_tested_where_it_is_stored(self):
         c = _degree_compiler()
         c.compile(PathPredicate.model_validate({
             "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
-            "edgePredicate": {"kind": "edgeHasProperty", "key": "confidence"},
+            "edgePredicate": {"kind": "edgeHasProperty", "key": "id"},
         }))
-        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`confidence`)"
+        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`id`)"
 
     def test_edge_has_property_negate(self):
         c = _degree_compiler()
@@ -2734,7 +2746,7 @@ class TestEdgePredicateCompile:
                               "key": "verified", "negate": True},
         }))
         assert c.hoisted_path["edge_where"] == (
-            "NOT (coalesce(rel.properties, '') CONTAINS $p0)")
+            "NOT ((EXISTS(rel.`verified`) OR coalesce(rel.properties, '') CONTAINS $p0))")
 
     def test_edge_has_property_predicate_with_spaces(self):
         """Edge attributes like ``Last Verified`` (timestamp) — common in
@@ -2763,7 +2775,7 @@ class TestEdgePredicateCompile:
         }))
         typed, _ = _typed("rel.`confidence`", "gt", 0.9)
         assert c.hoisted_path["edge_where"] == (
-            f"({typed} AND coalesce(rel.properties, '') CONTAINS $p1)")
+            f"({typed} AND (EXISTS(rel.`producedBy`) OR coalesce(rel.properties, '') CONTAINS $p1))")
 
     def test_edge_group_or(self):
         c = _degree_compiler()
@@ -2789,7 +2801,7 @@ class TestEdgePredicateCompile:
             },
         }))
         assert c.hoisted_path["edge_where"] == (
-            "NOT (coalesce(rel.properties, '') CONTAINS $p0)")
+            "NOT ((EXISTS(rel.`stale`) OR coalesce(rel.properties, '') CONTAINS $p0))")
 
     def test_path_cypher_injects_edge_predicate(self):
         from backend.app.providers.falkordb_deep_search import _build_path_cypher

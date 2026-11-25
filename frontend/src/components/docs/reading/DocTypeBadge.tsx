@@ -75,6 +75,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-forks-and-residency': 'explanation',
   'versioning-identity': 'reference',
   'versioning-change-streams': 'explanation',
+  'versioning-parallel-relationships': 'explanation',
   'testing-and-ci': 'reference',
   configuration: 'reference',
   'sso-backchannel-contract': 'reference',

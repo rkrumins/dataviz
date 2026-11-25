@@ -162,14 +162,19 @@ An edge filter nests groups at most 3 deep and holds at most 16 conditions.
 **Where an edge keeps a property.** An edge keeps the platform's own fields
 natively — `id`, `confidence`, `gvHash`, and a rollup's `aggKey`, `weight`,
 `sourceEdgeTypes`, `sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`,
-`levelDigest`, `gvSeq`, `latestUpdate` — and every other property in one JSON
-text ([ADR-026](/docs/decisions#adr-026-property-storage-in-a-postgresql-side-index)).
-A native field takes every operator. A key kept in the JSON takes presence
-(`edgeHasProperty`, `isSet`, `isNotSet`) and equality (`eq`, `neq`, `in`,
-`notIn`), compared with the value as JSON writes it: `true` is not `1`, `5`
-equals `5.0`, and text ignores case unless `caseSensitive`. Any other operator
-on such a key is a `400`. `GET /search/discover` lists each edge type's keys and
-where each is kept (`edges[].storedAs`: `native` or `json`).
+`levelDigest`, `gvSeq`, `latestUpdate` — and a user's properties as an item's
+are: natively within the graph's property-name budget, which items and
+relationships share, and the rest in one JSON text
+([ADR-026](/docs/decisions#adr-026-property-storage-in-a-postgresql-side-index)).
+A relationship written before edges were stored natively keeps all of its
+properties in the JSON until it is written again. Every operator reads a native
+value. Presence (`edgeHasProperty`, `isSet`, `isNotSet`) and equality (`eq`,
+`neq`, `in`, `notIn`) read the JSON as well, comparing the value as JSON writes
+it: `true` is not `1`, `5` equals `5.0`, and text ignores case unless
+`caseSensitive`. Any other operator matches only a native value.
+`GET /search/discover` lists each edge type's keys and where each is kept
+(`edges[].storedAs`: `native` or `json`), and the search builder offers only
+presence and equality for a key kept in the JSON.
 
 ### Names instead of URNs
 

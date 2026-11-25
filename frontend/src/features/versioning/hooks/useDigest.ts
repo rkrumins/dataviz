@@ -49,13 +49,16 @@ export function useGraphWatch(wsId?: string, graphId?: string | null) {
   })
 }
 
-/** Watch or stop watching the graph (`urn` absent) or an entity in it. The answer is what you
- *  watch now, straight into the cache the header and the entity panel share. */
+/** Watch or stop watching the graph (neither `urn` nor `edgeId`), an entity in it, or a
+ *  relationship by its id. The answer is what you watch now, straight into the cache the header
+ *  and the panels share. */
 export function useSetWatch(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ on, urn }: { on: boolean; urn?: string }) =>
-      on ? api.watchGraph(wsId, graphId, urn) : api.unwatchGraph(wsId, graphId, urn),
+    mutationFn: ({ on, urn, edgeId }: { on: boolean; urn?: string; edgeId?: string }) =>
+      edgeId
+        ? (on ? api.watchEdge(wsId, graphId, edgeId) : api.unwatchEdge(wsId, graphId, edgeId))
+        : (on ? api.watchGraph(wsId, graphId, urn) : api.unwatchGraph(wsId, graphId, urn)),
     onSuccess: (watching: GraphWatching) => qc.setQueryData(DIGEST_KEYS.watch(wsId, graphId), watching),
   })
 }

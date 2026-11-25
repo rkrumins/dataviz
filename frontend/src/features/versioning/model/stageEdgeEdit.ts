@@ -5,7 +5,9 @@
  * A relationship has at most one staged edit (`edit_edge`). It keeps the properties as they were
  * FIRST read, with their token (`before` — the diff base the save sends a patch against, and its
  * concurrency check), and the latest (`after`). An edit that nets out to nothing — everything put
- * back — drops the staged change instead of saving a no-op.
+ * back — drops the staged change instead of saving a no-op. One not saved yet — drawn, or reversed
+ * — has nothing stored to patch: its properties ride on the change that makes it, and are sent
+ * with its create.
  *
  * A batch is one write to the staged changes and one Undo step (`replaceMany`), so a thousand
  * relationships stage as fast as one. Canvas lines carry no properties: nothing on the canvas moves.
@@ -38,10 +40,21 @@ const propsOf = (v: unknown): Props => ((v as { properties?: Props } | undefined
 export function stageEdgeEdits(edits: readonly EdgeEdit[]): string | undefined {
   const store = useStagedChangesStore.getState()
   const existingFor = new Map<string, StagedChange>()
-  for (const c of store.changes) if (c.type === 'edit_edge' && !existingFor.has(c.targetId)) existingFor.set(c.targetId, c)
+  const createdFor = new Map<string, StagedChange>()
+  for (const c of store.changes) {
+    if (c.type === 'edit_edge' && !existingFor.has(c.targetId)) existingFor.set(c.targetId, c)
+    else if ((c.type === 'create_edge' || c.type === 'reverse_edge') && !createdFor.has(c.targetId)) createdFor.set(c.targetId, c)
+  }
   const entries: { before: StagedChange | null; after: StagedChange | null }[] = []
 
   for (const { edgeId, current, after, summary } of new Map(edits.map((e) => [e.edgeId, e])).values()) {
+    const created = createdFor.get(edgeId)
+    if (created) {
+      const patch = propertiesPatch(propsOf(created.after), after)
+      if (Object.keys(patch.set).length === 0 && patch.unset.length === 0) continue
+      entries.push({ before: created, after: { ...created, after: { ...(created.after as Props), properties: after }, timestamp: Date.now() } })
+      continue
+    }
     const existing = existingFor.get(edgeId) ?? null
     const before = existing?.before
       ?? { properties: current.properties, ...(current.version ? { version: current.version } : {}) }

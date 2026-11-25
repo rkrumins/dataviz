@@ -11,6 +11,9 @@
  *                     full list to download, and (for a manager) collapse / re-check /
  *                     give up. Version history keeps one item per identifier, so someone
  *                     has to choose; we never collapse a customer's data on our own.
+ *                     Or, after the copy, what it couldn't keep exactly as the source has
+ *                     it — connections held more than once, values JSON can't hold — for a
+ *                     manager to review before anything goes live (BootstrapReviewSection).
  *  • completed      — the INTEGRITY REPORT: what was checked, and the plain statement that
  *                     nothing was lost. This is the whole point of the rewrite: enabling
  *                     version control used to be an act of faith.
@@ -36,6 +39,7 @@ import {
   BootstrapDecisionError, bootstrapDuplicatesCsvUrl, type BootstrapJob, type BootstrapPhase, type BootstrapReport,
 } from '@/services/versioningApiService'
 import { useAbandonBootstrap, useDecideBootstrapDuplicates, useRetryBootstrap } from '../hooks/useVersioning'
+import { BootstrapReviewSection } from './BootstrapReviewSection'
 import { ReasonField } from '@/components/activity/ReasonField'
 import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
@@ -45,8 +49,8 @@ type Step = { id: string; label: string; phases: JobPhase[] }
 
 /** The job's eight phases, told as the four things a person actually cares about. */
 const STEPS: Step[] = [
-  { id: 'read', label: 'Reading the graph', phases: ['counting', 'nodes', 'edges'] },
-  { id: 'check', label: 'Checking every item', phases: ['validate'] },
+  { id: 'read', label: 'Reading the graph', phases: ['counting', 'nodes', 'edges', 'connections'] },
+  { id: 'check', label: 'Checking every item', phases: ['resolve', 'validate'] },
   { id: 'write', label: 'Writing history', phases: ['heads', 'merkle'] },
   { id: 'finish', label: 'Finishing up', phases: ['finalize', 'backfill'] },
 ]
@@ -160,6 +164,8 @@ export function BootstrapProgress({
 
   const running = job.status === 'pending' || job.status === 'running'
   const needsDecision = job.status === 'needs_decision'
+  // What the pause waits on: the pre-flight's duplicate identifiers, or the copy's review.
+  const inReview = needsDecision && job.awaiting === 'review' && !!job.review
   const failed = job.status === 'failed'
   const done = job.status === 'completed'
   const eta = timeLeft(job)
@@ -361,7 +367,7 @@ export function BootstrapProgress({
       )}
 
       {/* ── needs decision: duplicate identifiers, found before anything was copied ── */}
-      {needsDecision && dup && (
+      {needsDecision && dup && !inReview && (
         <>
           <div className="flex items-start gap-2.5">
             <Copy className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
@@ -476,6 +482,14 @@ export function BootstrapProgress({
         </>
       )}
 
+      {/* ── needs decision: what the copy couldn't keep exactly as the source has it ── */}
+      {inReview && (
+        <BootstrapReviewSection
+          job={job} wsId={wsId} dataSourceId={dataSourceId} variant={variant} canManage={canManage}
+          confirmBox={confirmBox} confirming={!!confirming} onAsk={(what) => setConfirming(what)}
+        />
+      )}
+
       {/* ── completed: the integrity report ─────────────────────────────────── */}
       {done && job.report && (
         <>
@@ -522,8 +536,20 @@ export function BootstrapProgress({
           )}
           {job.report.mergedDuplicateConnections > 0 && (
             <p className="mt-1 text-[11px] text-ink-muted">
-              {num(job.report.mergedDuplicateConnections)} duplicate connection(s) were merged (same type
-              between the same two items — the graph reads identically).
+              {num(job.report.mergedDuplicateConnections)} copies of a connection said exactly what another
+              copy said (same type between the same two items), so one was kept — nothing was lost.
+            </p>
+          )}
+          {(job.report.resolvedConnections ?? 0) > 0 && (
+            <p className="mt-1 text-[11px] text-ink-muted">
+              {num(job.report.resolvedConnections)} connection(s) held more than once with different properties
+              were copied as decided in the review.
+            </p>
+          )}
+          {(job.report.valuesStoredAsText ?? 0) > 0 && (
+            <p className="mt-1 text-[11px] text-ink-muted">
+              {num(job.report.valuesStoredAsText)} value(s) history can’t hold as they were (NaN, infinite numbers,
+              NUL characters) were stored as text, as decided.
             </p>
           )}
           {/* A package's collapse is one of its warnings above, with the rule that decided it. */}
@@ -582,6 +608,17 @@ export function BootstrapProgress({
               <p className="text-[12px] text-ink-muted leading-snug">
                 {finalFailure ?? job.error ?? (fromPackage ? 'The copy did not match the package.' : 'The copy did not match the source graph.')}
               </p>
+              {/* What did not hold, said as the checks say it — not only under Technical details. */}
+              {(job.report?.checks ?? []).some((c) => !c.ok && c.blocking) && (
+                <ul className="mt-1.5 space-y-1" aria-label="Checks that failed">
+                  {job.report!.checks.filter((c) => !c.ok && c.blocking).map((c) => (
+                    <li key={c.key} className="flex items-start gap-1.5 text-[11px] text-ink-secondary">
+                      <AlertTriangle className="w-3 h-3 text-amber-500 mt-0.5 shrink-0" />
+                      <span className="min-w-0">{c.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <p className="text-[11px] text-ink-muted/80 mt-1">
                 {fromPackage
                   ? 'Nothing outside the new data source was touched.'

@@ -1,15 +1,16 @@
 """Where an edge keeps a property, and how a condition reads one it keeps
 in its JSON.
 
-An edge stores the platform's own fields natively (``EDGE_NATIVE_KEYS``)
-and every user property in one JSON text, ``r.properties`` (ADR-026),
-written by ``json.dumps`` with its default separators. Cypher can't parse
-that text, so a condition on a key kept there reads it as text: the key is
-present when ``"key": `` occurs in it, and equals a value when
-``"key": <the value's JSON>`` does, followed by ``,`` or ending the object.
-A nested object's key reads the same way — the one known false positive.
-Such a key takes presence and equality (``JSON_OPS``); a native field takes
-every operator.
+An edge stores the platform's own fields natively (``EDGE_NATIVE_KEYS``),
+and a user's properties as a node's are: natively within the graph's
+property-name budget, the rest in one JSON text, ``r.properties``, written
+by ``json.dumps`` with its default separators (relationships written before
+that keep them all there). Cypher can't parse that text, so a condition on
+a key kept there reads it as text: the key is present when ``"key": ``
+occurs in it, and equals a value when ``"key": <the value's JSON>`` does,
+followed by ``,`` or ending the object. A nested object's key reads the
+same way — the one known false positive. A key kept there takes presence
+and equality (``JSON_OPS``); a native one takes every operator.
 
 ``json_holds`` is that reading in Python: the reference semantics the stub
 evaluates, and the live tests hold the compiled Cypher to.
@@ -29,6 +30,9 @@ EDGE_NATIVE_KEYS = frozenset({
     "aggKey", "weight", "sourceEdgeTypes", "sourceLevel", "targetLevel",
     "sourceDepth", "targetDepth", "levelDigest", "gvSeq", "latestUpdate",
 })
+
+#: The relationship's identity and content hash: only ever native, never a user's property.
+EDGE_IDENTITY_KEYS = frozenset({"id", "gvHash"})
 
 #: What a condition may ask of a key kept in the JSON.
 JSON_OPS = frozenset({"eq", "neq", "in", "notIn", "isSet", "isNotSet"})

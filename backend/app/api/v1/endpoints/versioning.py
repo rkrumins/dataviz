@@ -4328,12 +4328,20 @@ def import_contract_of(resolved) -> Optional[dict]:
     edge_ends = {t: {"source": list(getattr(d, "source_types", None) or []),
                      "target": list(getattr(d, "target_types", None) or [])}
                  for t, d in rels.items()}
+    # Every field of each relationship type, typing its edge rows' properties as an entity type's
+    # type a node row's. Never a key or unique: an edge is found by its ends and its type, and no
+    # publish holds a relationship's value unique.
+    edge_fields = {t: [{"id": f.id, "name": getattr(f, "name", None) or f.id,
+                        "type": getattr(f, "type", None), "required": bool(getattr(f, "required", False))}
+                       for f in getattr(d, "fields", []) or []]
+                   for t, d in rels.items()}
     return {"node_types": node_types, "edge_types": edge_types,
             # What a row's _op=delete takes with it: the node's containment subtree.
             "containment": list(getattr(resolved, "containment_edge_types", []) or []),
             "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
             "unique": {t: fs for t, fs in flagged("unique").items() if fs},
-            "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
+            "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends,
+            "edge_fields": {t: fs for t, fs in edge_fields.items() if fs}}
 
 
 async def _resolve_node_identity_for_import(workspace_id, data_source_id):
@@ -7775,11 +7783,12 @@ async def _property_targets_from_job(job: dict):
 
 async def _property_draft_matches_from_job(job: dict) -> dict:
     """The entities a bulk property job's draft created or changed that its search target matches
-    there (``draft_search.draft_matches``) — judged as the search's rule membership on the draft,
-    the view held to the job's own and its scope resolved as the job's export resolves it."""
+    there (``draft_search.draft_matches``; for an edge job, the relationships a Connections search
+    matches, ``edge_draft_matches``) — judged as the search's rule membership on the draft, the
+    view held to the job's own and its scope resolved as the job's export resolves it."""
     from backend.app.api.v1.endpoints import graph as graph_ep
     from backend.app.db.engine import get_async_session
-    from backend.app.providers.draft_search import draft_matches
+    from backend.app.providers.draft_search import draft_matches, edge_draft_matches
     from backend.app.services.advanced_search_service import AdvancedSearchService
     from backend.app.services.deep_search import SearchRunContext
     from backend.app.services.view_transfer.sources import engine_for
@@ -7803,9 +7812,9 @@ async def _property_draft_matches_from_job(job: dict) -> dict:
             finally:
                 await session.commit()                  # no transaction held between requests
 
-        return await draft_matches(engine.provider,
-                                   {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
-                                   target["predicate"], judge)
+        matches = edge_draft_matches if job.get("entityKind") == "edge" else draft_matches
+        return await matches(engine.provider, {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
+                             target["predicate"], judge)
 
 
 async def _property_write_context(job: dict) -> dict:
@@ -7898,7 +7907,7 @@ def _check_property_job(op: PropertyJobOp, target: PropertyJobTarget, rules) -> 
     # A merge of two or more values into one on a unique field gives entities one value. (A normalize
     # or a replace may too — what it collapses is only known from the data, and publishing the
     # draft refuses the values that collide.)
-    if op.kind == "mapValues" and many and rules is not None and any(
+    if op.kind == "mapValues" and many and not edges and rules is not None and any(
             op.key in rule.unique_fields for rule in rules.entity_types.values()):
         into = [json.dumps([m["toKind"], m["to"]]) for m in (e.wire() for e in op.map or ())]
         if len(set(into)) < len(into):
@@ -7973,20 +7982,18 @@ async def _property_refusal(session: AsyncSession, ws_id: str, meta: dict, body:
     return refusal
 
 
-async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict, op: PropertyJobOp,
-                                edges: bool = False) -> dict:
+async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict,
+                                op: PropertyJobOp) -> dict:
     """Whether the key the op writes fits the graph's property names. FalkorDB numbers each name a
     graph ever held and never frees one: a new name past the native budget is stored raw (it
     works, searched more slowly), and within ``_PROPERTY_NAME_MARGIN`` of the ceiling it is refused
     — at the ceiling a graph takes no new name ever again. Unknown (``null``) on a store that won't
     say, which never refuses. A draft's names register when it is published: this protects that.
-    ``edges``: a relationship keeps its properties in one JSON text, so a key costs no name (ok)."""
+    Items and relationships draw on the one map, so a relationship key is judged as an item's is."""
     from backend.app.providers.falkordb_materialize import _ATTRIBUTE_NAME_LIMIT
     name = {"set": op.key, "fillEmpty": op.key, "rename": op.to, "copy": op.to}.get(op.kind)
     out = {"registered": None, "nativeBudget": None, "ceiling": _ATTRIBUTE_NAME_LIMIT,
-           "isNew": None if name and not edges else False, "verdict": "ok"}
-    if edges:
-        return out
+           "isNew": None if name else False, "verdict": "ok"}
     try:
         from backend.app.providers.falkordb_provider import _native_property_budget
         from backend.app.services.view_transfer.sources import engine_for
@@ -8073,7 +8080,7 @@ async def preview_property_job(
     refusal = ((409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")
                if main else await _property_refusal(session, ws_id, meta, body, user, claims))
     edges = body.target.entity_kind == "edge"
-    budget = await _property_name_budget(session, ws_id, meta, body.op, edges=edges)
+    budget = await _property_name_budget(session, ws_id, meta, body.op)
     if refusal is None and budget["verdict"] == "refused":
         refusal = _property_ceiling(budget)
     counts = None
@@ -8173,11 +8180,63 @@ async def preview_property_job_sample(
                 (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
         keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
                                               target, pj.SAMPLE_ROWS + 1)
-        if target.entity_kind == "node":
-            recheck = pj.predicate_recheck(target.predicate.model_dump(mode="json", by_alias=True))
+        recheck = (pj.edge_recheck if target.entity_kind == "edge" else pj.predicate_recheck)(
+            target.predicate.model_dump(mode="json", by_alias=True))
     rows = await pj.read_sample(graph_id, branch_id, body.op.wire(), keys[:pj.SAMPLE_ROWS],
                                 entity_kind=target.entity_kind, recheck=recheck)
     return {"rows": rows, "truncated": len(keys) > pj.SAMPLE_ROWS}
+
+
+class PropertyValuesRequest(_ApiModel):
+    key: str = Field(min_length=1, max_length=128)
+    target: PropertyJobTarget
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs/preview/values")
+async def preview_property_job_values(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyValuesRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """The values ``key`` holds on the relationships a bulk job's target reaches, nothing written —
+    what a clean-up previews for relationships, as a view's catalog lists an entity's values (no
+    catalog counts a relationship's): its first ``VALUES_READ`` (400) named relationships, or a
+    Connections search's first page of them, read on the draft as a window reads them. ``property``:
+    as a catalog lists one (``key``, ``count``, ``kinds``, ``byEntityType`` — by relationship type —
+    and every value with how many hold it, ``values``), or null when none holds it; ``read``: how
+    many relationships were read (never a roll-up); ``truncated``: it reaches more. 422
+    ``entity_target`` for entities, whose values the view's catalog lists; otherwise refused as
+    ``…/preview/sample`` is."""
+    from backend.app.services.versioning.import_export import property_job as pj
+
+    target = body.target
+    if target.entity_kind != "edge":
+        raise HTTPException(status_code=422, detail=_refusal_detail(
+            (422, "entity_target", "An entity's values are the view's property catalog's.")))
+    main = branch_id == "main"
+    if not main:
+        with _property_job_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            main = branch_id == await svc.main_branch_id(graph_id)
+    if main:
+        raise HTTPException(status_code=409, detail=_refusal_detail(
+            (409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")))
+    if target.named is not None:
+        keys = list(dict.fromkeys(target.named))
+    else:
+        if not await _property_job_view_readable(session, ws_id, meta, target.view_id, user, claims):
+            raise HTTPException(status_code=404, detail=_refusal_detail(
+                (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
+        keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
+                                              target, pj.VALUES_READ + 1)
+    truncated = len(keys) > pj.VALUES_READ
+    values = await pj.read_edge_values(graph_id, branch_id, body.key, keys[:pj.VALUES_READ],
+                                       complete=not truncated)
+    return {**values, "truncated": truncated}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/property-jobs", status_code=202,
@@ -8209,8 +8268,7 @@ async def create_property_job(
     if existing is None:
         refusal = await _property_refusal(session, ws_id, meta, body, user, claims)
         if refusal is None:
-            budget = await _property_name_budget(session, ws_id, meta, body.op,
-                                                 edges=body.target.entity_kind == "edge")
+            budget = await _property_name_budget(session, ws_id, meta, body.op)
             refusal = _property_ceiling(budget) if budget["verdict"] == "refused" else None
         if refusal is not None:
             raise HTTPException(status_code=refusal[0], detail=_refusal_detail(refusal))

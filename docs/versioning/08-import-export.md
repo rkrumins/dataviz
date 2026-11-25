@@ -993,7 +993,12 @@ them into an `options` dict stored in `field_scope` (`service.py:208-221`) → `
 (`rowmodel.py:132-168`) spill scalar props to `prop.*` and nested to `properties_json`, mirroring the
 projector's native-vs-`propertiesRaw` split, so an unchanged export re-imports to a zero diff. A
 whole-data-source export is therefore a faithful **backup**; the identity columns let a re-import
-restore or clone the graph.
+restore or clone the graph. A value has its own `prop.<name>` column only when a flat cell gives it
+back exactly (`rowmodel._cell_gives_back`): a blank, a padded string, a `\N`/`\NULL` token, text that
+reads as a JSON list, a control character, or a padded name travel in `properties_json` instead, so
+they re-import as they were into a new graph too. CSV/TSV carry numbers and booleans as text (an
+import into the same graph compares them type-tolerantly; NDJSON, JSON and Excel keep the type), and
+no flat file carries a null-valued property (blank means unchanged, null means remove).
 
 ---
 
