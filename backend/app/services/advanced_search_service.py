@@ -1214,17 +1214,20 @@ class AdvancedSearchService:
         *,
         run_context: Optional[SearchRunContext] = None,
     ) -> SearchCatalogResult:
-        """Every property the view's entities carry, exactly — in the view's
-        scope, resolved here as a search's is."""
+        """Every property the view's entities carry, exactly — or, ``subject``
+        ``relationships``, the relationships between them — in the view's
+        scope, resolved here as a search's (or a Connections search's) is."""
+        relationships = request.subject == "relationships"
         scope, eff = await self._rule_scope(request.scope)
         self._refuse_outside_subset(eff, "list the properties of what this view searches in")
         if scope is None:
-            return SearchCatalogResult(session_id="", status="complete")
+            return SearchCatalogResult(session_id="", subject=request.subject, status="complete")
         op = self._provider_op("deep_search_catalog")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
         out = await op(scope, context=context, wait_ms=request.wait_ms,
                        session_id=request.session_id, refresh=request.refresh,
-                       **({"values_for": request.values_for} if request.values_for else {}))
+                       **({"values_for": request.values_for} if request.values_for else {}),
+                       **({"subject": request.subject} if relationships else {}))
         return SearchCatalogResult.model_validate(out)
 
     async def export(

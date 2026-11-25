@@ -2857,7 +2857,7 @@
       "type": "object"
     },
     "SearchCatalogRequest": {
-      "description": "``POST /search/catalog``: every property the view's entities carry \u2014\non how many, stored as which kinds, with which values \u2014 read from every\nentity in its scope, not a sample. A large view takes more than one\nrequest: send it again with the returned ``sessionId`` until ``status``\nis ``complete``.",
+      "description": "``POST /search/catalog``: every property the view's entities carry \u2014\non how many, stored as which kinds, with which values \u2014 read from every\nentity in its scope, not a sample. A large view takes more than one\nrequest: send it again with the returned ``sessionId`` until ``status``\nis ``complete``.\n\n``subject`` ``relationships`` lists the properties of the relationships\nbetween the entities in its scope instead (never a rollup): the answer\nhas the same shape \u2014 ``entities`` counts relationships, ``entityTypes``\nand ``byEntityType`` are relationship types, ``residual`` counts those\nheld in a relationship's JSON \u2014 and no tags.",
       "properties": {
         "refresh": {
           "default": false,
@@ -2880,6 +2880,16 @@
           ],
           "default": null,
           "title": "Sessionid"
+        },
+        "subject": {
+          "default": "entities",
+          "description": "``entities`` (the default) or ``relationships``.",
+          "enum": [
+            "entities",
+            "relationships"
+          ],
+          "title": "Subject",
+          "type": "string"
         },
         "valuesFor": {
           "anyOf": [
@@ -2991,6 +3001,15 @@
             "complete"
           ],
           "title": "Status",
+          "type": "string"
+        },
+        "subject": {
+          "default": "entities",
+          "enum": [
+            "entities",
+            "relationships"
+          ],
+          "title": "Subject",
           "type": "string"
         },
         "tagged": {

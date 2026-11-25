@@ -114,6 +114,9 @@ class _OverlayDelta:
         # walks the edges it asks about, never every edge a 100k-edge import added.
         self.edges_at: Dict[str, List[GraphEdge]] = {}
         self.edge_lazy: set = set()                         # ids of the skeletons among edge_upsert
+        # Each of edge_upsert the base holds too, as the base holds it (its ends and type): what
+        # a correction of main's statistics takes out before it counts the draft's value.
+        self.edge_was: Dict[str, GraphEdge] = {}
         self.edge_remove: Dict[str, GraphEdge] = {}
         self.lineage_added: List[GraphEdge] = []
         self.lineage_removed: List[GraphEdge] = []
@@ -163,6 +166,7 @@ class _OverlayDelta:
                 held = GraphEdge.model_construct(id=e.id, sourceUrn=was["sourceUrn"],
                                                  targetUrn=was["targetUrn"],
                                                  edgeType=was["edgeType"], properties={})
+                self.edge_was[e.id] = held
                 if (held.source_urn, held.target_urn, (held.edge_type or "").upper()) == (
                         e.source_urn, e.target_urn, (e.edge_type or "").upper()):
                     continue
@@ -1345,11 +1349,14 @@ class DraftOverlayProvider:
         return await search.membership(scope, items, urns, context.named or {})
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False, values_for=None):
-        """The property catalog: main's — its own session, read once per version of main — with
-        what the draft changed folded in (``draft_search``)."""
+                                  refresh=False, values_for=None, subject="entities"):
+        """The property catalog — of the entities, or ``subject`` ``relationships`` of the
+        relationships: main's — its own session, read once per version of main — with what the
+        draft changed folded in (``draft_search``)."""
         self._now_only("Search")
         extra = {"values_for": values_for} if values_for else {}
+        if subject != "entities":
+            extra["subject"] = subject
         if not self._searches_draft():
             return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
                                                         session_id=session_id, refresh=refresh, **extra)
@@ -1370,7 +1377,8 @@ class DraftOverlayProvider:
         if search is not None:
             try:
                 left = max(0, wait_ms - int((time.monotonic() - started) * 1000))
-                return await search.catalog(scope, answer, left, values_for=values_for)
+                return await search.catalog(scope, answer, left, values_for=values_for,
+                                            subject=subject)
             except Exception:
                 logger.warning("draft catalog: read as main", exc_info=True)
                 failed = True

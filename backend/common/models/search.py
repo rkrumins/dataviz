@@ -1813,13 +1813,25 @@ class SearchAncestorCountsResult(_Base):
 # The view's properties, exactly
 # ---------------------------------------------------------------------------
 
+#: Whose properties a catalog lists.
+CatalogSubject = Literal["entities", "relationships"]
+
+
 class SearchCatalogRequest(_Base):
     """``POST /search/catalog``: every property the view's entities carry —
     on how many, stored as which kinds, with which values — read from every
     entity in its scope, not a sample. A large view takes more than one
     request: send it again with the returned ``sessionId`` until ``status``
-    is ``complete``."""
+    is ``complete``.
+
+    ``subject`` ``relationships`` lists the properties of the relationships
+    between the entities in its scope instead (never a rollup): the answer
+    has the same shape — ``entities`` counts relationships, ``entityTypes``
+    and ``byEntityType`` are relationship types, ``residual`` counts those
+    held in a relationship's JSON — and no tags."""
     scope: SearchScope
+    subject: CatalogSubject = Field(
+        "entities", description="``entities`` (the default) or ``relationships``.")
     wait_ms: int = Field(800, alias="waitMs", ge=0, le=60000)
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
     refresh: bool = Field(
@@ -1872,6 +1884,7 @@ class SearchCatalogTag(_Base):
 
 class SearchCatalogResult(_Base):
     session_id: str = Field(alias="sessionId")
+    subject: CatalogSubject = "entities"
     status: Literal["running", "complete"]
     progress: Optional[SearchProgress] = None
     data_version: Optional[str] = Field(None, alias="dataVersion")

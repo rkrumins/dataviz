@@ -911,3 +911,148 @@ def test_what_cant_be_answered_on_the_drafts_values_is_said():
                                 set()) == draft_search.PLATFORM_FIELD
     assert draft_search.inexact(RULES["gold"], {"x"}, frozenset({"x"})) == \
         draft_search.NAMES_CHANGED
+
+
+# ---------------------------------------------------------------------------
+# The relationship catalog
+# ---------------------------------------------------------------------------
+
+#: Main's relationships with properties — one to an entity outside the view (x1, under no root).
+REL_NODES = MAIN + [{"urn": "x1", "entityType": "Table", "displayName": "outside"}]
+REL_EDGES = MAIN_EDGES[:-1] + [
+    {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 5}},
+    {**_edge("c2", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "owner": "kim"}},
+    {**_edge("c1", "x1", "FLOWS_TO"), "properties": {"mode": "zzz"}},
+]
+
+
+def _rel_stats(nodes, edges, scope) -> CatalogStats:
+    """The relationship catalog of a graph, read whole: every relationship with both ends in
+    the scope, by type, its properties as stored."""
+    truth = StubDeepSearchProvider(nodes=nodes, edges=edges, lineage_edge_types=["FLOWS_TO"])
+    inside = {n["urn"] for n in truth._in_scope(scope)}
+    stats = CatalogStats()
+    for e in edges:
+        if e["source"] in inside and e["target"] in inside:
+            stats.add_entities(e["type"], 1)
+            stats.add_properties(e["type"], e.get("properties") or {}, frozenset())
+    return stats
+
+
+class RelMain(Main):
+    """Main holding ``REL_EDGES``: its relationship catalog, and its relationships read between
+    their ends as FalkorDB stores them — each user property in the JSON bag."""
+
+    def __init__(self):
+        super().__init__(nodes=REL_NODES, edges=REL_EDGES)
+        self.between: List[Any] = []
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False, subject="entities"):
+        assert subject == "relationships"
+        from backend.app.providers.falkordb_search.session import store_for
+        stats = _rel_stats(REL_NODES, REL_EDGES, scope)
+        session = Session(f"rcat-{uuid.uuid4().hex[:8]}", "catalog:relationships",
+                          context.data_version, None, 0, [], [], 1, scanned=1,
+                          count=sum(stats.entities.values()), status=COMPLETE)
+        await store_for(self).save(session, None, 600, accumulator=stats.to_json())
+        return answer_of(stats, session, context, subject="relationships")
+
+    async def relationships_between(self, pairs):
+        import json as _json
+        self.between.append(list(pairs))
+        out: Dict[Any, List[Any]] = {}
+        for e in REL_EDGES:
+            if (e["source"], e["target"]) in set(pairs):
+                out.setdefault((e["source"], e["target"]), []).append(
+                    (e["type"], {"id": e["id"], "gvHash": "h",
+                                 "properties": _json.dumps(e.get("properties") or {})}))
+        return out
+
+
+class RelDraft(Draft):
+    """A draft over ``REL_EDGES``: its patch set names each relationship it added, changed (with
+    where main holds it) or removed, and serves each one's value."""
+
+    def __init__(self):
+        super().__init__()
+        self.main = {n["urn"]: dict(n) for n in REL_NODES}
+        self.nodes = {u: dict(n) for u, n in self.main.items()}
+        self.edges = {e["id"]: dict(e) for e in REL_EDGES}
+
+    def truth(self) -> StubDeepSearchProvider:
+        return StubDeepSearchProvider(nodes=list(self.nodes.values()),
+                                      edges=list(self.edges.values()),
+                                      lineage_edge_types=["FLOWS_TO"])
+
+    async def branch_overlay_delta(self, *, graph_id, branch_id):
+        delta = await super().branch_overlay_delta(graph_id=graph_id, branch_id=branch_id)
+        main_edges = {e["id"]: e for e in REL_EDGES}
+        delta["edgesUpsert"], delta["edgesRemove"] = [], []
+        for eid, e in self.edges.items():
+            held = main_edges.get(eid)
+            if held == e:
+                continue
+            row = {"id": eid, "sourceUrn": e["source"], "targetUrn": e["target"],
+                   "edgeType": e["type"], "lazy": True}
+            if held is not None:
+                row["was"] = {"sourceUrn": held["source"], "targetUrn": held["target"],
+                              "edgeType": held["type"]}
+            delta["edgesUpsert"].append(row)
+        for eid, e in main_edges.items():
+            if eid not in self.edges:
+                delta["edgesRemove"].append({"id": eid, "sourceUrn": e["source"],
+                                             "targetUrn": e["target"], "edgeType": e["type"]})
+        return delta
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node",
+                               as_of_seq=None):
+        if kind != "edge":
+            return await super().overlay_payloads(graph_id=graph_id, branch_id=branch_id,
+                                                  entity_ids=entity_ids, kind=kind)
+        return [{"id": eid, "sourceUrn": self.edges[eid]["source"],
+                 "targetUrn": self.edges[eid]["target"], "edgeType": self.edges[eid]["type"],
+                 "properties": self.edges[eid].get("properties") or {}}
+                for eid in entity_ids if eid in self.edges]
+
+
+def _rel_draft() -> RelDraft:
+    """A draft that changes one relationship, removes one, adds one — and changes the one to
+    the entity outside the view, which stays out."""
+    draft = RelDraft()
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "stream", "lag": 9}},
+        {**_edge("c3", "c1", "FLOWS_TO"), "properties": {"mode": "batch", "since": 2024}},
+        {**_edge("c1", "x1", "FLOWS_TO"), "properties": {"mode": "yyy"}},
+    ], drop_edges=[_edge("c2", "c3", "FLOWS_TO")])
+    return draft
+
+
+async def test_the_relationship_catalog_is_the_drafts():
+    draft, main = _rel_draft(), RelMain()
+    out = await _overlay(draft, main).deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=2000,
+                                                         subject="relationships")
+    truth = _rel_stats(list(draft.nodes.values()), list(draft.edges.values()), SCOPE)
+    want = answer_of(truth, Session("t", "t", "1", None, 0, [], [], 1, status=COMPLETE,
+                                    count=sum(truth.entities.values())),
+                     CONTEXT, subject="relationships")
+    assert out["status"] == "complete" and out["subject"] == "relationships"
+    assert out["entities"] == want["entities"]
+    assert out["entityTypes"] == want["entityTypes"]
+    got = {p["key"]: p for p in out["properties"]}
+    assert set(got) == {p["key"] for p in want["properties"]} == {"mode", "lag", "since"}
+    for p in want["properties"]:
+        for field in ("count", "byEntityType", "kinds", "distinct", "values"):
+            assert got[p["key"]][field] == p[field], (p["key"], field)
+    # "owner" went with the removed relationship; "zzz" and "yyy" are outside the view.
+    assert {v["value"] for v in got["mode"]["values"]} == {"stream", "batch"}
+    # Main's side was read between each relationship's ends, never by its id.
+    assert main.between and all(isinstance(p, tuple) for part in main.between for p in part)
+
+
+async def test_a_relationship_catalog_of_a_draft_too_large_is_mains_said_so(monkeypatch):
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 1)
+    out = await _overlay(_rel_draft(), RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    assert draft_search.TOO_LARGE_RELATIONSHIP_CATALOG.format(n=1) in out["notes"]
+    assert {p["key"] for p in out["properties"]} == {"mode", "lag", "owner"}

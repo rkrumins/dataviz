@@ -284,6 +284,7 @@ tests/test_reconcile_detectors.py
 tests/test_reconcile_edge_check.py
 tests/test_reconcile_sweeper.py
 tests/test_refresh_wait_deadline.py
+tests/test_relationship_catalog.py
 tests/test_reply_capped_parser.py
 tests/test_request_body_limit.py
 tests/test_request_reminders.py

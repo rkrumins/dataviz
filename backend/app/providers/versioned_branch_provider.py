@@ -585,7 +585,7 @@ class VersionedBranchProvider:
         raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False):
+                                  refresh=False, values_for=None, subject="entities"):
         raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
