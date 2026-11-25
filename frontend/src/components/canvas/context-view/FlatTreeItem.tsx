@@ -46,6 +46,9 @@ import type { LineEnd } from './lineEnd'
  *  matching it, inherited from another parent, or caught by the view's fallback layer. */
 export type PlacedReason = 'hand' | 'rule' | 'stamp' | 'inherited' | 'fallback'
 
+/** Where a drop hint's label sits on screen: a row's top edge, at its right end. */
+interface ChipAt { top: number; left: number; width: number }
+
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
   /** Cmd/Ctrl — add or remove this row without disturbing the rest. */
@@ -468,7 +471,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const { reparent, verdict } = useReparentNode()
   // What a drop on the row's middle would do, said while the drag hovers: move the dragged entity
   // inside this one (data), put it back under it or into this group (view), or why it can't.
-  const [dropHint, setDropHint] = useState<DropHintSpec | null>(null)
+  const [dropHint, setDropHint] = useState<(DropHintSpec & { at: ChipAt }) | null>(null)
   // Custom-order drop bands: 'before'/'after' when a drag hovers the row's
   // top/bottom 30% (root rows in a custom-sorted draft layer only). The middle
   // band keeps the reparent drop, so one gesture serves both without a mode.
@@ -477,15 +480,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // over this row's own name. Drawn above the canvas (the next row would paint over a label inside
   // this one), and kept on the row as the column scrolls under a held drag.
   const hintChipRef = useRef<HTMLDivElement>(null)
-  const hintAt = useRef({ top: 0, left: 0, width: 0 })
-  const placeHintChip = (row: DOMRect) => {
-    hintAt.current = { top: row.top - 11, left: row.right - 10, width: row.width - 20 }
-    const chip = hintChipRef.current
-    if (chip) {
-      chip.style.top = `${hintAt.current.top}px`
-      chip.style.left = `${hintAt.current.left}px`
-    }
-  }
+  const chipAt = (row: DOMRect): ChipAt => ({ top: row.top - 11, left: row.right - 10, width: row.width - 20 })
   const hintFor = (): DropHintSpec | null => {
     if (isLogical && groupActions) return { kind: 'view', title: `Into ${node.name}`, detail: 'only this view' }
     const dragged = draggedEntity()
@@ -539,8 +534,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           }
         }
         const hint = hintFor()
-        if (hint) placeHintChip(e.currentTarget.getBoundingClientRect())
-        if (!sameHint(hint, dropHint)) setDropHint(hint)
+        const at = hint ? chipAt(e.currentTarget.getBoundingClientRect()) : null
+        if (!sameHint(hint, dropHint)) setDropHint(hint && at ? { ...hint, at } : null)
+        else if (at && hintChipRef.current) {
+          // Same hint: follow the row in place (a held drag scrolls the column) — no re-render.
+          hintChipRef.current.style.top = `${at.top}px`
+          hintChipRef.current.style.left = `${at.left}px`
+        }
       }}
       onDragLeave={() => {
         if (dropHint) setDropHint(null)
@@ -738,7 +738,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         <div
           ref={hintChipRef}
           className="pointer-events-none fixed z-[60] flex justify-end -translate-x-full"
-          style={{ top: hintAt.current.top, left: hintAt.current.left, maxWidth: hintAt.current.width }}
+          style={{ top: dropHint.at.top, left: dropHint.at.left, maxWidth: dropHint.at.width }}
         >
           <DropHint kind={dropHint.kind} title={dropHint.title} detail={dropHint.detail} />
         </div>,
