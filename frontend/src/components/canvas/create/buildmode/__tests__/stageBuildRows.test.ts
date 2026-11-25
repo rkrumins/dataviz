@@ -17,10 +17,12 @@ import { useCanvasStore } from '@/store/canvas'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { makeRow, type BuildRow } from '../buildRow'
 
+const ontology = vi.hoisted(() => ({
+  relationshipTypes: [] as Array<{ id: string; name: string; sourceTypes: string[]; targetTypes: string[]; isContainment: boolean }>,
+}))
+const containsOnly = [{ id: 'CONTAINS', name: 'CONTAINS', sourceTypes: [], targetTypes: [], isContainment: true }]
 vi.mock('@/hooks/useViewSchema', () => ({
-  useViewRelationshipTypes: () => [
-    { id: 'CONTAINS', name: 'CONTAINS', sourceTypes: [], targetTypes: [], isContainment: true },
-  ],
+  useViewRelationshipTypes: () => ontology.relationshipTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
 vi.mock('@/features/versioning/model/ensureDraftOpen', () => ({
@@ -33,6 +35,7 @@ import { planBuildStaging, useStageBuildRows } from '../stageBuildRows'
 const resetStores = () => {
   useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set() } as never)
   useStagedChangesStore.setState({ changes: [] } as never)
+  ontology.relationshipTypes = containsOnly
 }
 
 // domain(d1, root) -> platform(p1) -> dataset(ds1)
@@ -246,5 +249,28 @@ describe('useStageBuildRows', () => {
     expect(useCanvasStore.getState().nodes).toHaveLength(0)
     expect(useStagedChangesStore.getState().changes).toHaveLength(0)
     expect(onRowStaged).not.toHaveBeenCalled()
+  })
+})
+
+describe('useStageBuildRows — the containment it links with', () => {
+  beforeEach(resetStores)
+
+  it('prefers CONTAINS among the allowed ones, as the rail does, whatever the ontology lists first', async () => {
+    ontology.relationshipTypes = [
+      { id: 'BELONGS_TO', name: 'Belongs to', sourceTypes: [], targetTypes: [], isContainment: true },
+      ...containsOnly,
+    ]
+    useCanvasStore.getState().addNodes([
+      { id: 'urn:finance', type: 'generic', position: { x: 0, y: 0 }, data: { label: 'Finance', type: 'domain', urn: 'urn:finance' } },
+    ])
+    const { result } = renderHook(() => useStageBuildRows())
+    let rowUrn = new Map<string, string>()
+    await act(async () => {
+      rowUrn = await result.current.stageBuildRows(threeLevelRows(), { rootParentUrn: 'urn:finance' })
+    })
+    const after = (id: string) => useStagedChangesStore.getState().changes
+      .find((c) => c.targetUrn === rowUrn.get(id))?.after as { containmentEdgeType?: string } | undefined
+    expect(after('d1')?.containmentEdgeType).toBe('CONTAINS')
+    expect(after('p1')?.containmentEdgeType).toBe('CONTAINS')
   })
 })

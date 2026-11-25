@@ -129,6 +129,25 @@ describe('CanvasContextMenu — layer target', () => {
     expect(m.onBuild).toHaveBeenCalled()
   })
 
+  it('in a column mapped to an entity, says Add entity adds inside it', () => {
+    const m = model({ onAddEntity: vi.fn(), addInside: 'Finance' })
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /Add inside Finance/ }))
+    expect(m.onAddEntity).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /^Add entity/ })).toBeNull()
+  })
+
+  it('right-clicked in such a column\'s empty space, Create Entity Here says where it adds', () => {
+    const onCreateNode = vi.fn()
+    const props = { position: { x: 10, y: 10 }, target: { type: 'canvas', position: { x: 4, y: 5 }, layerId: 'fin' } as const, onClose: vi.fn(), onCreateNode }
+    render(<CanvasContextMenu isOpen {...props} createNodeInside="Finance" />)
+    fireEvent.click(screen.getByRole('button', { name: /Add inside Finance/ }))
+    expect(onCreateNode).toHaveBeenCalledWith({ x: 4, y: 5 }, 'fin')
+    cleanup()
+    render(<CanvasContextMenu isOpen {...props} />)
+    expect(screen.getByRole('button', { name: /Create Entity Here/ })).toBeInTheDocument()
+  })
+
   it('opened from the header\'s ⋯ button, takes the keyboard in, and gives it back', () => {
     const trigger = document.createElement('button')
     trigger.setAttribute('data-canvas-menu-trigger', '')
