@@ -82,6 +82,33 @@ Every new capability ships behind its own switch, off by default.
   and system layers stay hidden.
 - The Explorer keeps a selection to its list; the Review Center reads one workspace or all.
 
+### Fixed
+
+- **Enabling version control keeps every property of a graph another tool built.** A
+  relationship's own properties (`r.weight`, `r.\`my prop\``) were not copied into history — only
+  the platform's `r.properties` bag was — so they disappeared the first time the graph was rebuilt
+  from history, and the canvas never showed them. They are now read, copied, checked and served:
+  - the enable re-reads a sample of connections from the source, every property, and counts every
+    property of every item and connection it copied (`edge_sample_matches`, `properties_kept`);
+  - an item's own property under a name the platform keeps for itself (`entityId`, `properties`,
+    an `entityType` its label doesn't say) is kept as `__src.<name>`, and an item whose name or
+    description is a number is copied instead of left out;
+  - an integer relationship id, a text `confidence` and a `properties` that isn't JSON no longer
+    fail the enable; date and time values are stored the one way dates are.
+- **Nothing the source holds is dropped without a person deciding.** A connection held more than
+  once — the same source, type and target, under one id or several — loses nothing when its copies
+  agree (read twice under one id they fold; under ids of their own they stay, as before); when
+  they differ, the enable pauses before anything goes live and lists them, with
+  their versions side by side: keep the first, merge them (every property, the value picked where
+  they disagree), leave versions or properties out, per connection or for all — or fix the source
+  and re-check it. Values JSON can't hold (NaN, ±Infinity, a NUL character) pause it the same way,
+  to be stored as text. Connections that shared an id with another are given one of their own.
+- **An export re-imports every property as it was**, into the same graph or a new one: a value a
+  cell can't give back (a blank, padding, a `\N`, text that reads as a list, a control
+  character) travels in `properties_json`.
+- **Bring into history** copies every property the way the enable does; a value history can't
+  hold is refused as such (422), not reported as an unavailable graph.
+
 ### Upgrading
 
 - **Migrations** `20261120_1000_playground` through `20261126_1000_disc_analytics`, joined with
@@ -103,6 +130,11 @@ Every new capability ships behind its own switch, off by default.
   of Postgres-only `IF [NOT] EXISTS`; databases that ran it are unaffected.
 - All five new switches ship **off**. Turn them on under Admin → Features; set up the Playground
   (its sandbox provider) before turning it on.
+- **`20261202_1000_bootstrap_review`** adds `graphver.bootstrap_review`, what an enable holds for a
+  review (created by the versioning worker where alembic doesn't reach the graphver schema).
+- **Graphs enabled before this release** may lack their relationships' own properties in history.
+  **Check sync** now reports them as differing; **Bring into history** copies whatever the graph
+  still holds. A graph already rebuilt from history no longer holds them.
 
 ### Known limitations
 
@@ -113,6 +145,12 @@ Every new capability ships behind its own switch, off by default.
 - Excel files go to the server as they are, so the Playground can't rank semantic layers against
   them or match their types beforehand; their rows are still checked against the layer.
 - Analytics charts overflow their cards at phone width (as the Content tab already did).
+- An item's labels after its first, and a relationship type of the source's own named
+  `AGGREGATED`, are still not copied by an enable.
+- A CSV or TSV export carries numbers and booleans as text (NDJSON, JSON and Excel keep them), and
+  no flat file carries a property whose value is null.
+- A connection kept or merged by a review is one connection in history; the source graph keeps
+  every copy until it is rebuilt from history.
 
 ---
 

@@ -112,7 +112,11 @@ The invariant, pinned by a test that loads a million nodes carrying 100k distinc
   with today's warning, `None` dropped, nested values kept);
 - `n.searchableText` computed from the full bag, not from native values only, under the
   existing 8,192-byte cap;
-- edges unchanged: `r.properties` stays one JSON string and registers nothing;
+- edges unchanged: `r.properties` stays one JSON string and registers nothing. A graph another
+  tool built keeps a relationship's properties on it (`r.weight`); the reader folds those into the
+  edge's properties, the bag winning a name both hold, except on a relationship the projector
+  wrote (`gvHash`: the bag is the whole of it) and on a rollup. Nothing is written natively;
+  `update_edge` only clears a native key the edit removes;
 - **marker**: one node `(:_PropIdx)` with a label and no properties. Labels live in their
   own id space, so it costs no attribute id, lands on a graph at the ceiling, and is wiped
   by `GRAPH.DELETE` exactly when the physical layout is gone. `_PropIdx` joins

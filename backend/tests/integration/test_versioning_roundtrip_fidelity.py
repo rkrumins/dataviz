@@ -164,3 +164,95 @@ if __name__ == "__main__":
     asyncio.run(_run_roundtrip())
     asyncio.run(_run_recursive_roundtrip())
     print("versioning round-trip fidelity: OK")
+
+
+# --------------------------------------------------------------------------------------------- #
+# A customer's graph, end to end: enable → Postgres → a key rebuilt from history → what is      #
+# served → an export → an import into a fresh graph. Every property of every edge survives.     #
+# --------------------------------------------------------------------------------------------- #
+#: Ten properties a customer's relationship holds ON itself, some a flat file can't hold as a cell.
+_NATIVE = {"my prop": "val1", "MyProp": " x ", "MySpecialProp": "", "MyLogicalProp": True,
+           "weight": 3, "listy": "[1,2]", "token": "\\N", "naïve ü": "ü", "dotted.key": "y",
+           "tags list": ["a", "b"]}
+
+
+async def _run_customer_graph_end_to_end() -> None:
+    import shutil
+    import tempfile
+
+    from backend.app.providers.falkordb_provider import _edge_from_row
+    from backend.app.services.storage.object_store import LocalFsObjectStore
+    from backend.app.services.versioning.bootstrap_worker import bootstrap_status
+    from backend.app.services.versioning.import_export.service import ImportExportService
+    from backend.app.services.versioning.models import ProjectionStateORM
+    from backend.tests.integration.test_bootstrap_job import FakeGraph, _drive, _edge, _enable, _node, _runner
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+
+    # ---- enable version control on the customer's graph ----
+    source = FakeGraph([_node("urn:s", owner="ana", **{"my prop": "n1"}), _node("urn:t")],
+                       [_edge(0, 1, etype="FEEDS", id="r1", **_NATIVE)])
+    res = await _enable(ds)
+    gid = res["graph_id"]
+    out = await _drive(_runner(source), res["job_id"])
+    assert out["status"] == "completed", out
+    assert all(c["ok"] for c in (await bootstrap_status(data_source_id=ds))["report"]["checks"])
+    state = await svc.materialize_state(graph_id=gid, branch_id=await _main_of(gid))
+    assert state["edges"]["r1"]["properties"] == _NATIVE, "Postgres holds all ten"
+    assert state["nodes"]["urn:s"]["properties"] == {"owner": "ana", "my prop": "n1"}
+
+    # ---- rebuild the graph's key from history (a rehydration), and read it as it is served ----
+    fake_falkor = FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake_falkor, batch_size=50)
+    assert await svc.request_projection_rebuild(gid) is True
+    await proj.project_graph(gid)
+    async with db.graphver_session() as s:
+        name = (await s.get(ProjectionStateORM, gid)).falkor_graph_name
+    ge = fake_falkor.graphs[name].edges["r1"]
+    assert json.loads(ge["props"]) == _NATIVE, "the rebuilt key holds all ten"
+    served = _edge_from_row(ge["src"], ge["tgt"], ge["type"],
+                            {"id": "r1", "confidence": ge["conf"], "properties": ge["props"],
+                             "gvHash": ge.get("gvHash")})
+    assert served.properties == _NATIVE, "and serves all ten"
+
+    # ---- export it, and import the file into a fresh graph: all ten again ----
+    root = tempfile.mkdtemp(prefix="customer-rt-")
+    try:
+        ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root))
+        for fmt in ("ndjson", "csv"):
+            exp = await ie.create_export_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
+                                             actor="u", export_format=fmt)
+            await ie.run_export(exp["job_id"])
+            B = await svc.create_graph(data_source_id="ds_B_" + os.urandom(4).hex(),
+                                       workspace_id="ws1", actor="u")
+            imp = await ie.create_import_job(workspace_id="ws1", data_source_id=B["graph_id"],
+                                             graph_id=B["graph_id"], actor="u", import_format=fmt,
+                                             source_uri=exp["result_uri"])
+            summary = await ie.run_import(imp["job_id"])
+            assert summary["new"] == 3 and summary["invalid"] == 0, (fmt, summary)
+            draft = await svc.materialize_state(graph_id=B["graph_id"], branch_id=imp["branch_id"])
+            (edge,) = draft["edges"].values()
+            got = edge["properties"]
+            if fmt == "csv":                       # a CSV cell is text: numbers and booleans too
+                want = {**_NATIVE, "MyLogicalProp": "True", "weight": "3"}
+            else:
+                want = _NATIVE
+            assert got == want, (fmt, got)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    await db.dispose_engine()
+
+
+async def _main_of(graph_id: str) -> str:
+    from sqlalchemy import select
+    async with db.graphver_session() as s:
+        return (await s.execute(select(models.BranchORM.id).where(
+            models.BranchORM.graph_id == graph_id, models.BranchORM.kind == "main"))).scalars().one()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_customers_edge_keeps_every_property_through_enable_rebuild_export_and_import_e2e():
+    asyncio.run(_run_customer_graph_end_to_end())

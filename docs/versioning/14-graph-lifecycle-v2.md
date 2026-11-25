@@ -330,6 +330,28 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 > The synthetic `gv:src:<ID>` identity below is not built: a node with no identifier stops the
 > enable. See [18 · Entity Identity §3a](18-identity.md#3a-across-the-lifecycle-external-and-versioned-graphs).
 
+> **As built (properties, 2026-12):** the copy keeps every property it reads.
+> - **Edges** (`falkordb_provider._edge_from_row`, the one decoder the canvas and the copy share):
+>   native `r.*` keys are folded into `properties`, the `r.properties` bag winning a name both hold.
+>   A relationship the projector wrote (`gvHash`) and a rollup (`AGGREGATED`) are read from the bag
+>   alone. Only a finite number is `confidence`; anything else is the property `confidence`. Ids are
+>   text. History still stores an edge's properties as one bag, and so does the projector.
+> - **Nodes** (`entity_serde.source_node_payload`, the copy only): reserved keys a field can't take
+>   go to `properties['__src.<k>']`; `SOURCE_DERIVED_NODE_KEYS` (plus `urnSource`/`nameSource`, an
+>   `entityId` equal to the urn and an `entityType` equal to the label) are left out; `properties` /
+>   `propertiesRaw` bags are decoded and merged, native keys winning.
+> - **Values** (`entity_serde.storable`): temporal values are stored as `moments` text. NaN, ±Inf,
+>   NUL and non-JSON kinds are stored as text and **held for review** — not the `{"$f": …}` encodings.
+> - **Copies of one connection** (same source, upper-cased type and target, whatever their ids) are
+>   settled after the copy (`connections`): identical ones read twice under one source id fold,
+>   identical ones with ids of their own stay (as before); differing ones are held
+>   (`bootstrap_review`) and the job pauses for a person to keep or merge them (`resolve`) — no
+>   `#hash` ids, no `__src.multiplicity`. A connection sharing a raw id gets `edge:<id>` (repeated as
+>   needed; `projection._graph_edge_id` strips them for the graph's own id).
+> - **Proof:** `properties_kept` (every raw key accounted for, by name) and `edge_sample_matches`
+>   (a sample of connections re-read from the source) block the enable. Bring into history
+>   (`BootstrapRunner.read_graph`) reads the same way.
+
 **Nodes (§13)**
 - Identity: `urn`, else `n[identity_property]`, else synthetic `urn='gv:src:<ID>'` with **`entity_id='src:<ID>'`**.
 - So `urn == 'gv:' + eid`, which matches the stand-in convention stripped by `graph.py:3664-3671 _ref`. Today `bootstrap_worker.py:955` sets `eid = node.urn`; v2 keeps that for URN nodes only.
