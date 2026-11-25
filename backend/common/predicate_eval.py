@@ -21,7 +21,7 @@ import json
 from typing import Any, Dict
 
 from backend.app.services.deep_search import CompileError
-from backend.common.edge_properties import EDGE_NATIVE_KEYS, json_holds
+from backend.common.edge_properties import EDGE_IDENTITY_KEYS, EDGE_NATIVE_KEYS
 from backend.common.models.search import (
     DegreePredicate,
     DescendantOfPredicate,
@@ -248,11 +248,20 @@ def _text_holds(node: Dict[str, Any], predicate: TextPredicate) -> bool:
     return False
 
 
+def _edge_value(edge: Dict[str, Any], key: str) -> Any:
+    """The value an edge holds under ``key``: a user's property, else its own field of that name."""
+    props = edge.get("properties") or {}
+    if key in props and key not in EDGE_IDENTITY_KEYS:
+        return props[key]
+    return edge.get(key) if key in EDGE_NATIVE_KEYS else None
+
+
 def edge_matches(edge: Dict[str, Any], predicate) -> bool:
     """An edge filter (a Connections search's ``edgePredicate``) on an edge dict — its own fields
     (``EDGE_NATIVE_KEYS``) under their keys, a user's properties in its ``properties`` — as the
-    FalkorDB compiler reads it (``edge_properties``): an own field by every operator, a property
-    kept in the edge's JSON by presence and equality (``json_holds``). ``None``: no filter."""
+    FalkorDB compiler reads it (``falkordb_deep_search._visit_edge_property``): a user's property
+    as the native value it is stored as within the name budget, by every operator (the compiled
+    comparison is ``evaluate``'s), and its own fields likewise. ``None``: no filter."""
     if predicate is None:
         return True
     if isinstance(predicate, EdgeGroupPredicate):
@@ -261,15 +270,14 @@ def edge_matches(edge: Dict[str, Any], predicate) -> bool:
         tests = (edge_matches(edge, c) for c in predicate.children)
         return all(tests) if predicate.op == "and" else any(tests)
     if isinstance(predicate, EdgeHasPropertyPredicate):
-        present = (edge.get(predicate.key) is not None if predicate.key in EDGE_NATIVE_KEYS
-                   else predicate.key in (edge.get("properties") or {}))
+        present = _edge_value(edge, predicate.key) is not None or (
+            predicate.key not in EDGE_IDENTITY_KEYS
+            and predicate.key in (edge.get("properties") or {}))
         return not present if predicate.negate else present
     if isinstance(predicate, EdgePropertyPredicate):
         try:
             cmp = resolve_predicate(predicate)
         except SemanticsError as exc:
             raise CompileError(f"edge property {predicate.key!r}: {exc}") from exc
-        if predicate.key in EDGE_NATIVE_KEYS:
-            return evaluate(edge.get(predicate.key), cmp)
-        return json_holds(edge.get("properties"), predicate.key, cmp)
+        return evaluate(_edge_value(edge, predicate.key), cmp)
     raise CompileError(f"edge predicate kind {type(predicate).__name__} not implemented")

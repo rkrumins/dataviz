@@ -848,7 +848,7 @@ async def test_edge_draft_matches_are_none_when_the_draft_cant_answer_for_them(m
         overlay, {"viewId": "v"}, edges, _ends_judge(meets)) == {"unsearched": "too_large"}
 
 
-def test_an_edge_filter_reads_its_own_fields_natively_and_its_properties_as_kept_in_json():
+def test_an_edge_filter_reads_its_own_fields_and_its_properties_by_every_operator():
     from backend.common.models.search import (
         EdgeGroupPredicate, EdgeHasPropertyPredicate, EdgePropertyPredicate,
     )
@@ -861,6 +861,11 @@ def test_an_edge_filter_reads_its_own_fields_natively_and_its_properties_as_kept
     assert not edge_matches(edge, EdgePropertyPredicate(key="tier", op="eq", value="gold",
                                                         caseSensitive=True))
     assert edge_matches(edge, EdgePropertyPredicate(key="rank", op="in", value=[5.0], valueType="number"))
+    # A user's property is stored natively within the name budget: every operator reads it.
+    assert edge_matches(edge, EdgePropertyPredicate(key="rank", op="gt", value=4, valueType="number"))
+    assert edge_matches(edge, EdgePropertyPredicate(key="tier", op="startsWith", value="go"))
+    assert not edge_matches(edge, EdgePropertyPredicate(key="rank", op="between", value=[6, 9],
+                                                        valueType="number"))
     assert edge_matches(edge, EdgeGroupPredicate(op="not", children=[EdgeHasPropertyPredicate(key="owner")]))
     assert not edge_matches(edge, EdgeGroupPredicate(op="and", children=[
         EdgeHasPropertyPredicate(key="tier"), EdgeHasPropertyPredicate(key="confidence", negate=True)]))
