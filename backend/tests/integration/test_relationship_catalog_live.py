@@ -50,6 +50,10 @@ async def provider():
         auth_enabled=False,
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    # The ontology resolved, as the engine resolves it before any search: FEEDS is lineage,
+    # OWNS a link of no class.
+    p.set_resolved_edge_metadata({"FEEDS": {"isLineage": True}, "OWNS": {"isLineage": False}},
+                                 ["FEEDS"])
     rng = random.Random(11)
     await p._ensure_connected()
     for label in ("Domain", "Container", "Dataset"):

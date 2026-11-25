@@ -63,6 +63,8 @@ async def provider(capped):
         auth_enabled=False,
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    # The ontology resolved, as the engine resolves it before any search.
+    p.set_resolved_edge_metadata({"FEEDS": {"isLineage": True}}, ["FEEDS"])
     await p._ensure_connected()
     for label in ("Domain", "Container", "Dataset"):
         await p._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.urn)")

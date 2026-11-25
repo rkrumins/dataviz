@@ -63,6 +63,9 @@ async def provider():
         auth_enabled=False,
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    # The ontology resolved, as the engine resolves it before any search.
+    lineage = [f"HUB_{t}" for t in range(HUB_TYPES)] + ["FEEDS"]
+    p.set_resolved_edge_metadata({t: {"isLineage": True} for t in lineage}, lineage)
     await p._ensure_connected()
     q = p._graph.query
     for label in ("Hub", "Dataset"):
