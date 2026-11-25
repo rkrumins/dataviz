@@ -99,7 +99,6 @@ beforeEach(() => {
     ['e1', record('e1', { owner: 'ana', sla: '1h' })],
     ['e2', record('edge:e2', { owner: 'ana', sla: '4h' })],
     ['e3', record('e3', { owner: 'ana', sla: '1h', tier: 'gold' })],
-    ['kids', record('kids', {}, 'CONTAINS')],
   ])
   h.deleted = new Set(['gone'])
   h.missing = new Set()
