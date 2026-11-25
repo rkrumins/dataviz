@@ -1335,4 +1335,4 @@ function hasIncompleteLeaf(p: Predicate): boolean {
 }
 
 
-export { isIncomplete as isRowIncomplete }
+export { isIncomplete as isRowIncomplete, hasIncompleteLeaf }

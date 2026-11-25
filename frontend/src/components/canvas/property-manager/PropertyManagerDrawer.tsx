@@ -134,7 +134,8 @@ export function PropertyManagerDrawer({
         // Premium feedback: confirm the rule applied. The engine recomputes
         // the match set asynchronously; the notification reassures the user the
         // tag is now live on the canvas.
-        notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
+        notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — ${rule.target === 'relationships'
+            ? 'styling matched relationships' : 'tagging matched entities'}`)
     }
 
     /** Reveal a rule's matches by running its criteria as a search: the
