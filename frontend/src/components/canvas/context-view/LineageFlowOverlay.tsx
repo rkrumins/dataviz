@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
+import { classifyHiddenEnd, columnVisibleRect, type Box, type RowRect } from './hiddenEnd'
 import { sameRow, sameRows } from './rowEquality'
 import { edgeDashArray } from './edgeDash'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
@@ -547,12 +548,32 @@ export function LineageFlowOverlay({
       anchorCache.set(domId, hit)
       return hit
     }
-    const partnerRects = new Map<string, { top: number; height: number; left: number; right: number } | null>()
-    const partnerRect = (nodeId: string) => {
-      let hit = partnerRects.get(nodeId)
+    // An off-screen partner's rect — exact when mounted, the column geometry's
+    // estimate when not — and which way it is hidden, read against its OWN
+    // column's visible box (hiddenEnd.ts): `end` is null when it is on screen
+    // after all. Cached per partner, and each column's list box per column.
+    const listRects = new Map<string, Box | null>()
+    const listRectOf = (nodeId: string): Box | null => {
+      const layerId = findOwningLayer(nodeId)
+      if (!layerId) return null
+      let hit = listRects.get(layerId)
       if (hit === undefined) {
-        hit = getEl(`layer-node-${nodeId}`)?.getBoundingClientRect() ?? estimateNodeRect(nodeId)
-        partnerRects.set(nodeId, hit)
+        hit = geometryRegistry?.get(layerId)?.getListRect() ?? null
+        listRects.set(layerId, hit)
+      }
+      return hit
+    }
+    const partnerPlaces = new Map<string, { rect: RowRect; end: OverflowDirection | null } | null>()
+    const partnerPlace = (nodeId: string) => {
+      let hit = partnerPlaces.get(nodeId)
+      if (hit === undefined) {
+        const el = getEl(`layer-node-${nodeId}`)
+        const rect = el?.getBoundingClientRect() ?? estimateNodeRect(nodeId)
+        const list = (el && getClipRect(el)) ?? listRectOf(nodeId)
+        hit = rect
+          ? { rect, end: classifyHiddenEnd(rect, list ? columnVisibleRect(list, viewportRect) : viewportRect) }
+          : null
+        partnerPlaces.set(nodeId, hit)
       }
       return hit
     }
@@ -791,29 +812,18 @@ export function LineageFlowOverlay({
         : vRect.left - containerRect.left - GUTTER_HALF
       const sy = vRect.top + vRect.height / 2 - containerRect.top
 
-      // 4-way partner classification: exact DOM rect when the partner is
-      // mounted (including mounted-but-horizontally-off-viewport cards),
-      // registry estimate for vertically-unmounted rows, legacy y-guess
-      // as a last resort. Dominant overshoot axis picks the direction so
-      // horizontal scrolling gets left/right badges instead of a
-      // meaningless up/down.
+      // 4-way partner classification against the partner's own column
+      // (hiddenEnd.ts) — one answer for the column's "↑/↓ N lines" and the
+      // tray the line docks to. A partner on screen after all (the visibility
+      // observer not caught up yet) is not off-screen: its line is drawn on
+      // the next pass. With no rect at all, the legacy y-guess.
       const partnerId = offscreenNodeId.slice('layer-node-'.length)
-      const pRect = partnerRect(partnerId)
+      const place = partnerPlace(partnerId)
+      const pRect = place?.rect
       let direction: OverflowDirection
-      if (pRect) {
-        const px = (pRect.left + pRect.right) / 2
-        const py = pRect.top + pRect.height / 2
-        const dx = px < viewportRect.left ? px - viewportRect.left : px > viewportRect.right ? px - viewportRect.right : 0
-        const dy = py < viewportRect.top ? py - viewportRect.top : py > viewportRect.bottom ? py - viewportRect.bottom : 0
-        if (dx === 0 && dy === 0) {
-          // Inside the viewport box but outside the IO margin edge case —
-          // keep the legacy vertical guess.
-          direction = sy > containerH * 0.5 ? 'up' : 'down'
-        } else if (Math.abs(dy) >= Math.abs(dx)) {
-          direction = dy < 0 ? 'up' : 'down'
-        } else {
-          direction = dx < 0 ? 'left' : 'right'
-        }
+      if (place) {
+        if (!place.end) return
+        direction = place.end
       } else {
         direction = sy > containerH * 0.5 ? 'up' : 'down'
       }

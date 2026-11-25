@@ -21,6 +21,7 @@
 import { create } from 'zustand'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 import { useCanvasStore } from '@/store/canvas'
+import type { ScopeNode } from './resolveCreationScope'
 
 export type BuilderMode = 'outline' | 'paste' | 'grid'
 
@@ -30,8 +31,18 @@ interface HierarchyBuilderState {
   parentUrn: string | null
   /** ContextView layer scoping only. */
   layerId: string | null
-  /** CommandPalette "Create <Type>". */
+  /** The type to start with: a palette's "Create <Type>", or the one the layer's scope prefers
+   *  (see resolveCreationScope). Offered wherever the parent allows it. */
   initialTypeId: string | null
+  /** The type needs a parent and none was obvious: the panel asks where it goes first. */
+  askParent: boolean
+  /** The parents the scope offers first ("Inside <Domain>"), one click away. */
+  choices: ScopeNode[]
+  /** The top-level type the scope offers as "New top-level <type>", when one is obvious. */
+  topLevelTypeId: string | null
+  /** The type last added inside each parent this session (urn; '' is the top level). Kept across
+   *  closes, so a layer's "+" starts where the last one left off. */
+  lastTypeIn: Record<string, string>
   /** 'paste' when opened from a "Paste a list" CTA. */
   initialMode: BuilderMode
   /** Type-id chain when opened from a template chip. */
@@ -56,21 +67,8 @@ interface HierarchyBuilderState {
   suspended: boolean
   /** Where the next entity goes once resumed (Add inside), until the panel takes it. */
   pendingRetarget: string | null
-  open: (opts?: {
-    parentUrn?: string
-    layerId?: string
-    initialTypeId?: string
-    mode?: BuilderMode
-    template?: string[]
-    surface?: 'rail' | 'build'
-  }) => void
-  openBuild: (opts?: {
-    parentUrn?: string
-    layerId?: string
-    initialTypeId?: string
-    mode?: BuilderMode
-    template?: string[]
-  }) => void
+  open: (opts?: BuilderOpenOptions & { surface?: 'rail' | 'build' }) => void
+  openBuild: (opts?: BuilderOpenOptions) => void
   close: () => void
   /** Step aside for an entity's details (the panel stays mounted, hidden). */
   suspend: () => void
@@ -81,6 +79,21 @@ interface HierarchyBuilderState {
   takeRetarget: () => string | null
   /** Registers a freshly staged temp urn into the current batch + session tally. */
   registerBatchUrn: (urn: string) => void
+  /** Notes `typeId` as the last type added inside `parentUrn` (null: the top level). */
+  rememberType: (parentUrn: string | null, typeId: string) => void
+  /** Build: where its top-level rows go, chosen in its banner — the question, if one was asked, answered. */
+  rescope: (parentUrn: string | null) => void
+}
+
+export interface BuilderOpenOptions {
+  parentUrn?: string
+  layerId?: string
+  initialTypeId?: string
+  askParent?: boolean
+  choices?: ScopeNode[]
+  topLevelTypeId?: string
+  mode?: BuilderMode
+  template?: string[]
 }
 
 export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get) => ({
@@ -88,6 +101,10 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
   parentUrn: null,
   layerId: null,
   initialTypeId: null,
+  askParent: false,
+  choices: [],
+  topLevelTypeId: null,
+  lastTypeIn: {},
   initialMode: 'outline',
   initialTemplate: null,
   surface: 'rail',
@@ -107,6 +124,9 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
         parentUrn: opts?.parentUrn ?? null,
         layerId: opts?.layerId ?? null,
         initialTypeId: opts?.initialTypeId ?? null,
+        askParent: opts?.askParent ?? false,
+        choices: opts?.choices ?? [],
+        topLevelTypeId: opts?.topLevelTypeId ?? null,
         initialMode: opts?.mode ?? 'outline',
         initialTemplate: opts?.template ?? null,
         surface: opts?.surface ?? 'rail',
@@ -126,6 +146,9 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
       parentUrn: null,
       layerId: null,
       initialTypeId: null,
+      askParent: false,
+      choices: [],
+      topLevelTypeId: null,
       initialMode: 'outline',
       initialTemplate: null,
       surface: 'rail',
@@ -148,4 +171,9 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
 
   registerBatchUrn: (urn) =>
     set((s) => ({ batchUrns: [...s.batchUrns, urn], sessionAddedCount: s.sessionAddedCount + 1 })),
+
+  rememberType: (parentUrn, typeId) => set((s) => (s.lastTypeIn[parentUrn ?? ''] === typeId
+    ? s : { lastTypeIn: { ...s.lastTypeIn, [parentUrn ?? '']: typeId } })),
+
+  rescope: (parentUrn) => set({ parentUrn, askParent: false }),
 }))

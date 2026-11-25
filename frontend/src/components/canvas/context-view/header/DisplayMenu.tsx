@@ -89,6 +89,9 @@ export function DisplayMenu({
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
   const showEntityIds = usePreferencesStore((s) => s.showCanvasEntityIds) ?? true
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
+  const headerSize = usePreferencesStore((s) => s.canvasHeaderSize) ?? 'comfortable'
+  const showOffscreenLineMarkers = usePreferencesStore((s) => s.showOffscreenLineMarkers) ?? true
+  const emptyLayerMessage = usePreferencesStore((s) => s.emptyLayerMessage) ?? 'always'
   const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
   // The Business view's Display is the canvas and how many lines it draws; how
   // they move, their arrows and their markers, and the Advanced tools, are the
@@ -99,6 +102,7 @@ export function DisplayMenu({
   const isCustom = !isDefaultState({
     canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage,
     showEntityIds: !technical || showEntityIds,
+    headerSize, showOffscreenLineMarkers, emptyLayerMessage,
   })
 
   return (
@@ -114,7 +118,8 @@ export function DisplayMenu({
             {isCustom && (
               <HoverTip
                 className="ml-auto inline-flex"
-                label="Put zoom, density, icons, IDs, badges, tree lines and the memory gauge back to their defaults"
+                label="Put the canvas settings back to their defaults"
+                detail="Zoom, density, header size, icons, IDs, badges, off-screen markers, tree lines, the memory gauge and empty layers"
               >
                 <button
                   type="button"

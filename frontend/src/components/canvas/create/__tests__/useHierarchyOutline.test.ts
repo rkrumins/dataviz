@@ -544,6 +544,92 @@ describe('useHierarchyOutline', () => {
   })
 })
 
+describe('useHierarchyOutline — where a layer\'s scope puts things', () => {
+  beforeEach(() => {
+    resetStores()
+    useHierarchyBuilderStore.setState({ lastTypeIn: {} })
+  })
+  /** The outline as the panel drives it: its scope read from the builder store. */
+  const fromStore = () => renderHook(() => {
+    const s = useHierarchyBuilderStore()
+    return useHierarchyOutline({ scopeParentUrn: s.parentUrn, initialTypeId: s.initialTypeId, askParent: s.askParent })
+  })
+  const openWith = async (opts: Parameters<ReturnType<typeof useHierarchyBuilderStore.getState>['open']>[0]) => {
+    await act(async () => { useHierarchyBuilderStore.getState().open(opts); await settle() })
+  }
+
+  it('starts each batch as its starting type — also when the panel stays open across it', async () => {
+    seedNode('urn:real:container1', 'container', 'Container One')
+    await openWith({ parentUrn: 'urn:real:container1', initialTypeId: 'dataset' })
+    const { result } = fromStore()
+    // container and dataset may both go inside: the starting type wins over the first.
+    expect(result.current.active.typeId).toBe('dataset')
+
+    act(() => result.current.setType('container'))
+    await openWith({ parentUrn: 'urn:real:container1', initialTypeId: 'dataset' })
+    expect(result.current.active.typeId).toBe('dataset')
+
+    // A starting type the parent can't hold is left out.
+    await openWith({ parentUrn: 'urn:real:container1', initialTypeId: 'domain' })
+    expect(result.current.active.typeId).toBe('container')
+  })
+
+  it('asked where it goes: only the type asked for, nothing added until a parent is picked — then that type', async () => {
+    seedNode('urn:real:container1', 'container', 'Container One')
+    await openWith({ initialTypeId: 'dataset', askParent: true })
+    const { result } = fromStore()
+    expect(result.current.awaitingParent).toBe(true)
+    expect(result.current.allowedTypes.map((t) => t.id)).toEqual(['dataset'])
+    expect(result.current.active.typeId).toBe('dataset')
+    act(() => result.current.setName('orders'))
+    expect(result.current.canCommit).toBe(false)
+    expect(result.current.commitSibling()).toBeNull()
+
+    act(() => result.current.retarget('urn:real:container1'))
+    expect(result.current.awaitingParent).toBe(false)
+    expect(result.current.active).toMatchObject({ parentUrn: 'urn:real:container1', typeId: 'dataset' })
+    expect(result.current.canCommit).toBe(true)
+    let urn: string | null = null
+    act(() => { urn = result.current.commitSibling() })
+    expect(afterOf(findByTempUrn(urn!))).toMatchObject({ entityType: 'dataset', parentUrn: 'urn:real:container1' })
+  })
+
+  it('asked where it goes, "New top-level" answers it with the top-level type', async () => {
+    await openWith({ initialTypeId: 'dataset', askParent: true })
+    const { result } = fromStore()
+    act(() => result.current.placeAtTopLevel('domain'))
+    expect(result.current.awaitingParent).toBe(false)
+    expect(result.current.active).toMatchObject({ parentUrn: null, typeId: 'domain' })
+    act(() => result.current.setName('Finance'))
+    expect(result.current.canCommit).toBe(true)
+  })
+
+  it('a fresh batch that does not ask clears the question', async () => {
+    await openWith({ initialTypeId: 'dataset', askParent: true })
+    const { result } = fromStore()
+    expect(result.current.awaitingParent).toBe(true)
+    await openWith({})
+    expect(result.current.awaitingParent).toBe(false)
+    expect(result.current.active).toMatchObject({ parentUrn: null, typeId: 'domain' })
+  })
+
+  it('remembers the type last added inside each parent, for the next open', async () => {
+    seedNode('urn:real:container1', 'container', 'Container One')
+    await openWith({ parentUrn: 'urn:real:container1' })
+    const { result } = fromStore()
+    act(() => result.current.setType('dataset'))
+    act(() => result.current.setName('orders'))
+    act(() => { result.current.commitSibling() })
+    act(() => result.current.placeAtTopLevel())
+    act(() => result.current.setName('Finance'))
+    act(() => { result.current.commitSibling() })
+    expect(useHierarchyBuilderStore.getState().lastTypeIn).toEqual({ 'urn:real:container1': 'dataset', '': 'domain' })
+    // Kept across a close.
+    act(() => useHierarchyBuilderStore.getState().close())
+    expect(useHierarchyBuilderStore.getState().lastTypeIn['urn:real:container1']).toBe('dataset')
+  })
+})
+
 describe('useHierarchyBuilderStore', () => {
   beforeEach(() => {
     useHierarchyBuilderStore.setState({

@@ -140,6 +140,17 @@ describe('BuildOutline — per-row type change (Task 4)', () => {
     expect(useBuildRowsStore.getState().rows.find((r) => r.id === 'g2')?.typeId).toBe('attribute')
   })
 
+  it('a depth-0 row, in a Build that adds inside an entity, offers what that entity can hold', () => {
+    useBuildRowsStore.getState().setRows([makeRow({ id: 'top', name: 'Top', typeId: 'object' })])
+    render(<BuildOutline rows={useBuildRowsStore.getState().rows} typeById={typeById} rootParentType="layer" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Type for Top' }))
+
+    expect(screen.getByRole('button', { name: 'object' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'layer' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'group' })).not.toBeInTheDocument()
+  })
+
   it('a depth-0 row offers only the legal top-level (root) types', () => {
     useBuildRowsStore.getState().setRows([makeRow({ id: 'root', name: 'Root', typeId: 'layer' })])
     render(<BuildOutline rows={useBuildRowsStore.getState().rows} typeById={typeById} />)

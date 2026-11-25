@@ -42,6 +42,11 @@ import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import { ContinueAddingPill } from './ContinueAddingPill'
 import { useHierarchyOutline, type OutlineRow } from './useHierarchyOutline'
+import { childTypesLookup } from './resolveCreationScope'
+import { ScopePickerPopover } from './ScopePicker'
+import { article, useDismiss, useScopeName } from './scopePickerHooks'
+import { usePersonaMode } from '@/store/persona'
+import { useLayers } from '@/store/referenceModelStore'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
 // ─── Local helpers (copied from UnifiedCreatePanel — it is deleted soon) ─────
@@ -73,6 +78,9 @@ function TypeChip({ type, size = 'sm' }: { type?: EntityTypeSchema; size?: 'xs' 
 }
 
 const splitTags = (s: string): string[] => s.split(',').map((t) => t.trim()).filter(Boolean)
+
+/** How many of the scope's parents the "Or inside" row names; the picker has the rest. */
+const QUICK_CHOICES = 4
 
 /**
  * The entity types allowed directly under `parentType` (or root when null),
@@ -107,6 +115,10 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const scopeParentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
   const layerId = useHierarchyBuilderStore((s) => s.layerId)
   const initialTypeId = useHierarchyBuilderStore((s) => s.initialTypeId)
+  const askParent = useHierarchyBuilderStore((s) => s.askParent)
+  const scopeChoices = useHierarchyBuilderStore((s) => s.choices)
+  const topLevelTypeId = useHierarchyBuilderStore((s) => s.topLevelTypeId)
+  const batchId = useHierarchyBuilderStore((s) => s.batchId)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const initialTemplate = useHierarchyBuilderStore((s) => s.initialTemplate)
   const sessionAddedCount = useHierarchyBuilderStore((s) => s.sessionAddedCount)
@@ -114,10 +126,11 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
 
   const {
     tree, active, allowedTypes, edgeOptions, blockedReason, canCommit,
-    setName, setType, setEdgeType, setDetails, setIdentifier, identifierUrn, identifierProblem, retarget,
+    setName, setType, setEdgeType, setDetails, setIdentifier, identifierUrn, identifierProblem,
+    awaitingParent, retarget, placeAtTopLevel,
     commitSibling, commitAndNest, indent, outdent,
     renameRow, updateRowDetails, removeRow, descendantCount, stageRows,
-  } = useHierarchyOutline({ scopeParentUrn, initialTypeId, onEntityStaged })
+  } = useHierarchyOutline({ scopeParentUrn, initialTypeId, askParent, onEntityStaged })
   // In the Playground a new entity may be given its identifier (its `id`, which a file's key of the
   // same value finds): offered beside its name.
   const nodeIdentity = useCanvasNodeIdentity()
@@ -148,10 +161,32 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const [detailsRowUrn, setDetailsRowUrn] = useState<string | null>(null)
   const [blockFlash, setBlockFlash] = useState(0)
   const nameRef = useRef<HTMLInputElement>(null)
+  /** The "where it goes" banner: the parent picker opens under it. */
+  const scopeRef = useRef<HTMLDivElement>(null)
   const typeSearchRef = useRef<HTMLInputElement>(null)
   const typeListRef = useRef<HTMLDivElement>(null)
   const didInitialFocus = useRef(false)
   const focusTimer = useRef<number | null>(null)
+
+  // ── Where things go: the scope's own parents, the top level, and what can hold what. ──
+  const technical = usePersonaMode() === 'technical'
+  const nameOf = useScopeName()
+  const childTypes = useMemo(
+    () => childTypesLookup(entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes),
+    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes],
+  )
+  const askedType = initialTypeId ? typeById.get(initialTypeId) : undefined
+  const canHold = useCallback(
+    (typeId: string) => (awaitingParent && initialTypeId ? childTypes(typeId).includes(initialTypeId) : childTypes(typeId).length > 0),
+    [awaitingParent, initialTypeId, childTypes],
+  )
+  const layers = useLayers()
+  const layerName = layerId ? layers.find((l) => l.id === layerId)?.name : undefined
+  const topLevelType = topLevelTypeId ? typeById.get(topLevelTypeId) : undefined
+  const topLevelLabel = topLevelType
+    ? (technical ? `New top-level ${topLevelType.name}` : `A new ${topLevelType.name}, on its own`)
+    : 'At the top level'
+  const toTopLevel = useCallback(() => placeAtTopLevel(topLevelTypeId), [placeAtTopLevel, topLevelTypeId])
 
   const focusName = useCallback(() => {
     if (focusTimer.current) window.clearTimeout(focusTimer.current)
@@ -161,6 +196,14 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const cancelFocusName = useCallback(() => {
     if (focusTimer.current) { window.clearTimeout(focusTimer.current); focusTimer.current = null }
   }, [])
+
+  // Asked where it goes: the question is the first thing it shows, each time it is asked (set as
+  // the batch is rendered, not after it).
+  const [askedInBatch, setAskedInBatch] = useState<number | null>(null)
+  if (askParent && askedInBatch !== batchId) {
+    setAskedInBatch(batchId)
+    setShowParentPicker(true)
+  }
 
   // Sync mode/template from the store each time the panel is (re)opened.
   useEffect(() => {
@@ -175,6 +218,9 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     const t = window.setTimeout(() => {
       if (didInitialFocus.current) {
         nameRef.current?.focus()
+      } else if (useHierarchyBuilderStore.getState().askParent) {
+        // The parent picker, open, has the focus: that question comes first.
+        didInitialFocus.current = true
       } else if (typeSearchRef.current) {
         // Latch only on an ACTUAL focus — if the panel isn't rendered yet the
         // first real open must still get the type-search focus.
@@ -265,9 +311,24 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     const row = tree.find((r) => r.tempUrn === active.parentUrn)
     if (row) return { name: row.name, typeId: row.typeId }
     const node = canvasNodes.find((n) => n.id === active.parentUrn || (n.data?.urn as string) === active.parentUrn)
-    if (node) return { name: (node.data?.label as string) || active.parentUrn, typeId: (node.data?.type as string) || null }
+    if (node) return { name: nameOf(node, (node.data?.label as string) || active.parentUrn), typeId: (node.data?.type as string) || null }
     return null
-  }, [active.parentUrn, tree, canvasNodes])
+  }, [active.parentUrn, tree, canvasNodes, nameOf])
+
+  // "Or inside …": at the top level, the scope's own parents one click away (those still here).
+  const quickChoices = useMemo(() => {
+    if (active.parentUrn || awaitingParent || scopeChoices.length === 0) return []
+    const wanted = new Set(scopeChoices.map((c) => c.urn))
+    const found = new Map<string, LineageNode>()
+    for (const n of canvasNodes) {
+      const urn = (n.data?.urn as string) || n.id
+      if (wanted.has(urn)) found.set(urn, n)
+      if (found.size === wanted.size) break
+    }
+    return scopeChoices.filter((c) => found.has(c.urn)).map((c) => ({
+      urn: c.urn, typeId: c.typeId, name: nameOf(found.get(c.urn), c.urn),
+    }))
+  }, [active.parentUrn, awaitingParent, scopeChoices, canvasNodes, nameOf])
   const activeParentType = parentInfo?.typeId ?? null
   const parentType = activeParentType ? typeById.get(activeParentType) : undefined
 
@@ -276,7 +337,8 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   // chain (brief Amendment 1). Chains that would be a single type aren't a
   // scaffold, so they're dropped.
   const chains = useMemo<string[][]>(() => {
-    if (tree.length !== 0) return []
+    // Asked where things go: nothing scaffolds at the top level until that is answered.
+    if (tree.length !== 0 || awaitingParent) return []
     const raw = containmentChains(entityTypes, rootEntityTypes, { startType: activeParentType ?? undefined })
       .map((c) => (activeParentType ? c.slice(1) : c))
     const seen = new Set<string>()
@@ -290,7 +352,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
       if (out.length >= 3) break
     }
     return out
-  }, [tree.length, entityTypes, rootEntityTypes, activeParentType])
+  }, [tree.length, awaitingParent, entityTypes, rootEntityTypes, activeParentType])
 
   const parseCtx = useMemo<OutlineParseContext>(
     () => ({ entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, rootParentType: activeParentType }),
@@ -327,22 +389,26 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   // layerId), not the outline's live `active.parentUrn` (which may have been
   // retargeted to a staged row) — Build's rootParentUrn must be a real canvas
   // urn or null.
+  // Both carry the scope the rail was opened with, as it was resolved: its parent, starting type,
+  // question and choices.
+  const openedScope = useCallback(() => ({
+    parentUrn: scopeParentUrn ?? undefined,
+    layerId: layerId ?? undefined,
+    initialTypeId: initialTypeId ?? undefined,
+    askParent,
+    choices: scopeChoices,
+    topLevelTypeId: topLevelTypeId ?? undefined,
+  }), [scopeParentUrn, layerId, initialTypeId, askParent, scopeChoices, topLevelTypeId])
   const expandToBuild = useCallback(() => {
-    useHierarchyBuilderStore.getState().openBuild({
-      parentUrn: scopeParentUrn ?? undefined,
-      layerId: layerId ?? undefined,
-    })
-  }, [scopeParentUrn, layerId])
+    useHierarchyBuilderStore.getState().openBuild(openedScope())
+  }, [openedScope])
 
   // "Start another set" — a fresh open() at the SAME original scope. Bumps
   // batchId (clears the ADDING list + re-scopes `active`) WITHOUT un-staging
   // anything already on the canvas — earlier batches stay in the draft.
   const startAnotherSet = useCallback(() => {
-    useHierarchyBuilderStore.getState().open({
-      parentUrn: scopeParentUrn ?? undefined,
-      layerId: layerId ?? undefined,
-    })
-  }, [scopeParentUrn, layerId])
+    useHierarchyBuilderStore.getState().open(openedScope())
+  }, [openedScope])
 
   // ── Keyboard model (unchanged from v1). Tab routing is load-bearing:
   //    non-blank name → commitAndNest(); blank name → indent(). ──
@@ -375,8 +441,8 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   // A multi-line paste into the name input switches straight to paste mode.
   const onNamePaste = useCallback((e: React.ClipboardEvent) => {
     const text = e.clipboardData.getData('text')
-    if (text.includes('\n')) { e.preventDefault(); setPasteText(text); setMode('paste') }
-  }, [])
+    if (text.includes('\n') && !awaitingParent) { e.preventDefault(); setPasteText(text); setMode('paste') }
+  }, [awaitingParent])
 
   const detailsRow = detailsRowUrn ? (tree.find((r) => r.tempUrn === detailsRowUrn) ?? null) : null
 
@@ -429,15 +495,29 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
               </div>
             </div>
 
-            <div className="mt-3 relative">
-              {parentInfo ? (
+            <div ref={scopeRef} className="mt-3 relative" data-testid="builder-scope">
+              {awaitingParent ? (
+                <button
+                  type="button"
+                  onClick={() => setShowParentPicker(true)}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-accent-lineage/40 bg-accent-lineage/[0.07] text-xs text-left hover:bg-accent-lineage/10 transition-colors"
+                >
+                  <LucideIcons.CornerDownRight className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
+                  <span className="min-w-0 flex-1 text-ink truncate">
+                    {technical ? 'Choose a parent for' : 'Where does'} {article(askedType?.name ?? 'entity')}{' '}
+                    <span className="font-semibold">{askedType?.name ?? 'entity'}</span>{technical ? '' : ' go?'}
+                  </span>
+                  <span className="text-[11px] font-medium text-accent-lineage flex-shrink-0">Choose</span>
+                </button>
+              ) : parentInfo ? (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-xs">
                   <TypeChip type={parentType} size="xs" />
                   <span className="min-w-0 flex-1 text-ink-muted truncate">
                     Adding inside <span className="font-semibold text-ink">{parentInfo.name}</span>
+                    {technical && parentType && <span className="text-ink-muted"> · {parentType.name}</span>}
                   </span>
                   <button
-                    onClick={() => { retarget(null) }}
+                    onClick={toTopLevel}
                     title="Add at the top level instead"
                     aria-label="Add at the top level instead"
                     className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted hover:text-ink transition-colors"
@@ -449,24 +529,61 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                   </button>
                 </div>
               ) : (
-                <div className="flex items-center gap-2 px-1 text-[11px] text-ink-muted">
-                  <LucideIcons.Globe className="w-3 h-3 flex-shrink-0" />
-                  <span className="flex-1">Adding at the top level</span>
-                  <button onClick={() => setShowParentPicker((v) => !v)} className="font-medium text-accent-lineage hover:underline">
-                    Change
-                  </button>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 px-1 text-[11px] text-ink-muted">
+                    <LucideIcons.Globe className="w-3 h-3 flex-shrink-0" />
+                    <span className="flex-1">Adding at the top level</span>
+                    <button onClick={() => setShowParentPicker((v) => !v)} className="font-medium text-accent-lineage hover:underline">
+                      Change
+                    </button>
+                  </div>
+                  {quickChoices.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 px-1 min-w-0" role="group" aria-label="Or add inside">
+                      <span className="text-[11px] text-ink-muted flex-shrink-0">Or inside</span>
+                      {quickChoices.slice(0, QUICK_CHOICES).map((c) => (
+                        <button
+                          key={c.urn}
+                          type="button"
+                          onClick={() => { retarget(c.urn); setShowParentPicker(false); focusName() }}
+                          title={`Add inside ${c.name}`}
+                          className="min-w-0 max-w-[150px] flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] text-[11px] text-ink hover:border-accent-lineage/50 hover:bg-accent-lineage/[0.06] transition-colors"
+                        >
+                          <TypeChip type={typeById.get(c.typeId)} size="xs" />
+                          <span className="truncate">{c.name}</span>
+                        </button>
+                      ))}
+                      {quickChoices.length > QUICK_CHOICES && (
+                        <button
+                          type="button"
+                          onClick={() => setShowParentPicker(true)}
+                          className="flex-shrink-0 text-[11px] font-medium text-accent-lineage hover:underline"
+                        >
+                          +{quickChoices.length - QUICK_CHOICES} more
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
-              <AnimatePresence>
-                {showParentPicker && (
-                  <ParentPickerPopover
-                    nodes={canvasNodes}
-                    typeById={typeById}
-                    onPick={(urn) => { retarget(urn); setShowParentPicker(false); focusName() }}
-                    onClose={() => setShowParentPicker(false)}
-                  />
-                )}
-              </AnimatePresence>
+              {showParentPicker && (
+                <ScopePickerPopover
+                  anchorRef={scopeRef}
+                  nodes={canvasNodes}
+                  typeById={typeById}
+                  canHold={canHold}
+                  choices={scopeChoices}
+                  choicesLabel={awaitingParent
+                    ? `Can hold ${article(askedType?.name ?? 'entity')} ${askedType?.name ?? 'entity'}`
+                    : layerName ? `In ${layerName}` : undefined}
+                  emptyText={awaitingParent
+                    ? `Nothing on the canvas can hold ${article(askedType?.name ?? 'entity')} ${askedType?.name ?? 'entity'} yet.`
+                    : undefined}
+                  topLevel={{ label: topLevelLabel, typeId: topLevelTypeId, onPick: () => { toTopLevel(); setShowParentPicker(false); focusName() } }}
+                  selectedUrn={awaitingParent ? undefined : active.parentUrn}
+                  onPick={(urn) => { retarget(urn); setShowParentPicker(false); focusName() }}
+                  onClose={() => setShowParentPicker(false)}
+                />
+              )}
             </div>
           </div>
 
@@ -612,7 +729,12 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
 
                 {/* Relationship: a fixed plain phrase — never an edge-type label here.
                     Edge choices live only behind "Change". */}
-                {blockedReason ? (
+                {awaitingParent ? (
+                  <div className="flex items-start gap-1.5 px-1 text-[11px] text-ink-muted">
+                    <LucideIcons.Info className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                    <span>Choose where it goes, above, to add it.</span>
+                  </div>
+                ) : blockedReason ? (
                   <motion.div
                     key={`blocked-${blockFlash}`}
                     initial={{ opacity: 0, x: 0 }}
@@ -762,13 +884,15 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setMode('paste')}
-                  className="flex items-center gap-1.5 text-[11px] text-ink-muted hover:text-ink transition-colors"
-                >
-                  <LucideIcons.ClipboardList className="w-3.5 h-3.5" />Paste a list
-                </button>
+                {!awaitingParent && (
+                  <button
+                    type="button"
+                    onClick={() => setMode('paste')}
+                    className="flex items-center gap-1.5 text-[11px] text-ink-muted hover:text-ink transition-colors"
+                  >
+                    <LucideIcons.ClipboardList className="w-3.5 h-3.5" />Paste a list
+                  </button>
+                )}
               </div>
 
               {/* ── Footer ── */}
@@ -1037,73 +1161,6 @@ function DetailsForm({
 }
 
 // ─── Popovers ────────────────────────────────────────────────────────────────
-
-/** Dismiss on outside-click + Escape (matches EdgeTypePickerPopover). */
-function useDismiss(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    const t = window.setTimeout(() => document.addEventListener('mousedown', onDown), 0)
-    document.addEventListener('keydown', onKey)
-    return () => { window.clearTimeout(t); document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
-  }, [ref, onClose])
-}
-
-function ParentPickerPopover({
-  nodes, typeById, onPick, onClose,
-}: {
-  nodes: LineageNode[]
-  typeById: Map<string, EntityTypeSchema>
-  onPick: (urn: string) => void
-  onClose: () => void
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-  const searchRef = useRef<HTMLInputElement>(null)
-  const [q, setQ] = useState('')
-  useDismiss(ref, onClose)
-  useEffect(() => { searchRef.current?.focus() }, [])
-
-  const options = useMemo(
-    () =>
-      nodes
-        .filter((n) => ((typeById.get(n.data?.type as string)?.hierarchy.canContain?.length ?? 0) > 0))
-        .map((n) => ({ urn: (n.data?.urn as string) || n.id, name: (n.data?.label as string) || n.id, typeId: n.data?.type as string })),
-    [nodes, typeById],
-  )
-  const filtered = q.trim() ? options.filter((o) => o.name.toLowerCase().includes(q.toLowerCase())) : options
-
-  return (
-    <motion.div
-      ref={ref}
-      initial={{ opacity: 0, scale: 0.97, y: -4 }}
-      animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.97, y: -4 }}
-      transition={{ duration: 0.12 }}
-      className="absolute left-0 right-0 top-full mt-1 z-50 bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-xl shadow-lg overflow-hidden"
-    >
-      <div className="p-2 border-b border-glass-border">
-        <div className="relative">
-          <LucideIcons.Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted" />
-          <input ref={searchRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search containers…" className="input w-full pl-8 text-sm" />
-        </div>
-      </div>
-      <div className="max-h-[240px] overflow-y-auto custom-scrollbar p-1.5 space-y-0.5">
-        {filtered.length === 0 && <div className="text-center py-5 text-[11px] text-ink-muted">No containers on the canvas.</div>}
-        {filtered.map((o) => (
-          <button
-            key={o.urn}
-            onClick={() => onPick(o.urn)}
-            className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-accent-lineage/10 text-left transition-colors"
-          >
-            <TypeChip type={typeById.get(o.typeId)} size="xs" />
-            <span className="flex-1 min-w-0 text-sm text-ink truncate">{o.name}</span>
-            <span className="text-[10px] text-ink-muted flex-shrink-0">{typeById.get(o.typeId)?.name ?? o.typeId}</span>
-          </button>
-        ))}
-      </div>
-    </motion.div>
-  )
-}
 
 function TypeChipDropdown({
   types, selectedId, onPick, onClose,

@@ -11,6 +11,12 @@
  *
  *   focus — the lines the reader is on: the hovered line, the hovered or
  *           selected entity's lines, the trace focus's. The default.
+ *   calm  — as focus, but a group of more lines than CALM_MOTION_AT (a trace's
+ *           fan of sixty into one layer) is held still: sixty marching dashes
+ *           through one corridor read as noise, not direction. A held line is
+ *           drawn at the strength a moving one has, so the trace keeps its
+ *           colour; only what the reader narrows to moves — the line under the
+ *           pointer, or a hovered or selected entity with a handful of lines.
  *   all   — every line. The overlay applies it only while the board is sparse
  *           (its premium density tier) and falls back to `focus` above that.
  *   off   — nothing moves. Calm mode and the system's "reduce motion"
@@ -22,6 +28,9 @@ export type LineMotion = LineageMotion
 
 /** Most lines moving at once for a focus: a hub's fan can run to hundreds. */
 export const MOTION_FOCUS_LIMIT = 120
+
+/** The most lines a group may hold and still move, in the calm mode. */
+export const CALM_MOTION_AT = 12
 
 export interface MotionLine {
   id: string
@@ -44,20 +53,47 @@ export function pickMovingLines<T extends MotionLine>(
   mode: LineMotion,
   focus: MotionFocus,
 ): T[] {
-  if (mode === 'off') return []
-  if (mode === 'all') return [...lines]
+  return pickLineMotion(lines, mode, focus).moving
+}
+
+/** The lines that move, and — in the calm mode — those `focus` would have
+ *  moved that are held still instead, to be drawn at a moving line's strength. */
+export function pickLineMotion<T extends MotionLine>(
+  lines: readonly T[],
+  mode: LineMotion,
+  focus: MotionFocus,
+): { moving: T[]; held: T[] } {
+  if (mode === 'off') return { moving: [], held: [] }
+  if (mode === 'all') return { moving: [...lines], held: [] }
   const { hoveredEdgeId, hoveredNodeId, highlighted } = focus
-  const moving: T[] = []
   // The line under the pointer first, so a hub's cap never drops it.
   const hovered = hoveredEdgeId ? lines.find(l => l.id === hoveredEdgeId) : undefined
-  if (hovered) moving.push(hovered)
+  // The groups a reader can be looking at: the selected or hovered entity's
+  // lines, and the trace focus's.
+  const lit: T[] = []
+  let tracedSize = 0
+  // The line under the pointer counts toward its group's size: pointing at one
+  // line of a fan doesn't set the rest of the fan moving.
   for (const line of lines) {
-    if (moving.length >= MOTION_FOCUS_LIMIT) break
-    if (line === hovered) continue
     const onFocus = highlighted
       ? highlighted.has(line.id)
       : hoveredNodeId !== null && (line.source === hoveredNodeId || line.target === hoveredNodeId)
-    if (onFocus || line.isFocusIncident) moving.push(line)
+    if (onFocus) lit.push(line)
+    if (line.isFocusIncident) tracedSize += 1
   }
-  return moving
+  const moving: T[] = hovered ? [hovered] : []
+  const held: T[] = []
+  const calm = mode === 'calm'
+  // In document order across the two groups, as `focus` always moved them.
+  const litSet = new Set(lit)
+  const litStill = calm && lit.length > CALM_MOTION_AT
+  const tracedStill = calm && tracedSize > CALM_MOTION_AT
+  for (const line of lines) {
+    if (line === hovered) continue
+    const inLit = litSet.has(line)
+    if (!inLit && !line.isFocusIncident) continue
+    if (inLit ? litStill : tracedStill) held.push(line)
+    else if (moving.length < MOTION_FOCUS_LIMIT) moving.push(line)
+  }
+  return { moving, held }
 }

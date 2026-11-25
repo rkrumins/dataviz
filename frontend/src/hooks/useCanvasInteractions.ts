@@ -106,6 +106,8 @@ export interface UseCanvasInteractionsOptions {
     onDuplicateWithOptions?: (nodeId: string) => void
     /** What ⌘A selects: the entities the canvas shows. Absent, every entity it holds. */
     selectableIds?: () => readonly string[]
+    /** N: where to add. Absent, the builder opens at the top level. */
+    onCreate?: () => void
 }
 
 export interface UseCanvasInteractionsResult {
@@ -283,6 +285,7 @@ export function useCanvasInteractions(
         onConnectTool,
         onDuplicateWithOptions,
         selectableIds,
+        onCreate,
     } = options
     
     const provider = useGraphProvider()
@@ -802,7 +805,8 @@ export function useCanvasInteractions(
             }
         },
         onCreate: () => {
-            useHierarchyBuilderStore.getState().open()
+            if (onCreate) onCreate()
+            else useHierarchyBuilderStore.getState().open()
         },
         onConnectMode: () => {
             const { selectedNodeIds } = useCanvasStore.getState()

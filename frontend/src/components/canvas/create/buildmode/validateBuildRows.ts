@@ -30,6 +30,9 @@ export interface BuildOntologyCtx {
    *  `null`. Omit/undefined when Build is unscoped or only layer-scoped —
    *  depth-0 rows are then validated as true top-level roots (unchanged). */
   rootParentType?: string
+  /** The type a depth-0 row with none is taken to be, where it may go (the type the scope Build was
+   *  opened from prefers: an "Apps" layer's App). Otherwise inferred as usual. */
+  rootPreferredType?: string
 }
 
 export interface BuildValidationSummary {
@@ -385,7 +388,12 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     // child of that scoped parent (Fix 3).
     const parentType = parentRow?.typeId ?? ctx.rootParentType ?? null
     const candidates = ctx.entityTypes.map((t) => t.id).filter((c) => isLegalChild(parentType, c, ctx))
-    if (candidates.length === 1) {
+    const preferred = !parentRow && ctx.rootPreferredType && candidates.length > 1
+      ? candidates.find((c) => sameId(c, ctx.rootPreferredType!)) : undefined
+    if (preferred) {
+      row.typeId = preferred
+      row.fixes.push({ field: 'type', note: `Inferred type '${displayName(preferred, ctx.entityTypes)}'.` })
+    } else if (candidates.length === 1) {
       row.typeId = candidates[0]
       row.fixes.push({ field: 'type', note: `Inferred type '${displayName(candidates[0], ctx.entityTypes)}'.` })
     } else if (candidates.length > 1) {

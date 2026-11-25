@@ -48,6 +48,8 @@ export interface TraceBottomDockProps {
   /** A combined trace's seeds, and dropping one (see the title bar). */
   seeds?: readonly TraceSeed[]
   onRemoveSeed?: (urn: string) => void
+  /** Open a traced entity's details, by urn or canvas id (see the title bar). */
+  onOpenDetails?: (urnOrId: string) => void
   /** Export, save as view, keep in this browser (see the title bar). */
   keep?: TraceKeepActions
   sinceSaved?: { added: number; removed: number; onExport: () => void } | null
@@ -104,6 +106,7 @@ export function TraceBottomDock({
   focusLabel,
   seeds,
   onRemoveSeed,
+  onOpenDetails,
   keep,
   sinceSaved,
 }: TraceBottomDockProps) {
@@ -283,6 +286,7 @@ export function TraceBottomDock({
           focusLabel={focusLabel}
           seeds={seeds}
           onRemoveSeed={onRemoveSeed}
+          onOpenDetails={onOpenDetails}
           nativeMode={nativeMode}
           keep={keep}
           sinceSaved={sinceSaved}
