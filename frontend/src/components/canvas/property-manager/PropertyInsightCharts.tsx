@@ -38,12 +38,14 @@ export function AnimatedNumber({ value, className }: { value: number; className?
 }
 
 
-export interface RankedItem { label: string; count: number }
+/** ``color``: the fill's own colour (a hex), as a relationship type is drawn on the canvas. */
+export interface RankedItem { label: string; count: number; color?: string }
 
 /**
  * Animated ranked horizontal bars: label · gradient fill (width ∝ count) ·
- * count · optional %. When ``colorByEntityType`` the fill is tinted by the
- * label's entity-type identity; otherwise the accent gradient.
+ * count · optional %. The fill is an item's own ``color`` when it has one;
+ * else, when ``colorByEntityType``, tinted by the label's entity-type
+ * identity; otherwise the accent gradient.
  */
 export function RankedValueBars({
     items, total, limit = 6, colorByEntityType = false, showPct = true, onItemClick, selectable,
@@ -96,7 +98,8 @@ export function RankedValueBars({
                                 initial={{ width: 0 }}
                                 animate={{ width: `${w}%` }}
                                 transition={{ duration: 0.6, delay: Math.min(idx * 0.05, 0.3), ease: EASE }}
-                                className={cn('h-full rounded-full bg-gradient-to-r shadow-sm', grad)}
+                                className={cn('h-full rounded-full shadow-sm', !it.color && cn('bg-gradient-to-r', grad))}
+                                style={it.color ? { backgroundImage: `linear-gradient(to right, ${it.color}b3, ${it.color})` } : undefined}
                             />
                         </div>
                         {clickable && (
@@ -131,17 +134,22 @@ export function RankedValueBars({
 
 /**
  * Coverage gauge for a property: a ring (share of the view that carries
- * the key) + an animated headline count + a per-entity-type ranked bar set.
+ * the key) + an animated headline count + a per-entity-type ranked bar set —
+ * or, for a relationship's property (``noun``), per relationship type, each
+ * named and coloured as it is drawn (``label``, ``color``).
  */
 export function UsageGauge({
-    total, viewTotal, byEntityType, onTypeClick,
+    total, viewTotal, byEntityType, onTypeClick, noun = { one: 'entity', many: 'entities' },
 }: {
     total: number
     viewTotal: number
-    byEntityType: { type: string; count: number }[]
+    byEntityType: { type: string; count: number; label?: string; color?: string }[]
     /** When set, clicking a per-type bar searches that type. */
     onTypeClick?: (type: string) => void
+    /** What carries it. */
+    noun?: { one: string; many: string }
 }) {
+    const items = byEntityType.map((b): RankedItem => ({ label: b.label ?? b.type, count: b.count, color: b.color }))
     const pct = viewTotal > 0 ? Math.min(100, Math.round((total / viewTotal) * 100)) : 100
     return (
         <div className="flex flex-col gap-3">
@@ -151,7 +159,7 @@ export function UsageGauge({
                     <div className="flex items-baseline gap-1.5">
                         <AnimatedNumber value={total} className="text-[20px] font-bold text-ink tabular-nums leading-none" />
                         <span className="text-[11px] text-ink-muted">
-                            {total === 1 ? 'entity uses this' : 'entities use this'}
+                            {total === 1 ? `${noun.one} uses this` : `${noun.many} use this`}
                         </span>
                     </div>
                     {viewTotal > 0 && (
@@ -163,11 +171,11 @@ export function UsageGauge({
             </div>
             {byEntityType.length > 0 && (
                 <RankedValueBars
-                    items={byEntityType.map((b) => ({ label: b.type, count: b.count }))}
+                    items={items}
                     total={total}
                     colorByEntityType
                     showPct={false}
-                    onItemClick={onTypeClick ? (it) => onTypeClick(it.label) : undefined}
+                    onItemClick={onTypeClick ? (it) => onTypeClick(byEntityType[items.indexOf(it)]!.type) : undefined}
                 />
             )}
         </div>

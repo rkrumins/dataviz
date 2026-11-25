@@ -4,8 +4,12 @@
  * all exact — read from every entity in the view by the property catalog —
  * and, below them, how the numbers were come by: how far a read that is
  * still running has got, or when the catalog was read, with a refresh.
+ *
+ * For the relationships between the view's entities (``subject``), three:
+ * Relationships · Properties · Relationship types, under a line saying what
+ * they are read from — and what they leave out.
  */
-import { Boxes, Database, Info, Layers, RefreshCw, Tag } from 'lucide-react'
+import { Boxes, Database, Info, Layers, RefreshCw, Spline, Tag, Waypoints } from 'lucide-react'
 import { type FC, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -13,7 +17,7 @@ import { compactNum } from '@/components/dashboard/dashboard-constants'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
-import type { SearchCatalogResult } from '@/types/search'
+import type { CatalogSubject, SearchCatalogResult } from '@/types/search'
 
 
 export interface PropertyInsightsHeaderProps {
@@ -23,14 +27,20 @@ export interface PropertyInsightsHeaderProps {
     /** Why the last read failed, when the catalog shown is an older one. */
     error?: string | null
     onRefresh: () => void
+    /** Whose properties the catalog lists. */
+    subject?: CatalogSubject
+    /** For relationships: how many entities in the view they run between, when known. */
+    entities?: number | null
 }
 
 export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
-    catalog, reading, error, onRefresh,
+    catalog, reading, error, onRefresh, subject = 'entities', entities = null,
 }) => {
     // Until the first read completes, every number is what has been read so
     // far — a floor, shown as "≥ N".
     const floor = catalog.status !== 'complete'
+    const edges = subject === 'relationships'
+    const every = edges ? 'every relationship' : 'every entity'
 
     return (
         <div className={cn(
@@ -39,29 +49,61 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
             'border border-glass-border',
         )}>
             <div className="pointer-events-none absolute -top-10 -right-10 w-28 h-28 rounded-full bg-accent-lineage/10 blur-3xl" />
-            <div className="relative grid grid-cols-4 gap-2">
-                <StatTile icon={<Boxes className="w-3.5 h-3.5" />} value={catalog.entities}
-                    label="Entities" tone="text-cyan-400" atLeast={floor} />
-                <StatTile icon={<Database className="w-3.5 h-3.5" />} value={catalog.properties.length}
-                    label="Properties" tone="text-accent-lineage" atLeast={floor} />
-                <StatTile icon={<Tag className="w-3.5 h-3.5" />} value={catalog.tags.length}
-                    label="Tags" tone="text-fuchsia-400" atLeast={floor} />
-                <StatTile icon={<Layers className="w-3.5 h-3.5" />} value={catalog.entityTypes.length}
-                    label="Types" tone="text-emerald-400" atLeast={floor} />
+            {edges && (
+                <div className="relative mb-2 flex items-center gap-1.5 text-[11px] text-ink-secondary">
+                    <Waypoints className="w-3.5 h-3.5 shrink-0 text-accent-lineage" aria-hidden />
+                    <span className="min-w-0">
+                        Relationships between the{' '}
+                        {entities !== null && <span className="font-semibold text-ink tabular-nums">{entities.toLocaleString()} </span>}
+                        entities in this view
+                    </span>
+                    <HoverTip
+                        label="Combined flows aren't counted"
+                        detail="The canvas's rollups of many relationships into one carry no properties of their own — the relationships they combine are counted instead."
+                        className="ml-auto shrink-0 inline-flex"
+                    >
+                        <button type="button" aria-label="What is counted" className="inline-flex w-5 h-5 items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-glass transition-colors">
+                            <Info className="w-3 h-3" aria-hidden />
+                        </button>
+                    </HoverTip>
+                </div>
+            )}
+            <div className={cn('relative grid gap-2', edges ? 'grid-cols-3' : 'grid-cols-4')}>
+                {edges ? (
+                    <>
+                        <StatTile icon={<Waypoints className="w-3.5 h-3.5" />} value={catalog.entities}
+                            label="Relationships" tone="text-cyan-400" atLeast={floor} />
+                        <StatTile icon={<Database className="w-3.5 h-3.5" />} value={catalog.properties.length}
+                            label="Properties" tone="text-accent-lineage" atLeast={floor} />
+                        <StatTile icon={<Spline className="w-3.5 h-3.5" />} value={catalog.entityTypes.length}
+                            label="Relationship types" tone="text-emerald-400" atLeast={floor} />
+                    </>
+                ) : (
+                    <>
+                        <StatTile icon={<Boxes className="w-3.5 h-3.5" />} value={catalog.entities}
+                            label="Entities" tone="text-cyan-400" atLeast={floor} />
+                        <StatTile icon={<Database className="w-3.5 h-3.5" />} value={catalog.properties.length}
+                            label="Properties" tone="text-accent-lineage" atLeast={floor} />
+                        <StatTile icon={<Tag className="w-3.5 h-3.5" />} value={catalog.tags.length}
+                            label="Tags" tone="text-fuchsia-400" atLeast={floor} />
+                        <StatTile icon={<Layers className="w-3.5 h-3.5" />} value={catalog.entityTypes.length}
+                            label="Types" tone="text-emerald-400" atLeast={floor} />
+                    </>
+                )}
             </div>
             <div className="relative mt-2.5">
                 {reading !== null ? (
                     <div className="flex flex-col gap-1.5">
-                        <ProgressBar value={reading} label="Reading every entity in this view" />
+                        <ProgressBar value={reading} label={`Reading ${every} in this view`} />
                         <span className="text-[10.5px] text-ink-muted tabular-nums">
-                            {floor ? 'Reading every entity in this view' : 'Reading the view again'}
+                            {floor ? `Reading ${every} in this view` : 'Reading the view again'}
                             {' · '}{reading}%
                         </span>
                     </div>
                 ) : (
                     <div className="flex items-center gap-2 text-[10.5px] text-ink-muted">
                         <span className="min-w-0 truncate" title={catalog.asOf ? formatUtc(catalog.asOf) : undefined}>
-                            Exact — every entity read{catalog.asOf ? ` ${timeAgo(catalog.asOf)}` : ''}
+                            Exact — {every} read{catalog.asOf ? ` ${timeAgo(catalog.asOf)}` : ''}
                             {catalog.stale && <span className="text-amber-400"> · the data has changed since</span>}
                         </span>
                         <button

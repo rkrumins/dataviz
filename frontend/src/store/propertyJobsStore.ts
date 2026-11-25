@@ -197,14 +197,15 @@ export interface CatalogOverlayEntry {
   running: boolean
 }
 
-export function usePropertyCatalogOverlay(jobs: readonly TrackedJob[]): ReadonlyMap<string, CatalogOverlayEntry> {
+/** `edges`: for the relationships' catalog — their changes, not the entities'. */
+export function usePropertyCatalogOverlay(jobs: readonly TrackedJob[], edges = false): ReadonlyMap<string, CatalogOverlayEntry> {
   return useMemo(() => {
     const map = new Map<string, CatalogOverlayEntry>()
     // An undo, and a change it has undone, leave the property as it was.
     const undone = new Set(jobs.filter((t) => t.op.kind === 'undo' && t.job?.status === 'completed').map((t) => t.op.sourceJobId))
     for (const t of jobs) {
       if (t.job?.status === 'failed' || t.job?.status === 'cancelled') continue
-      if (t.entityKind === 'edge') continue                 // the catalog lists entities' properties
+      if ((t.entityKind === 'edge') !== edges) continue    // each catalog lists its own subject's properties
       if (t.op.kind === 'undo' || undone.has(t.jobId) || t.job?.summary?.undoneBy) continue
       const entry = map.get(t.op.key) ?? { kinds: new Set<PropertyOpKind>(), count: 0, running: false }
       entry.kinds.add(t.op.kind)
@@ -214,5 +215,5 @@ export function usePropertyCatalogOverlay(jobs: readonly TrackedJob[]): Readonly
       map.set(t.op.key, entry)
     }
     return map
-  }, [jobs])
+  }, [jobs, edges])
 }
