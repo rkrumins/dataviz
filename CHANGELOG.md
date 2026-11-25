@@ -67,6 +67,24 @@ Every new capability ships behind its own switch, off by default.
   accepted answer, the most discussed views and data sources, and the questions waiting longest;
   on the Data tab, how well sources are described and how requests are answered.
 - **Guided tours**, a persona-aware Dashboard and command-palette actions for the new flows.
+- **Every relationship property in a view, exactly**: `POST /search/catalog` with
+  `subject: "relationships"` lists the properties of the relationships between the view's items. It
+  reads every one, not a sample. For each relationship type it gives:
+  - how many carry each key, and the kinds its values are stored as;
+  - its exact range and its values;
+  - how many hold it in the relationship's JSON.
+
+  It has the item catalog's shape, follows a draft's changes, and never reads roll-ups. In CI it
+  completes over about a million relationships, with one item holding half of them, in about a
+  minute, with no statement over two seconds.
+- **Make a relationship property a field**: from a relationship's properties, a property its
+  relationships already carry becomes a defined field of the relationship types you choose. The
+  platform's own keys (`id`, `confidence`, `properties`, `gvHash`) are refused, and built-in types
+  take no fields.
+- **Compare and edit several relationships of every kind**: hierarchy links and associations, as
+  well as lineage (roll-ups stay read-only). A field the type keeps unique is never given one value
+  for several. Adding a property suggests the names others of their types carry. The Property
+  Manager offers "Compare the N selected relationships".
 
 ### Changed
 
@@ -109,6 +127,17 @@ Every new capability ships behind its own switch, off by default.
 
 ### Fixed
 
+- **The property catalog never loses rows past one reply from the graph store**, which cuts a
+  reply at 10,000 rows without saying so. Keys come back as one row, values kept as raw text are
+  read in pages, statements about keys ask about 500 at a time, and the tag-set cutoff fits inside a
+  reply. A wide or raw-heavy view could otherwise count some properties short.
+- **A graph whose projection is catching up answers 501 for every catalog request**, as the route
+  intends, rather than a 500 when one key's every value was asked for.
+- **A relationship property held both natively and in the relationship's JSON reads the same
+  everywhere**: the JSON's value, as the relationship drawer shows it. Search results and exports
+  showed the native one.
+- **Relationship discovery samples each relationship type on its own**, so one type with millions
+  of relationships (containment, roll-ups) no longer leaves others unseen.
 - **Enabling version control keeps every property of a graph another tool built.** A
   relationship's own properties (`r.weight`, `r.\`my prop\``) were not copied into history — only
   the platform's `r.properties` bag was — so they disappeared the first time the graph was rebuilt
