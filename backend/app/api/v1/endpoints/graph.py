@@ -2895,7 +2895,10 @@ async def search_membership(
     """Which of the entities on screen (at most 1,000 urns) match which
     rules (at most 32) — what display rules paint, without downloading every
     entity a rule matches. Only entities inside the view's scope ever match;
-    the scope is resolved here from ``scope.viewId``, like a search's.
+    the scope is resolved here from ``scope.viewId``, like a search's. A rule
+    that styles relationships (a Connections search) is asked about the
+    relationships on screen instead (at most 1,000 ``edges``, each its id and
+    its ends) and answers in ``edgeMatches``.
 
     A rule using ``withinHops`` or a path is refused in ``errors``: those
     describe a route, not an entity.

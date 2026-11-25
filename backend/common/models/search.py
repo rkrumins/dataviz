@@ -1700,19 +1700,40 @@ class SearchResolveResult(_Base):
     elapsed_ms: int = Field(0, alias="elapsedMs")
 
 
+SEARCH_MEMBERSHIP_EDGES_MAX = 1000
+
+
+class SearchMembershipEdge(_Base):
+    """A relationship on screen: its id — the canvas's, the one an edge read answers with — and
+    its ends, which it is found through (by their urns), never by a scan of every edge."""
+    id: str = Field(min_length=1, max_length=1024)
+    source: str = Field(min_length=1, max_length=1024)
+    target: str = Field(min_length=1, max_length=1024)
+
+
 class SearchMembershipRequest(_Base):
     """``POST /search/membership``: which of these entities — the ones on
-    screen — match which rules. Answers only for entities inside the view's
-    scope; one outside it never matches, whatever it holds."""
+    screen — match which rules, and which of these relationships match which
+    rules that style relationships (a rule whose predicate is a Connections
+    search). Answers only inside the view's scope; an entity outside it never
+    matches, whatever it holds, nor a relationship with an end outside it."""
     scope: SearchScope
     items: List[SearchRuleItem] = Field(min_length=1, max_length=SEARCH_RULE_ITEMS_MAX)
-    urns: List[str] = Field(max_length=SEARCH_MEMBERSHIP_URNS_MAX)
+    urns: List[str] = Field(default_factory=list, max_length=SEARCH_MEMBERSHIP_URNS_MAX)
+    edges: List[SearchMembershipEdge] = Field(
+        default_factory=list, max_length=SEARCH_MEMBERSHIP_EDGES_MAX,
+        description="The relationships on screen the Connections rules are asked about.")
 
 
 class SearchMembershipResult(_Base):
     matches: Dict[str, List[str]] = Field(
         default_factory=dict,
         description="Rule id → the requested urns it matches (in scope).",
+    )
+    edge_matches: Dict[str, List[str]] = Field(
+        default_factory=dict, alias="edgeMatches",
+        description="Connections rule id → the ids of the requested relationships it matches "
+                    "(both ends in scope).",
     )
     errors: Dict[str, str] = Field(
         default_factory=dict,

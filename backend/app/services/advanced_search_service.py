@@ -24,7 +24,7 @@ import logging
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from typing import Any, Awaitable, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1053,31 +1053,52 @@ class AdvancedSearchService:
         *,
         run_context: Optional[SearchRunContext] = None,
     ) -> SearchMembershipResult:
-        """Which of the requested (on-screen) entities match which rules,
-        inside the view's scope — resolved here, never taken from the
-        client."""
+        """Which of the requested (on-screen) entities match which rules, and
+        which of the requested relationships match which rules that style
+        relationships (a Connections search, ``edgeMatches``) — inside the
+        view's scope, resolved here, never taken from the client."""
+        # A Connections search sent in an AND group of its own is the search itself.
+        request = request.model_copy(update={"items": [
+            item.model_copy(update={"predicate": unwrap_edges(item.predicate)})
+            for item in request.items]})
         _validate_items(request.items)
+        connections = {item.id for item in request.items
+                       if isinstance(item.predicate, EdgesPredicate)}
         refused = self._refused_on_a_shared_link(request.items)
         scope, _eff = await self._rule_scope(request.scope, members=True)
         if scope is None:
-            return SearchMembershipResult(matches={item.id: [] for item in request.items},
-                                          errors=refused)
-        op = self._provider_op("deep_search_membership")
+            return SearchMembershipResult(
+                matches={item.id: [] for item in request.items if item.id not in connections},
+                edge_matches={item_id: [] for item_id in connections}, errors=refused)
+        entity_op = (self._provider_op("deep_search_membership")
+                     if len(connections) < len(request.items) else None)
+        edge_op = (self._provider_op("deep_search_edge_membership")
+                   if connections and request.edges else None)
         context = replace(run_context or SearchRunContext(),
                           members=self._members(request.scope, _eff))
+        if context.members is not None:
+            refused.update({item_id: CONNECTIONS_PAST_THE_CAP for item_id in connections
+                            if item_id not in refused})
         items, unusable, context = await self._resolve_item_refs(
             [item for item in request.items if item.id not in refused], scope, context)
         items, unplaced = _resolve_item_layers(items, _eff)
         refused = {**refused, **unusable, **unplaced}
         boundary = await self._scope_boundary(scope, _eff, context)
-        out = await op(scope, [(item.id, self._in_subset(item.predicate, _eff, boundary))
-                               for item in items],
-                       request.urns, context=context)
+        judged = [(item.id, self._in_subset(item.predicate, _eff, boundary)) for item in items]
+        none: Dict[str, Any] = {"matches": {}, "errors": {}, "elapsedMs": 0}
+        entities = [(i, p) for i, p in judged if i not in connections]
+        out = (await entity_op(scope, entities, request.urns, context=context)
+               if entity_op is not None and entities else none)
+        lines = [(i, p) for i, p in judged if i in connections]
+        edge_out = (await edge_op(scope, lines, request.edges, context=context)
+                    if edge_op is not None and lines else {**none, "matches": {i: [] for i, _ in lines}})
         return SearchMembershipResult(
-            matches={**{item_id: [] for item_id in refused}, **out["matches"]},
-            errors={**out["errors"], **refused},
-            data_version=context.data_version or None, elapsed_ms=out["elapsedMs"],
-            notes=out.get("notes") or [],
+            matches={**{i: [] for i in refused if i not in connections}, **out["matches"]},
+            edge_matches={**{i: [] for i in refused if i in connections}, **edge_out["matches"]},
+            errors={**out["errors"], **edge_out["errors"], **refused},
+            data_version=context.data_version or None,
+            elapsed_ms=out["elapsedMs"] + edge_out["elapsedMs"],
+            notes=[*(out.get("notes") or []), *(edge_out.get("notes") or [])],
         )
 
     def _refused_on_a_shared_link(self, items) -> dict:

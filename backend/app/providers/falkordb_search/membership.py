@@ -24,9 +24,14 @@ nothing about one entity on its own, so a rule using them is refused
 A property a node keeps raw (``propertiesRaw``) is answered as a search
 answers it (``raw_properties``): the batch's raw JSON is read first, when
 the graph keeps anything raw.
+
+A rule that styles relationships — a Connections search — is asked about
+the relationships on screen instead (``evaluate_edge_membership``), by the
+Connections search's own statement.
 """
 from __future__ import annotations
 
+import dataclasses
 import time
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -35,7 +40,8 @@ from backend.app.providers.falkordb_deep_search import (
     _sanitize_label,
     _searchable_labels,
 )
-from backend.app.providers.falkordb_search.plan import _labels_in_scope, _quote, _rel
+from backend.app.providers.falkordb_search.edges import _ends, _far_scope, edge_context, edge_match
+from backend.app.providers.falkordb_search.plan import Unit, _ids_of, _labels_in_scope, _quote, _rel
 from backend.app.providers.falkordb_search.session import store_for
 from backend.app.providers.falkordb_search.raw_properties import (
     RawLeaf, answered, empty_params, evaluate_rows, graph_raw_labels, probe_condition,
@@ -44,7 +50,7 @@ from backend.app.services.deep_search import CompileError
 from backend.app.services.native_query.parse_cost import (
     MAX_PARSE_COST, grouped, operand, parse_cost,
 )
-from backend.common.models.search import SearchScope
+from backend.common.models.search import SearchQuery, SearchScope
 
 
 async def evaluate_membership(
@@ -259,6 +265,97 @@ def _containment(provider) -> Tuple[str, ...]:
         return tuple(sorted(provider._get_containment_edge_types()))
     except Exception:
         return ()
+
+
+async def evaluate_edge_membership(
+    provider, scope: SearchScope, items: Sequence[Tuple[str, Any]], edges: Sequence[Any],
+    *, run, timeout_s: float,
+) -> Dict[str, Any]:
+    """``{"matches": {item: [edge id…]}, "errors": {item: why}, "elapsedMs"}``: which of the
+    relationships on screen (``edges``: each its id and its ends' urns) each rule that styles
+    relationships — a Connections search — matches, inside the RESOLVED ``scope``.
+
+    Each rule is its Connections search's own statement (``edges.edge_match``), read from the
+    relationships' ends rather than the scope's units: one ``ids`` unit of their sources' node
+    IDs — found once, through the urn index of each label the scope reads, so an end of
+    another type is never one — the view's roots and the rule's own "inside" clamping it as
+    they clamp a unit, and each relationship sought among its source's edges by its id (one
+    stored without an id by its ends and type, as an edge read names it). ``either`` reads a
+    second pass from the targets, as the search does. The far end is held to the scope as the
+    search holds it (``edges._far_scope``); on the canvas (``visible``), both ends are."""
+    started = time.monotonic()
+    matches: Dict[str, List[str]] = {item_id: [] for item_id, _ in items}
+    errors: Dict[str, str] = {}
+    wanted: Dict[str, Any] = {}
+    for edge in edges:
+        wanted.setdefault(edge.id, edge)
+    if not wanted or not items:
+        return _result(matches, errors, started)
+    labels = await _searchable_labels(provider, timeout_s=timeout_s)
+    containment = _containment(provider)
+    visible = (set(scope.visible_urns or [])
+               if scope.scope_mode == "visible" and scope.visible_urns else None)
+    rooted = scope.scope_mode == "view" and bool(scope.root_urns) and bool(containment)
+    anchors = (labels if visible is not None or rooted
+               else _labels_in_scope(provider, labels, scope.entity_types))
+    ends = sorted({u for e in wanted.values() for u in (e.source, e.target)
+                   if visible is None or u in visible})
+    ids = await _node_ids(run, anchors, ends)
+    far = await _far_scope(run, provider, SearchQuery(predicate=items[0][1], scope=scope),
+                           labels, containment)
+    eids = list(wanted)
+    for item_id, predicate in items:
+        try:
+            ectx = edge_context(provider, SearchQuery(predicate=predicate, scope=scope),
+                                {"anchor": "source", **far})
+        except CompileError as exc:
+            errors[item_id] = str(exc)
+            continue
+        if not ectx.types:
+            continue                     # no edges of these types in the data source
+        clamps: Optional[List[List[int]]] = []
+        if containment:
+            for urns, _ in ectx.anchor_sets:
+                found = await _ids_of(run, labels, urns)
+                if not found:
+                    clamps = None        # nothing is inside roots that aren't there
+                    break
+                clamps.append(found)
+        if clamps is None:
+            continue
+        ectx = dataclasses.replace(ectx, anchor=dataclasses.replace(
+            ectx.anchor, clamp_depths=tuple(d for _, d in ectx.anchor_sets)))
+        hit: Set[str] = set()
+        for reverse in (False, True) if predicate.direction == "either" else (False,):
+            # The first pass reads each relationship from its source, the second from its target.
+            roots = sorted({ids[u] for e in wanted.values()
+                            for u in [e.target if reverse else e.source] if u in ids})
+            if not roots:
+                continue
+            unit = Unit("ids", roots=roots, reverse=reverse)
+            _, src, tgt = _ends(unit, ectx)
+            key = f"coalesce(toString(e.id), {src}.urn + '|' + type(e) + '|' + {tgt}.urn)"
+            seek = " AND ".join(w for w in (grouped(ectx.edge_where) if ectx.edge_where else "",
+                                            f"{key} IN $_eids") if w)
+            cypher, params, _, _ = edge_match(unit, dataclasses.replace(ectx, edge_where=seek),
+                                              clamps)
+            params["_eids"] = eids
+            res = await run(f"{cypher} RETURN DISTINCT {key}", params)
+            hit.update(str(r[0]) for r in res.result_set or [] if r and r[0] is not None)
+        matches[item_id] = [eid for eid in eids if eid in hit]
+    return _result(matches, errors, started)
+
+
+async def _node_ids(run, labels: Sequence[str], urns: Sequence[str]) -> Dict[str, int]:
+    """Each of ``urns`` under one of ``labels``, by its node ID, through the labels' urn index."""
+    if not labels or not urns:
+        return {}
+    union = " UNION ALL ".join(
+        f"MATCH (r:`{_sanitize_label(lbl)}`) WHERE r.urn IN $_urns RETURN r.urn AS urn, ID(r) AS id"
+        for lbl in labels
+    )
+    res = await run(union, {"_urns": list(urns)})
+    return {str(r[0]): int(r[1]) for r in res.result_set or [] if r and r[1] is not None}
 
 
 def _result(matches, errors, started) -> Dict[str, Any]:

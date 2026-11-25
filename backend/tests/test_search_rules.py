@@ -97,6 +97,70 @@ class TestService:
         # "b" holds everything the rule asks, but lies outside the view.
         assert out.matches == {"r": ["a"]}
 
+    async def test_relationship_rules_answer_the_relationships_asked_about(self):
+        """A rule that styles relationships is a Connections search: asked about the
+        relationships on screen, by id, beside the entity rules asked about the entities. A
+        relationship with an end outside the view never matches."""
+        stub = StubDeepSearchProvider(nodes=[
+            {"urn": "a", "entityType": "t", "ancestorUrns": ["root"]},
+            {"urn": "b", "entityType": "t", "ancestorUrns": ["root"]},
+            {"urn": "c", "entityType": "t", "ancestorUrns": ["other"]},
+        ], edges=[
+            {"id": "e1", "source": "a", "target": "b", "type": "FEEDS", "properties": {"mode": "stream"}},
+            {"id": "e2", "source": "a", "target": "c", "type": "FEEDS", "properties": {"mode": "stream"}},
+            {"id": "e3", "source": "b", "target": "a", "type": "FEEDS", "properties": {"mode": "batch"}},
+        ])
+        streams = {"kind": "group", "op": "and", "children": [{"kind": "edges", "edgePredicate": {
+            "kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}}]}
+        request = SearchMembershipRequest.model_validate({
+            "scope": {"viewId": "v"}, "urns": ["a", "b", "c"],
+            "edges": [{"id": e, "source": s, "target": t}
+                      for e, s, t in (("e1", "a", "b"), ("e2", "a", "c"), ("e3", "b", "a"))],
+            "items": [{"id": "all", "predicate": {"kind": "all"}},
+                      {"id": "streams", "predicate": streams}]})
+        out = await _service(stub, _eff(roots=("root",))).membership(request)
+        assert out.matches == {"all": ["a", "b"]}
+        assert out.edge_matches == {"streams": ["e1"]}
+        assert out.model_dump(by_alias=True)["edgeMatches"] == {"streams": ["e1"]}
+        # No relationships asked about: none matches, and the engine is not asked.
+        alone = request.model_copy(update={"edges": [], "items": request.items[1:]})
+        out = await _service(SimpleNamespace(), _eff(roots=("root",))).membership(alone)
+        assert (out.matches, out.edge_matches) == ({}, {"streams": []})
+
+    async def test_a_relationship_rule_past_the_member_cap_is_refused_on_its_own(self):
+        """A view whose members are too many to list can't hold a Connections search's far end
+        to them: the relationship rule says so, and the entity rules are answered."""
+        from backend.app.services.advanced_search_service import CONNECTIONS_PAST_THE_CAP
+        stub = StubDeepSearchProvider(nodes=[{"urn": "a", "entityType": "t"}])
+        svc = _service(stub)
+        svc._members = lambda scope, eff: object()
+        request = SearchMembershipRequest.model_validate({
+            "scope": {"viewId": "v"}, "urns": ["a"], "edges": [{"id": "e", "source": "a", "target": "a"}],
+            "items": [{"id": "all", "predicate": {"kind": "all"}},
+                      {"id": "links", "predicate": {"kind": "edges"}}]})
+        out = await svc.membership(request)
+        assert out.matches == {"all": ["a"]} and out.edge_matches == {"links": []}
+        assert out.errors == {"links": CONNECTIONS_PAST_THE_CAP}
+
+    async def test_a_relationship_rule_is_counted_by_the_connections_counter(self):
+        counted = []
+
+        class _Counts:
+            async def deep_search_count(self, query, *, context, advance=True):
+                counted.append(query.predicate.kind)
+                return {"count": 4, "status": "complete", "sessionId": "s"}
+
+        request = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "items": [{"id": "links", "predicate": {
+                "kind": "group", "op": "and", "children": [{"kind": "edges", "edgeTypes": ["FEEDS"]}]}}]})
+        out = await _service(_Counts()).counts(request)
+        assert out.counts["links"].count == 4 and set(counted) == {"edges"}
+        # Asked of every relationship on the canvas, its ends follow lineage one hop.
+        far = {"kind": "edges", "sourceWhere": {"kind": "related", "axis": "upstream", "maxHops": 2}}
+        with pytest.raises(ValidationError, match="a rule follows lineage one hop"):
+            await _service(_Counts()).counts(SearchCountsRequest.model_validate({
+                "scope": {"viewId": "v"}, "items": [{"id": "far", "predicate": far}]}))
+
     async def test_counts_read_every_count_then_move_the_least_advanced_first(self):
         calls = []
 
@@ -476,6 +540,129 @@ class TestMembershipStatement:
 
 
 # ---------------------------------------------------------------------------
+# The membership statement of a rule that styles relationships
+# ---------------------------------------------------------------------------
+
+class _EdgeGraph:
+    """Answers edge membership's statements: ``nodes`` urn → (label, node ID), ``edges`` id →
+    (source urn, target urn) — what the edge statement finds from the anchors it is given."""
+
+    def __init__(self, nodes, edges):
+        self.nodes, self.edges = nodes, edges
+        self.statements = []
+
+    async def run(self, cypher, params):
+        self.statements.append((cypher, params))
+        if cypher.startswith("CALL db.labels()"):
+            return SimpleNamespace(result_set=[["A"], ["B"]])
+        labels = set(re.findall(r"MATCH \(r:`(\w+)`\) WHERE r\.urn IN \$_urns", cypher))
+        if "RETURN r.urn AS urn, ID(r) AS id" in cypher:
+            return SimpleNamespace(result_set=[[u, self.nodes[u][1]] for u in params["_urns"]
+                                               if u in self.nodes and self.nodes[u][0] in labels])
+        if "RETURN ID(r) AS id" in cypher:
+            return SimpleNamespace(result_set=[[self.nodes[u][1]] for u in params["_urns"]
+                                               if u in self.nodes and self.nodes[u][0] in labels])
+        if "RETURN DISTINCT coalesce(" in cypher:
+            reverse = "(n)<-[e:" in cypher
+            ids = {u: i for u, (_, i) in self.nodes.items()}
+            return SimpleNamespace(result_set=[
+                [eid] for eid, (s, t) in self.edges.items() if eid in params["_eids"]
+                and ids.get(t if reverse else s) in params["_ids"]])
+        raise AssertionError(cypher)
+
+
+def _edge_provider(graph):
+    return SimpleNamespace(
+        _ro_query=lambda c, params=None, timeout=None: graph.run(c, params or {}),
+        _get_containment_edge_types=lambda: ["CONTAINS"],
+        _get_lineage_edge_types=lambda: ["FEEDS"],
+        _entity_type_levels={}, _name_property=None,
+    )
+
+
+def _asked(*ids):
+    from backend.common.models.search import SearchMembershipEdge
+    graph_edges = {"e1": ("a1", "b1"), "e2": ("b2", "a2"), "e3": ("a1", "a2")}
+    return [SearchMembershipEdge(id=e, source=graph_edges[e][0], target=graph_edges[e][1])
+            for e in ids]
+
+
+def _edge_statements(graph):
+    return [s for s in graph.statements if "RETURN DISTINCT coalesce(" in s[0]]
+
+
+async def _edge_members(graph, scope, items, edges):
+    from backend.app.providers.falkordb_search.membership import evaluate_edge_membership
+    return await evaluate_edge_membership(_edge_provider(graph), scope, items, edges,
+                                          run=graph.run, timeout_s=1.0)
+
+
+_NODES = {"a1": ("A", 1), "a2": ("A", 2), "b1": ("B", 11), "b2": ("B", 12), "root": ("A", 99)}
+_EDGES = {"e1": ("a1", "b1"), "e2": ("b2", "a2"), "e3": ("a1", "a2")}
+
+
+class TestEdgeMembershipStatement:
+    async def test_each_relationship_is_sought_from_its_source_by_its_id(self):
+        """The Connections search's own statement, from the relationships' sources — found by
+        ID once, under the labels the scope reads — and each relationship by its id among
+        their edges: an end of a type the view doesn't show anchors nothing."""
+        graph = _EdgeGraph(_NODES, _EDGES)
+        rule = P({"kind": "edges", "edgeTypes": ["FEEDS"],
+                  "targetWhere": {"kind": "property", "key": "tier", "op": "eq", "value": "gold"},
+                  "edgePredicate": {"kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}})
+        scope = SearchScope(view_id="v", scope_mode="data_source", entity_types=["a"])
+        out = await _edge_members(graph, scope, [("r", rule)], _asked("e1", "e2", "e3"))
+        assert out["matches"] == {"r": ["e1", "e3"]} and out["errors"] == {}
+        found = next(c for c, _ in graph.statements if "RETURN r.urn AS urn" in c)
+        assert "MATCH (r:`A`)" in found and "(r:`B`)" not in found
+        [(cypher, params)] = _edge_statements(graph)
+        key = "coalesce(toString(e.id), n.urn + '|' + type(e) + '|' + m.urn)"
+        assert cypher.startswith("UNWIND $_ids AS _ii MATCH (n) WHERE ID(n) = _ii AND n.urn IS NOT NULL")
+        assert "WITH n MATCH (n)-[e:FEEDS]->(m) WHERE m.urn IS NOT NULL AND " in cypher
+        assert f"{key} IN $_eids" in cypher and cypher.endswith(f"RETURN DISTINCT {key}")
+        assert "m.`tier`" in cypher and "e.`mode`" in cypher     # To, and the edge filter
+        assert params["_ids"] == [1] and params["_eids"] == ["e1", "e2", "e3"]
+        assert params["_farLabels"] == ["a"]
+
+    async def test_either_way_reads_a_second_pass_from_the_targets(self):
+        graph = _EdgeGraph(_NODES, _EDGES)
+        rule = P({"kind": "edges", "direction": "either",
+                  "sourceWhere": {"kind": "entityType", "values": ["A"]}})
+        out = await _edge_members(graph, SearchScope(view_id="v", scope_mode="data_source"),
+                                  [("r", rule)], _asked("e1", "e2"))
+        assert out["matches"] == {"r": ["e1", "e2"]}
+        first, second = _edge_statements(graph)
+        assert "MATCH (n)-[e:FEEDS]->(m)" in first[0] and first[1]["_ids"] == [1, 12]
+        assert "MATCH (n)<-[e:FEEDS]-(m)" in second[0] and second[1]["_ids"] == [2, 11]
+        assert "coalesce(toString(e.id), m.urn + '|' + type(e) + '|' + n.urn)" in second[0]
+
+    async def test_the_views_roots_clamp_the_anchor_and_bound_the_far_end(self):
+        graph = _EdgeGraph(_NODES, _EDGES)
+        scope = SearchScope(view_id="v", scope_mode="view", root_urns=["root"], max_depth=4)
+        out = await _edge_members(graph, scope, [("r", P({"kind": "edges"}))], _asked("e1"))
+        [(cypher, params)] = _edge_statements(graph)
+        assert "WITH n MATCH (n)<-[:CONTAINS*0..4]-(_r0) WHERE ID(_r0) IN $_roots0" in cypher
+        assert params["_roots0"] == [99] and params["_farRoots"] == [99]
+        assert out["matches"] == {"r": ["e1"]}
+
+    async def test_on_the_canvas_both_ends_must_be_on_it(self):
+        graph = _EdgeGraph(_NODES, _EDGES)
+        scope = SearchScope(view_id="v", scope_mode="visible", visible_urns=["a1", "b1"])
+        out = await _edge_members(graph, scope, [("r", P({"kind": "edges"}))], _asked("e1", "e2"))
+        [(cypher, params)] = _edge_statements(graph)
+        assert params["_ids"] == [1] and "m.urn IN $_farUrns" in cypher
+        assert out["matches"] == {"r": ["e1"]}
+
+    async def test_a_rule_the_engine_cannot_compile_is_its_own_error(self):
+        graph = _EdgeGraph(_NODES, _EDGES)
+        bad = P({"kind": "edges", "targetWhere": {"kind": "text", "value": "^x", "match": "regex"}})
+        out = await _edge_members(graph, SearchScope(view_id="v", scope_mode="data_source"),
+                                  [("bad", bad), ("ok", P({"kind": "edges"}))], _asked("e1"))
+        assert "bad" in out["errors"] and "bad" not in out["matches"]
+        assert out["matches"] == {"ok": ["e1"]}
+
+
+# ---------------------------------------------------------------------------
 # The stub
 # ---------------------------------------------------------------------------
 
@@ -495,6 +682,21 @@ class TestStub:
         from backend.common.models.search import SearchQuery
         count = await stub.deep_search_count(SearchQuery(predicate=rule, scope=scope))
         assert count["count"] == 1 and count["status"] == "complete"
+
+    async def test_edge_membership_is_the_connections_search_narrowed_to_the_edges_asked(self):
+        from backend.common.models.search import SearchMembershipEdge
+        stub = StubDeepSearchProvider(nodes=self.NODES, edges=[
+            {"id": "e1", "source": "a", "target": "c", "type": "HAS"},
+            {"id": "e2", "source": "b", "target": "c", "type": "HAS"},
+            {"source": "a", "target": "b", "type": "JOINS"},
+        ])
+        rule = P({"kind": "edges", "sourceWhere": {"kind": "property", "key": "owner",
+                                                    "op": "eq", "value": "x"}})
+        asked = [SearchMembershipEdge(id=e, source=s, target=t)
+                 for e, s, t in (("e1", "a", "c"), ("e2", "b", "c"), ("a|JOINS|b", "a", "b"))]
+        out = await stub.deep_search_edge_membership(SearchScope(view_id="v"), [("r", rule)], asked)
+        # One stored without an id is named by its ends and type, as an edge read names it.
+        assert out["matches"] == {"r": ["e1", "a|JOINS|b"]}
 
 
 # ---------------------------------------------------------------------------

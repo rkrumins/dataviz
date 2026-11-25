@@ -793,6 +793,13 @@ export type Format1 = 'csv' | 'ndjson'
 export type Rows1 = number
 export type Sessionid5 = string
 export type Status3 = 'running' | 'complete'
+export type Id1 = string
+export type Source = string
+export type Target1 = string
+/**
+ * The relationships on screen the Connections rules are asked about.
+ */
+export type Edges1 = SearchMembershipEdge[]
 export type Items1 = SearchRuleItem[]
 export type Urns3 = string[]
 export type Dataversion3 = string | null
@@ -978,12 +985,12 @@ export type Edgetypecounts = {
 /**
  * A Connections search's page of edges, in order: source name, target name, edge type.
  */
-export type Edges1 = EdgeHit[] | null
+export type Edges2 = EdgeHit[] | null
 export type Edgetype = string
 /**
  * The edge's id as the canvas knows it: its own id when it has one, else source|TYPE|target.
  */
-export type Id1 = string
+export type Id2 = string
 /**
  * Unique within the answer: list rows, selection and stepping key on it.
  */
@@ -1007,7 +1014,7 @@ export type Paths = PathHit[] | null
 export type Edgetype1 = string
 export type Sourceurn = string
 export type Targeturn = string
-export type Edges2 = EdgeRef[]
+export type Edges3 = EdgeRef[]
 export type Hopcount = number
 /**
  * Ordered list — first is source endpoint, last is target endpoint.
@@ -1844,20 +1851,39 @@ export interface SearchExportResult {
 }
 /**
  * ``POST /search/membership``: which of these entities — the ones on
- * screen — match which rules. Answers only for entities inside the view's
- * scope; one outside it never matches, whatever it holds.
+ * screen — match which rules, and which of these relationships match which
+ * rules that style relationships (a rule whose predicate is a Connections
+ * search). Answers only inside the view's scope; an entity outside it never
+ * matches, whatever it holds, nor a relationship with an end outside it.
  */
 export interface SearchMembershipRequest {
+    edges?: Edges1
     items: Items1
     scope: SearchScope
-    urns: Urns3
+    urns?: Urns3
+}
+/**
+ * A relationship on screen: its id — the canvas's, the one an edge read answers with — and
+ * its ends, which it is found through (by their urns), never by a scan of every edge.
+ */
+export interface SearchMembershipEdge {
+    id: Id1
+    source: Source
+    target: Target1
 }
 export interface SearchMembershipResult {
     dataVersion?: Dataversion3
+    edgeMatches?: Edgematches
     elapsedMs?: Elapsedms3
     errors?: Errors
     matches?: Matches
     notes?: Notes4
+}
+/**
+ * Connections rule id → the ids of the requested relationships it matches (both ends in scope).
+ */
+export interface Edgematches {
+    [k: string]: string[]
 }
 /**
  * Rule id → why it could not be evaluated. Such a rule matches nothing here.
@@ -1973,7 +1999,7 @@ export interface SearchResultPage {
     dataVersion?: Dataversion5
     deadlineExceeded?: Deadlineexceeded
     edgeTypeCounts?: Edgetypecounts
-    edges?: Edges1
+    edges?: Edges2
     elapsedMs: Elapsedms5
     hits?: Hits
     paths?: Paths
@@ -2047,7 +2073,7 @@ export interface Properties1 {
  */
 export interface EdgeHit {
     edgeType: Edgetype
-    id: Id1
+    id: Id2
     key: Key5
     properties?: Properties2
     source: EdgeEnd
@@ -2076,7 +2102,7 @@ export interface EdgeEnd {
  * ``target_urns`` (after direction normalisation).
  */
 export interface PathHit {
-    edges: Edges2
+    edges: Edges3
     hopCount: Hopcount
     nodes: Nodes
 }

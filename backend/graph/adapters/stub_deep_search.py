@@ -207,6 +207,22 @@ class StubDeepSearchProvider:
                 errors[item_id] = str(exc)
         return {"matches": matches, "errors": errors, "elapsedMs": 0}
 
+    async def deep_search_edge_membership(self, scope, items, edges, *,
+                                          context=None) -> Dict[str, Any]:
+        """Which of ``edges`` (the relationships on screen, by id) each Connections rule
+        matches, inside ``scope`` — the Connections search's own answer, narrowed to them."""
+        wanted = list(dict.fromkeys(e.id for e in edges))
+        matches: Dict[str, List[str]] = {}
+        errors: Dict[str, str] = {}
+        for item_id, predicate in items:
+            try:
+                found = {hit.id for hit in self._connections(predicate, scope)}
+            except CompileError as exc:
+                errors[item_id] = str(exc)
+                continue
+            matches[item_id] = [eid for eid in wanted if eid in found]
+        return {"matches": matches, "errors": errors, "elapsedMs": 0}
+
     def _in_scope(self, scope) -> List[Dict[str, Any]]:
         """The fixture nodes inside a resolved scope: on the canvas, in
         ``visible`` mode; within ``maxDepth`` below the view's roots; else of

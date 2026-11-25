@@ -6917,6 +6917,22 @@ class FalkorDBProvider(GraphDataProvider):
                                          members=context.members)
 
     @_search_reads
+    async def deep_search_edge_membership(self, scope, items, edges, *, context):
+        """Which of ``edges`` (the relationships on screen) match which Connections rule,
+        inside ``scope``. See ``falkordb_search/membership.py``."""
+        from .falkordb_search.membership import evaluate_edge_membership
+        await self._ensure_connected()
+        admit = context.admit
+
+        async def run(cypher, params):
+            if admit is None:
+                return await self._ro_query(cypher, params=params)
+            async with admit():
+                return await self._ro_query(cypher, params=params)
+
+        return await evaluate_edge_membership(self, scope, items, edges, run=run, timeout_s=5.0)
+
+    @_search_reads
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False, values_for=None, subject="entities"):
         """Every property in ``scope`` — of its entities, or ``subject``
