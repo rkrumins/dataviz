@@ -1028,17 +1028,32 @@ def test_a_relationships_values_are_cleaned_up_as_an_entitys_are(V):
     assert [r["reason"] for r in refused] == ["unconvertible"]
 
 
-async def test_an_edge_key_costs_the_graph_no_property_name(monkeypatch, V):
-    """An edge keeps its user properties in one JSON text: however full the graph's names, a new
-    edge key is ok — and the store isn't asked."""
+async def test_an_edge_key_spends_a_property_name_as_an_item_key_does(monkeypatch, V):
+    """Items and relationships draw on one map of property names: a new relationship key is judged
+    as an item's is, past the native budget kept as a value, near the ceiling refused."""
+    from types import SimpleNamespace
     from backend.app.services.view_transfer import sources
 
-    async def engine_for(*_a, **_kw):
-        raise AssertionError("an edge key needs no name budget")
-    monkeypatch.setattr(sources, "engine_for", engine_for)
+    def store(count, names=()):
+        async def engine_for(*_a, **_kw):
+            return SimpleNamespace(provider=_Falkor(count, names))
+        monkeypatch.setattr(sources, "engine_for", engine_for)
+
+    monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "1000")
     body = _request(V, {"kind": "set", "key": "brand-new", "value": 1}, {"edgeIds": ["e1"]})
-    budget = await V._property_name_budget(None, "ws1", {"data_source_id": "ds1"}, body.op, edges=True)
-    assert (budget["verdict"], budget["isNew"], budget["registered"]) == ("ok", False, None)
+
+    async def verdict():
+        budget = await V._property_name_budget(None, "ws1", {"data_source_id": "ds1"}, body.op)
+        return budget["isNew"], budget["verdict"]
+
+    store(10)
+    assert await verdict() == (True, "ok")
+    store(5000)
+    assert await verdict() == (True, "raw")
+    store(65_534 - 256)
+    assert await verdict() == (True, "refused")
+    store(65_534, {"brand-new"})
+    assert await verdict() == (False, "ok")
 
 
 async def test_a_connections_search_target_reads_each_edge_id(monkeypatch, V):

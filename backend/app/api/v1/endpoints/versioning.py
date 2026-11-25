@@ -7982,20 +7982,18 @@ async def _property_refusal(session: AsyncSession, ws_id: str, meta: dict, body:
     return refusal
 
 
-async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict, op: PropertyJobOp,
-                                edges: bool = False) -> dict:
+async def _property_name_budget(session: AsyncSession, ws_id: str, meta: dict,
+                                op: PropertyJobOp) -> dict:
     """Whether the key the op writes fits the graph's property names. FalkorDB numbers each name a
     graph ever held and never frees one: a new name past the native budget is stored raw (it
     works, searched more slowly), and within ``_PROPERTY_NAME_MARGIN`` of the ceiling it is refused
     — at the ceiling a graph takes no new name ever again. Unknown (``null``) on a store that won't
     say, which never refuses. A draft's names register when it is published: this protects that.
-    ``edges``: a relationship keeps its properties in one JSON text, so a key costs no name (ok)."""
+    Items and relationships draw on the one map, so a relationship key is judged as an item's is."""
     from backend.app.providers.falkordb_materialize import _ATTRIBUTE_NAME_LIMIT
     name = {"set": op.key, "fillEmpty": op.key, "rename": op.to, "copy": op.to}.get(op.kind)
     out = {"registered": None, "nativeBudget": None, "ceiling": _ATTRIBUTE_NAME_LIMIT,
-           "isNew": None if name and not edges else False, "verdict": "ok"}
-    if edges:
-        return out
+           "isNew": None if name else False, "verdict": "ok"}
     try:
         from backend.app.providers.falkordb_provider import _native_property_budget
         from backend.app.services.view_transfer.sources import engine_for
@@ -8082,7 +8080,7 @@ async def preview_property_job(
     refusal = ((409, "main_write_forbidden", "Bulk edits go to a draft; main changes only by publishing it.")
                if main else await _property_refusal(session, ws_id, meta, body, user, claims))
     edges = body.target.entity_kind == "edge"
-    budget = await _property_name_budget(session, ws_id, meta, body.op, edges=edges)
+    budget = await _property_name_budget(session, ws_id, meta, body.op)
     if refusal is None and budget["verdict"] == "refused":
         refusal = _property_ceiling(budget)
     counts = None
@@ -8270,8 +8268,7 @@ async def create_property_job(
     if existing is None:
         refusal = await _property_refusal(session, ws_id, meta, body, user, claims)
         if refusal is None:
-            budget = await _property_name_budget(session, ws_id, meta, body.op,
-                                                 edges=body.target.entity_kind == "edge")
+            budget = await _property_name_budget(session, ws_id, meta, body.op)
             refusal = _property_ceiling(budget) if budget["verdict"] == "refused" else None
         if refusal is not None:
             raise HTTPException(status_code=refusal[0], detail=_refusal_detail(refusal))
