@@ -53,9 +53,9 @@ const HOW_TO_FIX =
 const KNOWN = new Map<string, { count: number; why: string }>([
   [
     'components/canvas/create/HierarchyBuilderPanel.tsx',
-    { count: 3, why: 'Three popovers — parent picker, type chip, edge picker — declared beside the '
-      + 'builder aside and rendered inside its `glass-panel`. Same conversion as '
-      + 'BuildPanel below, three times over.' },
+    { count: 2, why: 'Two popovers — type chip, edge picker — declared beside the builder aside '
+      + 'and rendered inside its `glass-panel`. (Its parent picker, ScopePicker, is portalled.) '
+      + 'Same conversion as BuildPanel below, twice over.' },
   ],
   [
     'components/canvas/create/buildmode/BuildPanel.tsx',

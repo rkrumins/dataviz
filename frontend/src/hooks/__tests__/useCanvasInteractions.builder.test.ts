@@ -66,6 +66,17 @@ describe('useCanvasInteractions -> Hierarchy Builder routing', () => {
     expect(s.parentUrn).toBeNull()
   })
 
+  it('keyboardHandlers.onCreate() asks the canvas where to add when it says (the Context View: the selection\'s layer)', async () => {
+    const onCreate = vi.fn()
+    const { result } = renderHook(() => useCanvasInteractions({ onCreate }))
+
+    act(() => result.current.keyboardHandlers.onCreate())
+    await act(settle)
+
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(useHierarchyBuilderStore.getState().isOpen).toBe(false)
+  })
+
   it('keyboardHandlers.onCancel() closes the builder when open and no inline edit is active', async () => {
     useHierarchyBuilderStore.getState().open()
     await settle()

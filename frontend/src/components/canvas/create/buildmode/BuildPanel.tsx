@@ -13,7 +13,7 @@
  * subtree (an unstaged parent can't be linked to), then the survivors are
  * committed via `stageBuildRows` in one O(n) pass.
  */
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -38,6 +38,10 @@ import { BuildOutline } from './BuildOutline'
 import { BuildGrid } from './BuildGrid'
 import { BuildPaste } from './BuildPaste'
 import { useLayers } from '@/store/referenceModelStore'
+import { usePersonaMode } from '@/store/persona'
+import { childTypesLookup } from '../resolveCreationScope'
+import { ScopePickerPopover } from '../ScopePicker'
+import { article, useScopeName } from '../scopePickerHooks'
 
 /** Flag-on (One Placement Contract): the layer Apply draws a new top-level row in. */
 export type ContractRowLayer = (row: Pick<BuildRow, 'name' | 'typeId' | 'tags' | 'properties' | 'layerId'>) => string | undefined
@@ -92,6 +96,11 @@ function Kbd({ children }: { children: React.ReactNode }) {
 
 export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, onRowStaged }: BuildPanelProps) {
   const parentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
+  const scopeLayerId = useHierarchyBuilderStore((s) => s.layerId)
+  const initialTypeId = useHierarchyBuilderStore((s) => s.initialTypeId)
+  const askParent = useHierarchyBuilderStore((s) => s.askParent)
+  const scopeChoices = useHierarchyBuilderStore((s) => s.choices)
+  const topLevelTypeId = useHierarchyBuilderStore((s) => s.topLevelTypeId)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const [activeTab, setActiveTab] = useState<BuildTab>(initialMode === 'paste' || initialMode === 'grid' ? initialMode : 'outline')
 
@@ -114,13 +123,39 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
   )
   const parentType = parentNode ? typeById.get(parentNode.data?.type as string) : undefined
 
+  // Where the top-level rows go — chosen here too, from the scope's own parents first. Asked, and not
+  // answered yet: nothing applies until it is.
+  const technical = usePersonaMode() === 'technical'
+  const nameOf = useScopeName()
+  const waiting = askParent && !parentUrn
+  const [pickerOpen, setPickerOpen] = useState(waiting)
+  const scopeRef = useRef<HTMLDivElement>(null)
+  const childTypes = useMemo(
+    () => childTypesLookup(entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes),
+    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes],
+  )
+  const askedType = initialTypeId ? typeById.get(initialTypeId) : undefined
+  const askedName = askedType?.name ?? 'entity'
+  const canHold = useCallback(
+    (typeId: string) => (waiting && initialTypeId ? childTypes(typeId).includes(initialTypeId) : childTypes(typeId).length > 0),
+    [waiting, initialTypeId, childTypes],
+  )
+  const topLevelType = topLevelTypeId ? typeById.get(topLevelTypeId) : undefined
+  const topLevelLabel = topLevelType
+    ? (technical ? `New top-level ${topLevelType.name}` : `A new ${topLevelType.name}, on its own`)
+    : 'At the top level'
+  const rescope = (urn: string | null) => { useHierarchyBuilderStore.getState().rescope(urn); setPickerOpen(false) }
+
   // A depth-0 build row is a CHILD of `parentType` when Build is entity-scoped
   // (not a genuine top-level root) — threaded into validation ctx as
   // `rootParentType` so it's checked against the scoped parent instead of true
   // top level (undefined when unscoped/layer-only-scoped, unchanged).
   const ctx = useMemo<BuildOntologyCtx>(
-    () => ({ entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, rootParentType: parentType?.id }),
-    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, parentType],
+    () => ({
+      entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes,
+      rootParentType: parentType?.id, rootPreferredType: initialTypeId ?? undefined,
+    }),
+    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, parentType, initialTypeId],
   )
 
   // Live validation — recomputed from the latest rows/ctx on every render, so
@@ -141,8 +176,12 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
   // from its parent).
   const rawLayers = useLayers()
   const layerNameById = useMemo(() => new Map(rawLayers.map((l) => [l.id, l.name])), [rawLayers])
+  const scopeLayerName = scopeLayerId ? layerNameById.get(scopeLayerId) : undefined
+  const parentName = parentNode ? nameOf(parentNode, (parentNode.data?.label as string) ?? parentUrn ?? '') : null
   const placementText = useMemo(() => {
     if (!typeLayerMap && !layerId) return null // non-layered canvas — nothing to say about columns
+    // Inside an entity, a row no one placed is not pinned anywhere: it goes where its parent is.
+    if (parentName && validated.every((r) => !r.layerId)) return `These go inside ${parentName}.`
     const targets = new Set(
       validated.map((r) => (contractRowLayer
         ? contractRowLayer(r)
@@ -153,11 +192,11 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
       if (name) return `These land in ${name}.`
     }
     return 'Top-level entities go to their column; nested items stay under their parent.'
-  }, [typeLayerMap, contractRowLayer, layerId, validated, layerNameById])
+  }, [typeLayerMap, contractRowLayer, layerId, validated, layerNameById, parentName])
 
   const { stageBuildRows } = useStageBuildRows()
   const [applying, setApplying] = useState(false)
-  const canApply = !applying && stageable.length > 0
+  const canApply = !applying && stageable.length > 0 && !waiting
 
   const handleApply = async () => {
     if (!canApply) return
@@ -200,19 +239,53 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
               </button>
             </div>
 
-            <div className="mt-3">
-              {parentNode ? (
+            <div ref={scopeRef} className="mt-3 relative" data-testid="build-scope">
+              {waiting ? (
+                <button
+                  type="button"
+                  onClick={() => setPickerOpen(true)}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-accent-lineage/40 bg-accent-lineage/[0.07] text-xs text-left hover:bg-accent-lineage/10 transition-colors"
+                >
+                  <LucideIcons.CornerDownRight className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
+                  <span className="min-w-0 flex-1 text-ink truncate">
+                    {technical ? 'Choose a parent for these' : 'Where do these'} <span className="font-semibold">{askedType?.pluralName ?? `${askedName}s`}</span>{technical ? '' : ' go?'}
+                  </span>
+                  <span className="text-[11px] font-medium text-accent-lineage flex-shrink-0">Choose</span>
+                </button>
+              ) : parentNode ? (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-xs">
                   <TypeChip type={parentType} />
                   <span className="min-w-0 flex-1 text-ink-muted truncate">
-                    Adding inside <span className="font-semibold text-ink">{(parentNode.data?.label as string) ?? parentUrn}</span>
+                    Adding inside <span className="font-semibold text-ink">{nameOf(parentNode, (parentNode.data?.label as string) ?? parentUrn)}</span>
+                    {technical && parentType && <span> · {parentType.name}</span>}
                   </span>
+                  <button type="button" onClick={() => setPickerOpen((v) => !v)} className="text-[11px] font-medium text-accent-lineage hover:underline flex-shrink-0">
+                    Change
+                  </button>
                 </div>
               ) : (
                 <div className="flex items-center gap-2 px-1 text-[11px] text-ink-muted">
                   <LucideIcons.Globe className="w-3 h-3 flex-shrink-0" />
-                  <span>Adding at the top level</span>
+                  <span className="flex-1">Adding at the top level</span>
+                  <button type="button" onClick={() => setPickerOpen((v) => !v)} className="font-medium text-accent-lineage hover:underline">
+                    Change
+                  </button>
                 </div>
+              )}
+              {pickerOpen && (
+                <ScopePickerPopover
+                  anchorRef={scopeRef}
+                  nodes={canvasNodes}
+                  typeById={typeById}
+                  canHold={canHold}
+                  choices={scopeChoices}
+                  choicesLabel={waiting ? `Can hold ${article(askedName)} ${askedName}` : scopeLayerName ? `In ${scopeLayerName}` : undefined}
+                  emptyText={waiting ? `Nothing on the canvas can hold ${article(askedName)} ${askedName} yet.` : undefined}
+                  topLevel={{ label: topLevelLabel, typeId: topLevelTypeId, onPick: () => rescope(null) }}
+                  selectedUrn={waiting ? undefined : parentUrn}
+                  onPick={(urn) => rescope(urn)}
+                  onClose={() => setPickerOpen(false)}
+                />
               )}
             </div>
           </div>
@@ -265,7 +338,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
               chips/status always match. ── */}
           <div className={cn('flex-1 min-h-0', activeTab === 'grid' ? 'overflow-hidden' : 'overflow-y-auto custom-scrollbar')}>
             {activeTab === 'outline' ? (
-              <BuildOutline rows={validated} typeById={typeById} />
+              <BuildOutline rows={validated} typeById={typeById} rootParentType={parentType?.id ?? null} />
             ) : activeTab === 'grid' ? (
               <BuildGrid rows={validated} typeById={typeById} fallbackLayerId={layerId} contractRowLayer={contractRowLayer} />
             ) : (
@@ -323,13 +396,15 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
             <div className="min-w-0 flex flex-col gap-0.5">
               {placementText && <span className="text-[10px] text-ink-muted/70 truncate">{placementText}</span>}
               <span className="text-[10px] text-ink-muted">
-                {rows.length === 0
-                  ? 'Nothing to build yet'
-                  : stageable.length === validated.length
-                    ? `${stageable.length} ready to apply`
-                    // validated.length (not rows.length) — validation can add
-                    // auto-inserted ancestor rows, so it's the true denominator.
-                    : `${stageable.length} of ${validated.length} ready to apply`}
+                {waiting
+                  ? 'Choose where these go to apply them'
+                  : rows.length === 0
+                    ? 'Nothing to build yet'
+                    : stageable.length === validated.length
+                      ? `${stageable.length} ready to apply`
+                      // validated.length (not rows.length) — validation can add
+                      // auto-inserted ancestor rows, so it's the true denominator.
+                      : `${stageable.length} of ${validated.length} ready to apply`}
               </span>
             </div>
             <div className="flex items-center gap-2">

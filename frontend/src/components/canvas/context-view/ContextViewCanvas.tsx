@@ -27,6 +27,8 @@ import {
   useViewIsContainmentEdge,
   useViewRelationshipTypes,
   useViewEntityTypes,
+  useViewRootEntityTypes,
+  useViewEntityTypeHierarchyMap,
 } from '@/hooks/useViewSchema'
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
@@ -116,6 +118,10 @@ import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
 import { lineForTarget, targetFromLine, targetFromMembers, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
+import {
+  childTypesLookup, resolveCreationScope, SCOPE_CHOICE_LIMIT, type CreationScope, type ScopeNode,
+} from '../create/resolveCreationScope'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 import { BuildPanel, type ContractRowLayer } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, buildTypeLayerMapFromContract, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
@@ -480,6 +486,13 @@ function siblingContext(
     layerId,
   }
 }
+
+/** The bottom-centre slot of the frame pill and the framed chrome: on top of
+ *  the stack below it — the dock, the layer strip, the selection bar — never
+ *  under any of them. */
+const FRAME_SLOT_BOTTOM = 'calc(var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px) + max(0.75rem, var(--selection-bar-height, 0px)))'
+/** The slot's band: what is in it, and its 0.75rem lift off the chrome below. */
+const reserveFrameSlot = (el: HTMLElement) => el.offsetHeight + 12
 
 /** `gap-1.5` on the dock column below — the space between two stacked headers. */
 const DOCK_GAP_PX = 6
@@ -925,7 +938,10 @@ export function ContextViewCanvas({
   // container's insides in a view that places them nowhere, say). Filled in
   // once the layers exist, below.
   const selectableEverythingRef = useRef<() => readonly string[]>(() => useCanvasStore.getState().nodes.map((n) => n.id))
+  // N: adds where the selection's layer would (see openCreation, below).
+  const createFromKeyRef = useRef<() => void>(() => useHierarchyBuilderStore.getState().open())
   const interactions = useCanvasInteractions({
+    onCreate: () => createFromKeyRef.current(),
     selectableIds: () => selectableEverythingRef.current(),
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     // A new entity is one to fill in: its details open, whatever a click does.
@@ -4193,12 +4209,30 @@ export function ContextViewCanvas({
   // Stable per-layer create/build/context-menu handlers — LayerColumn is
   // React.memo'd, so these must keep ONE identity (an inline arrow at the
   // render site re-renders every column on every canvas render).
-  const openBuilderForLayer = useCallback((layerId: string) => {
-    useHierarchyBuilderStore.getState().open({ layerId })
+  //
+  // Every way of adding from a layer — its "+", its menu's Add entity and Build, Create Entity Here,
+  // the blank model's hero, N on something in it — and the palette's Create <Type> asks
+  // resolveCreationScope where the new entity goes: inside the node a layer is mapped to, inside
+  // the selection, at the top level, or "where?" for a type that needs a parent. It reads what the
+  // canvas holds at the moment of asking, through `creationScopeRef` (filled in below, once those
+  // maps exist), so these handlers keep one identity.
+  const creationScopeRef = useRef<(layerId: string | null, typeId?: string) => CreationScope | null>(() => null)
+  const openCreation = useCallback((layerId: string | null, opts: { surface?: 'rail' | 'build'; typeId?: string } = {}) => {
+    const scope = creationScopeRef.current(layerId, opts.typeId)
+    useHierarchyBuilderStore.getState().open({
+      surface: opts.surface,
+      layerId: layerId ?? undefined,
+      initialTypeId: (scope?.preferredTypeId ?? opts.typeId) ?? undefined,
+      ...(scope && {
+        parentUrn: scope.parentUrn ?? undefined,
+        askParent: scope.askParent,
+        choices: scope.choices,
+        topLevelTypeId: scope.topLevelTypeId ?? undefined,
+      }),
+    })
   }, [])
-  const openBuildForLayer = useCallback((layerId: string) => {
-    useHierarchyBuilderStore.getState().openBuild({ layerId })
-  }, [])
+  const openBuilderForLayer = useCallback((layerId: string) => openCreation(layerId), [openCreation])
+  const openBuildForLayer = useCallback((layerId: string) => openCreation(layerId, { surface: 'build' }), [openCreation])
   const handleLayerContextMenuOpen = useCallback((e: React.MouseEvent, layerId: string) => {
     // During a trace too: what it offers that writes (Create Entity Here) is
     // gated on `canvasWritable`, and the rest only reads.
@@ -4873,6 +4907,82 @@ export function ContextViewCanvas({
     return out
   }, [sortedLayers, nodeMap, hydrationStatus, activeReferenceLayout])
   const isHydratingInitial = hydrationPhase !== 'complete'
+
+  // What resolveCreationScope reads — see openCreation. All lookups but `parentsFor`, which scans
+  // the canvas once, and only for a type that needs a parent.
+  const creationRootTypes = useViewRootEntityTypes()
+  const creationHierarchyMap = useViewEntityTypeHierarchyMap()
+  const creationChildTypes = useMemo(
+    () => childTypesLookup(schemaEntityTypes, creationRootTypes, creationHierarchyMap, relationshipTypes, containmentEdgeTypes),
+    [schemaEntityTypes, creationRootTypes, creationHierarchyMap, relationshipTypes, containmentEdgeTypes],
+  )
+  const scopeNodeOf = useCallback((idOrUrn: string): ScopeNode | undefined => {
+    const n = nodeMap.get(idOrUrn) ?? nodeMap.get(urnToIdMap.get(idOrUrn) ?? '')
+    const typeId = n?.data?.type as string | undefined
+    return n && typeId && n.data?.isPending !== 'delete' ? { urn: (n.data?.urn as string) || n.id, typeId } : undefined
+  }, [nodeMap, urnToIdMap])
+  const resolveScopeFor = useCallback((layerId: string | null, typeId?: string): CreationScope => {
+    const layer = layerId ? sortedLayers.find((l) => l.id === layerId) : undefined
+    // The layer's own top-level entities, a group's members among them.
+    const layerRoots: ScopeNode[] = []
+    const walk = (rows: readonly HierarchyNode[] | undefined) => {
+      for (const r of rows ?? []) {
+        if (layerRoots.length >= SCOPE_CHOICE_LIMIT) return
+        if (r.isLogical) { walk(r.children); continue }
+        const typeId = (r.data?.type as string) || r.entityTypeOption
+        if (typeId) layerRoots.push({ urn: r.urn || r.id, typeId })
+      }
+    }
+    if (layer) walk(nodesByLayer.get(layer.id))
+    const { selectedNodeIds, nodes: canvasNodes } = useCanvasStore.getState()
+    return resolveCreationScope(layer, {
+      typeId,
+      selectionId: selectedNodeIds.length === 1 ? selectedNodeIds[0] : null,
+      anchorIssue: layer ? anchorIssueByLayer.get(layer.id) : undefined,
+      node: scopeNodeOf,
+      layerOf: (id) => nodeLayerMap.get(id) ?? nodeLayerMap.get(urnToIdMap.get(id) ?? ''),
+      layerRoots,
+      childTypes: creationChildTypes,
+      // What the canvas shows (a row in some column, or a column's own entity) that can hold the
+      // type, up to what is offered, by name.
+      parentsFor: (t) => {
+        const columns = new Set(sortedLayers.filter((l) => l.anchorUrn && !anchorIssueByLayer.has(l.id)).map((l) => l.anchorUrn!))
+        const out: Array<ScopeNode & { name: string }> = []
+        for (const n of canvasNodes) {
+          if (out.length >= SCOPE_CHOICE_LIMIT) break
+          const nt = n.data?.type as string | undefined
+          const urn = (n.data?.urn as string) || n.id
+          if (!nt || n.data?.isPending === 'delete' || !(nodeLayerMap.has(n.id) || columns.has(urn))) continue
+          if (creationChildTypes(nt).includes(t)) out.push({ urn, typeId: nt, name: resolveEntityName(n.data, personaMode, n.id) })
+        }
+        return out.sort((a, b) => a.name.localeCompare(b.name)).map(({ urn, typeId }) => ({ urn, typeId }))
+      },
+      lastTypeIn: useHierarchyBuilderStore.getState().lastTypeIn,
+    })
+  }, [sortedLayers, nodesByLayer, anchorIssueByLayer, scopeNodeOf, nodeLayerMap, urnToIdMap, creationChildTypes, personaMode])
+  // N: in the selection's layer when it is in one; otherwise the top level, as it always was.
+  const createFromKey = useCallback(() => {
+    const { selectedNodeIds } = useCanvasStore.getState()
+    const layerId = selectedNodeIds.length === 1 ? nodeLayerMap.get(selectedNodeIds[0]) : undefined
+    if (layerId) openCreation(layerId)
+    else useHierarchyBuilderStore.getState().open()
+  }, [nodeLayerMap, openCreation])
+  useEffect(() => {
+    creationScopeRef.current = resolveScopeFor
+    createFromKeyRef.current = createFromKey
+  }, [resolveScopeFor, createFromKey])
+  // A column mapped to a node adds inside it: what its "+" and menu say.
+  const addInsideNameByLayer = useMemo(() => {
+    const out = new Map<string, string>()
+    for (const layer of sortedLayers) {
+      if (!layer.anchorUrn || anchorIssueByLayer.has(layer.id)) continue
+      const n = nodeMap.get(layer.anchorUrn) ?? nodeMap.get(urnToIdMap.get(layer.anchorUrn) ?? '')
+      const typeId = n?.data?.type as string | undefined
+      if (!n || !typeId || creationChildTypes(typeId).length === 0) continue
+      out.set(layer.id, resolveEntityName(n.data, personaMode, n.id))
+    }
+    return out
+  }, [sortedLayers, anchorIssueByLayer, nodeMap, urnToIdMap, creationChildTypes, personaMode])
 
   // Floating loading notifications — keep the full set so every long-running operation
   // is explicitly announced. Wording is centralised here.
@@ -6502,6 +6612,7 @@ export function ContextViewCanvas({
       // The header's own actions, in both views: the Business header keeps to the essentials,
       // and a column too narrow for its tray of icons folds them into this menu (its ⋯).
       onAddEntity: canEditGraph && !serverPlaced ? () => openBuilderForLayer(layer.id) : undefined,
+      addInside: addInsideNameByLayer.get(layer.id),
       onNewGroup: isDraft && !traceActive && !serverPlaced ? () => requestNewGroup(layer.id) : undefined,
       onBuild: canEditGraph && !serverPlaced ? () => openBuildForLayer(layer.id) : undefined,
       // Everything the view places in this layer, found as search's Layer filter finds it.
@@ -6522,7 +6633,7 @@ export function ContextViewCanvas({
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, canEditGraph, subsetView,
     openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable,
-    selectableInLayer, setSelection])
+    selectableInLayer, setSelection, addInsideNameByLayer])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7284,6 +7395,11 @@ export function ContextViewCanvas({
   // the shortcut becomes learnable. Dismissed automatically when the
   // framed selection changes or clears.
   const [framedContext, setFramedContext] = useState<{ nodeId: string; count: number } | null>(null)
+  const framedShown = !!framedContext && selectedNodeId === framedContext.nodeId
+  // Their slot, stacked on the chrome below it (FRAME_SLOT_BOTTOM), reserves
+  // its band while either shows.
+  const frameSlotRef = useRef<HTMLDivElement>(null)
+  useBandReservation(frameSlotRef, '--frame-slot-height', reserveFrameSlot, !!framePill || framedShown)
   useEffect(() => {
     if (!framedContext) return
     if (selectedNodeId === framedContext.nodeId) return
@@ -7665,6 +7781,9 @@ export function ContextViewCanvas({
               focusLabel={tracedLabel ?? undefined}
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
+              // An entity only the walk holds opens too: the drawer resolves
+              // it through `resolveTraceNode`.
+              onOpenDetails={(ref) => useCanvasStore.getState().openNodeDrawer(urnToIdMap.get(ref) ?? ref)}
               outsideView={overlay.view?.outsideView ?? 0}
               keep={traceKeepActions}
               sinceSaved={sinceSaved}
@@ -8051,7 +8170,8 @@ export function ContextViewCanvas({
             it to the trace on screen — and read it (Details) or export it, which only read, so the
             trace's write lock doesn't apply. Only once the reader selects something other than
             what is traced: the selection a trace starts from is the trace's own, and the dock
-            already reads it. The same actions lead a trace card's context menu. */}
+            already reads it, its focus chip opening the details — a bar repeating that would
+            only take height from the columns. The same actions lead a trace card's context menu. */}
         {traceActive && bulkSelection.length > 0 && !selectionIsTraced(bulkSelection) && (
           <SelectionBar
             nodeIds={bulkSelection}
@@ -8122,6 +8242,8 @@ export function ContextViewCanvas({
           {canvasDockMinimized ? (
             <button
               type="button"
+              // The whole dock's footprint while minimized: the band reserves it.
+              data-dock-header
               onClick={() => setCanvasDockMinimized(false)}
               className="self-end flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-canvas-elevated border border-glass-border shadow-lg text-[11.5px] text-ink-muted hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
               title="Show Data loads and Flows"
@@ -8198,6 +8320,15 @@ export function ContextViewCanvas({
           }}
         />
 
+        {/* The bottom-centre slot: the frame pill, and the framed chrome it
+            morphs into. It floats over the columns' foot, so it reserves its
+            band as the chrome under it does, and a column's last rows — and
+            its "↓ N more" — stay clear of it. */}
+        <div
+          ref={frameSlotRef}
+          className="absolute left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 pointer-events-none"
+          style={{ bottom: FRAME_SLOT_BOTTOM }}
+        >
         {/* Frame pill — selection has off-screen neighbors; offer to frame
             them (never auto-scroll) or open the lens. */}
         <AnimatePresence>
@@ -8208,8 +8339,7 @@ export function ContextViewCanvas({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.18 }}
-              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
-              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border border-white/10 shadow-lg bg-canvas-elevated/90 text-[11px] text-ink-muted pointer-events-auto"
               data-canvas-interactive
             >
               <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
@@ -8243,15 +8373,14 @@ export function ContextViewCanvas({
             pill (above) morphs into, and teaches the Esc shortcut. Same
             bottom-center slot as the offer for spatial continuity. */}
         <AnimatePresence>
-          {framedContext && selectedNodeId === framedContext.nodeId && (
+          {framedShown && framedContext && (
             <motion.div
               key="framed-chrome"
               initial={{ opacity: 0, y: 8, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 8, scale: 0.98 }}
               transition={{ duration: 0.18 }}
-              className="absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
-              style={{ bottom: 'calc(3.25rem + var(--trace-dock-height, 0px))' }}
+              className="flex items-center gap-2.5 pl-3 pr-1.5 py-1.5 rounded-full backdrop-blur-md border border-accent-lineage/25 shadow-lg shadow-accent-lineage/10 bg-canvas-elevated/95 text-[11px] text-ink-muted pointer-events-auto"
               data-canvas-interactive
             >
               <Crosshair className="w-3.5 h-3.5 flex-shrink-0 text-accent-lineage" />
@@ -8277,6 +8406,7 @@ export function ContextViewCanvas({
             </motion.div>
           )}
         </AnimatePresence>
+        </div>
 
         {/* Layer Strip — docked horizontal navigator: you-are-here chips
             per layer, click-to-jump, add-layer (draft) and Fit. Frame-
@@ -8383,9 +8513,7 @@ export function ContextViewCanvas({
             modelName={activeView?.name ?? null}
             isDraft={isDraft}
             canManage={canManage}
-            onAddEntity={() => {
-              useHierarchyBuilderStore.getState().open({ layerId: sortedLayers[0]?.id })
-            }}
+            onAddEntity={() => openCreation(sortedLayers[0]?.id ?? null)}
             onStartBuilding={() => { void ensureDraftOpen() }}
           />
         )}
@@ -8414,10 +8542,13 @@ export function ContextViewCanvas({
           data-frosted-cards={frostedCards || undefined}
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
-          // dock, layer strip, edge legend) so a column's last row can always scroll
-          // clear of it — and be clicked. Both variables are published by
-          // the chrome itself and are 0 when it is not rendered.
-          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px), var(--selection-bar-height, 0px)))' }}
+          // dock, layer strip, edge legend, selection bar) so a column's last
+          // row can always scroll clear of it — and be clicked. The variables
+          // are published by the chrome itself and are 0 when it is not
+          // rendered. The selection bar floats ABOVE the layer strip, and the
+          // frame slot above both, so the three stack; the legend sits beside
+          // them, on the dock.
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--edge-legend-height, 0px), var(--layer-strip-height, 0px) + var(--selection-bar-height, 0px) + var(--frame-slot-height, 0px)))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
@@ -8594,6 +8725,7 @@ export function ContextViewCanvas({
                 // Published shows zero mutation entry points for anyone.
                 onAddChild={canvasWritable && !serverPlaced ? handleAddChildEntity : undefined}
                 onAddToLayer={canEditGraph && !serverPlaced ? openBuilderForLayer : undefined}
+                addInsideName={addInsideNameByLayer.get(layer.id)}
                 onBuildToLayer={canEditGraph && !serverPlaced ? openBuildForLayer : undefined}
                 onBeginConnect={canvasWritable ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={handleLayerContextMenuOpen}
@@ -8734,7 +8866,17 @@ export function ContextViewCanvas({
               // canonical view-config entry (keyed by the temp urn, remapped on save) plus the
               // optimistic session assignment.
               // Flag-on: pinned only when the view is curated or the contract would place it elsewhere.
-              const layer = parentUrn ? undefined : placementSpec
+              // One exception for a child: added from a column that holds its type (an App from the
+              // Apps column) under a parent drawn in another column, it is that column's by its own
+              // rule — pinned there, it lands where the reader added it rather than in the parent's.
+              const created = useCanvasStore.getState().nodes.find(n => n.id === tempUrn)
+              const createdType = typeof created?.data?.type === 'string' ? created.data.type : ''
+              const fromLayer = builderLayerId ? sortedLayers.find(l => l.id === builderLayerId) : undefined
+              const parentLayer = parentUrn ? renderedLayerRef.current.get(urnToIdMap.get(parentUrn) ?? parentUrn) : undefined
+              const holdsItsType = !!fromLayer && !!createdType && (fromLayer.entityTypes ?? []).includes(createdType)
+              const layer = parentUrn
+                ? (holdsItsType && parentLayer !== fromLayer!.id ? fromLayer!.id : undefined)
+                : placementSpec
                 ? contractPin(placementSpec,
                   factsFromCanvasData(useCanvasStore.getState().nodes.find(n => n.id === tempUrn)?.data, tempUrn),
                   builderLayerId, sortedLayers[0]?.id)
@@ -8921,8 +9063,10 @@ export function ContextViewCanvas({
         onCreateNode={canvasWritable ? (_pos, layerId) => {
           // Right-clicked an empty layer column → scope the new node to that
           // layer so it lands there (and is assigned on stage, see onEntityStaged).
-          useHierarchyBuilderStore.getState().open({ layerId })
+          openCreation(layerId ?? null)
         } : undefined}
+        createNodeInside={contextTarget?.type === 'canvas' && contextTarget.layerId
+          ? addInsideNameByLayer.get(contextTarget.layerId) : undefined}
         onSelectAll={interactions.selectAll}
         selectLayer={canvasMenuSelectLayer}
         layers={sortedLayers}
@@ -8952,7 +9096,9 @@ export function ContextViewCanvas({
         commands={searchCommands}
         onCreateEntity={canEditGraph ? (typeId) => {
           interactions.closeCommandPalette()
-          useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
+          // A top-level type at the top level, as before; any other inside the selection when it
+          // can hold one, else wherever the user picks.
+          openCreation(null, { typeId })
         } : undefined}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />

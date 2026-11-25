@@ -17,9 +17,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { Layers, X } from 'lucide-react'
+import { Layers, PanelRightOpen, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Kbd } from '@/components/ui/Kbd'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useTraceEscStack } from './useTraceEscStack'
 
 export interface TraceSeed {
@@ -34,12 +35,14 @@ export interface TraceSeedsPopoverProps {
   seeds: readonly TraceSeed[]
   /** Drop one seed from the trace. */
   onRemove: (urn: string) => void
+  /** Open one seed's details. Absent, rows offer Remove only. */
+  onOpenDetails?: (urn: string) => void
   onClose: () => void
   /** The trigger button — the panel anchors above it. */
   triggerRef: React.RefObject<HTMLElement | null>
 }
 
-export function TraceSeedsPopover({ seeds, onRemove, onClose, triggerRef }: TraceSeedsPopoverProps) {
+export function TraceSeedsPopover({ seeds, onRemove, onOpenDetails, onClose, triggerRef }: TraceSeedsPopoverProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   /** Row to focus once a removal has re-rendered the list. */
   const refocusAt = useRef<number | null>(null)
@@ -145,7 +148,8 @@ export function TraceSeedsPopover({ seeds, onRemove, onClose, triggerRef }: Trac
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.15, ease: 'easeOut', delay: Math.min(i, 8) * 0.02 }}
             // A row is one focus stop: the whole row is what the arrows
-            // move between; Delete, or its X one Tab away, removes it.
+            // move between; Delete, or its X one Tab away, removes it, and
+            // Details sits beside the X.
             data-seed-row
             tabIndex={-1}
             className={cn(
@@ -167,6 +171,25 @@ export function TraceSeedsPopover({ seeds, onRemove, onClose, triggerRef }: Trac
               <span className="shrink-0 max-w-[112px] truncate px-1.5 py-0.5 rounded-md bg-accent-lineage/15 text-accent-lineage text-[9.5px] font-bold uppercase tracking-wider border border-accent-lineage/25">
                 {seed.typeId}
               </span>
+            )}
+            {onOpenDetails && (
+              <HoverTip label="Open details" className="inline-flex shrink-0">
+                <button
+                  type="button"
+                  data-seed-details
+                  aria-label={`Open details for ${seed.label}`}
+                  onClick={() => onOpenDetails(seed.urn)}
+                  className={cn(
+                    'inline-flex items-center justify-center w-6 h-6 rounded-md text-ink-muted',
+                    'opacity-60 group-hover:opacity-100 group-focus-within:opacity-100',
+                    'hover:bg-accent-lineage/15 hover:text-accent-lineage',
+                    'focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    'transition-all duration-150',
+                  )}
+                >
+                  <PanelRightOpen className="w-3.5 h-3.5" strokeWidth={2.2} />
+                </button>
+              </HoverTip>
             )}
             <button
               type="button"

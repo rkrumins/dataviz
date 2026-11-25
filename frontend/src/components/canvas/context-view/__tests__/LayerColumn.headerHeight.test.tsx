@@ -1,27 +1,30 @@
 /**
- * Every open layer header is one height.
+ * Every open layer header is one height — at each of Display › Header size's
+ * sizes.
  *
  * A long name used to wrap and push the count under it, and a description
  * added up to two more lines, so neighbouring headers ended at different
  * heights and the rows below them did not line up. Now the title row has one
- * height whatever it holds: the name up to two lines and then an ellipsis,
+ * height whatever it holds: the name up to its lines and then an ellipsis,
  * the count and the order marks at the row's end, and the description in the
  * card the name opens. jsdom has no layout, so the height is read where it is
  * set; the Context View harness is where the headers are measured.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   ViewRowSearchContext,
   ViewSearchSessionContext,
 } from '@/components/canvas/search/session/ViewSearchSessionContext'
 import { usePersonaStore } from '@/store/persona'
+import { usePreferencesStore, type CanvasHeaderSize } from '@/store/preferences'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import { stubSession } from '@/test/stubSearchSession'
 import type { ViewLayerConfig } from '@/types/schema'
 
 import { LayerColumn } from '../LayerColumn'
+import { layerHeaderTokens } from '../density'
 
 const SHORT = 'BI'
 const LONG = 'Curated reporting marts for finance and the executive leadership team'
@@ -61,9 +64,13 @@ beforeEach(() => {
   installJsdomLayout()
   usePersonaStore.setState({ mode: 'technical' })
 })
+afterEach(() => usePreferencesStore.setState({ canvasHeaderSize: 'comfortable' }))
+
+const SIZES: CanvasHeaderSize[] = ['compact', 'comfortable', 'spacious']
 
 describe('LayerColumn header — one height', () => {
-  it('gives the title row the same height whatever the name, the description or the order', () => {
+  it.each(SIZES)('gives the title row the same height whatever the name, the description or the order (%s)', (size) => {
+    usePreferencesStore.setState({ canvasHeaderSize: size })
     const heights: string[] = []
     for (const [layer, extra] of [
       [{ name: SHORT }, {}],
@@ -79,7 +86,56 @@ describe('LayerColumn header — one height', () => {
       unmount()
     }
     expect(new Set(heights).size).toBe(1)
-    expect(heights[0]).toMatch(/^\d+px$/)
+    expect(heights[0]).toBe(`${layerHeaderTokens(size).rowPx}px`)
+  })
+
+  it('draws each size at its own height, Comfortable as the header has always been', () => {
+    const rows = SIZES.map((size) => {
+      usePreferencesStore.setState({ canvasHeaderSize: size })
+      const { unmount } = renderHeader({ name: LONG })
+      const row = titleRowHeight(LONG)
+      unmount()
+      return row
+    })
+    expect(new Set(rows).size).toBe(3)
+    expect(SIZES.map((size) => layerHeaderTokens(size).heightPx)).toEqual([45, 64, 71])
+
+    // Comfortable, the default: the 39px row, `py-3`, the 36px tile and two lines of a 14px name.
+    usePreferencesStore.setState({ canvasHeaderSize: 'comfortable' })
+    renderHeader({ name: LONG })
+    expect(titleRowHeight(LONG)).toBe('39px')
+    const header = screen.getByRole('group', { name: LONG })
+    expect(header.className).toMatch(/\bpx-4 py-3\b/)
+    expect(header.querySelector('.w-9.h-9.rounded-xl')).not.toBeNull()
+    expect(screen.getByRole('heading', { name: LONG }).className).toMatch(/\btext-sm\b.*\bline-clamp-2\b/)
+  })
+
+  it('gives a compact header one line of name, and a spacious one a larger name and icon', () => {
+    usePreferencesStore.setState({ canvasHeaderSize: 'compact' })
+    const { unmount } = renderHeader({ name: LONG })
+    expect(screen.getByRole('heading', { name: LONG }).className).toMatch(/\bline-clamp-1\b/)
+    expect(screen.getByRole('group', { name: LONG }).className).toMatch(/\bpy-2\b/)
+    expect(screen.getByRole('group', { name: LONG }).querySelector('.w-7.h-7')).not.toBeNull()
+    unmount()
+
+    usePreferencesStore.setState({ canvasHeaderSize: 'spacious' })
+    renderHeader({ name: LONG })
+    expect(screen.getByRole('heading', { name: LONG }).className).toMatch(/\btext-\[15px\].*\bline-clamp-2\b/)
+    expect(screen.getByRole('group', { name: LONG }).className).toMatch(/\bpy-3\.5\b/)
+    expect(screen.getByRole('group', { name: LONG }).querySelector('.w-10.h-10')).not.toBeNull()
+  })
+
+  it('lands a folded layer’s lines below a header of the size the open columns have', () => {
+    for (const size of SIZES) {
+      usePreferencesStore.setState({ canvasHeaderSize: size })
+      const node = { id: 'a', urn: 'a', typeId: 'dataset', name: 'a', data: {}, children: [], depth: 0, entityTypeOption: 'dataset', tags: [] }
+      const { container, unmount } = renderHeader({ name: SHORT }, {
+        nodes: [node] as never, isFolded: true, foldPorts: new Map([['a', { in: 1, out: 0 }]]),
+      })
+      const anchors = container.querySelector<HTMLElement>('[data-fold-anchor]')!.parentElement!
+      expect(anchors.style.top).toBe(`${layerHeaderTokens(size).heightPx}px`)
+      unmount()
+    }
   })
 
   it('keeps that height while the name is being changed', () => {

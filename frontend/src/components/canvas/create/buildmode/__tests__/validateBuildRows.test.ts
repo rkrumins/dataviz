@@ -452,3 +452,41 @@ describe('validateBuildRows — Fix 3: scoped Build depth-0 rows validate agains
     expect(byId(result, p1.parentId!).typeId).toBe('domain')
   })
 })
+
+// Build opened from a layer whose scope prefers a type (an "Apps" layer's App, inside a Domain): a
+// depth-0 row with no type is taken to be that one where it may go, not merely the first allowed.
+describe('validateBuildRows — the scope\'s preferred type for an untyped depth-0 row', () => {
+  const twoKids: EntityTypeSchema[] = [
+    ...entityTypes.map((t) => (t.id === 'domain' ? et('domain', ['dataPlatform', 'app'], [], 0) : t)),
+    et('app', [], ['domain'], 1),
+  ]
+  const twoCtx: BuildOntologyCtx = {
+    ...ctx,
+    entityTypes: twoKids,
+    hierarchyMap: Object.fromEntries(twoKids.map((t) => [t.id, { canContain: t.hierarchy.canContain, canBeContainedBy: t.hierarchy.canBeContainedBy }])),
+    relationshipTypes: [...relationshipTypes, rt('CONTAINS_APP', ['domain'], ['app'])],
+    rootParentType: 'domain',
+  }
+  // Under a domain both app and dataPlatform (both L1) may go; app sorts first by name.
+  it('takes the preferred type when it may go there', () => {
+    const rows = [makeRow({ id: 'r', name: 'Billing', parentId: null })]
+    expect(byId(validateBuildRows(rows, twoCtx), 'r').typeId).toBe('app')
+    expect(byId(validateBuildRows(rows, { ...twoCtx, rootPreferredType: 'dataPlatform' }), 'r').typeId).toBe('dataPlatform')
+  })
+
+  it('ignores it where it may not go, and for nested rows', () => {
+    const rows = [
+      makeRow({ id: 'r', name: 'Billing', parentId: null }),
+      makeRow({ id: 'c', name: 'Inner', parentId: 'r', typeId: null }),
+    ]
+    // Under the domain, a dataset may not go: inferred as usual. Inside it (a dataPlatform, once
+    // asked for), the preference is not consulted.
+    const out = validateBuildRows(rows, { ...twoCtx, rootPreferredType: 'dataset' })
+    expect(byId(out, 'r').typeId).toBe('app')
+    const nested = validateBuildRows([
+      makeRow({ id: 'r', name: 'Warehouse', parentId: null, typeId: 'dataPlatform' }),
+      makeRow({ id: 'c', name: 'Inner', parentId: 'r' }),
+    ], { ...twoCtx, rootPreferredType: 'app' })
+    expect(byId(nested, 'c').typeId).toBe('container')
+  })
+})

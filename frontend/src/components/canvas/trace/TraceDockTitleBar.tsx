@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { UseUnifiedTraceResult } from '@/hooks/useUnifiedTrace'
 import { DEFAULT_TRACE_DEPTH } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -51,6 +52,11 @@ export interface TraceDockTitleBarProps {
    *  "Tracing N entities", which lists them and drops one on request. */
   seeds?: readonly TraceSeed[]
   onRemoveSeed?: (urn: string) => void
+  /** Open a traced entity's details, by urn (or, before the walk has named
+   *  the seeds, the canvas id). Makes the focus chip — and each row of the
+   *  combined list — a way into the details panel, which the Business view
+   *  otherwise only opens on request. Absent = the chip only names. */
+  onOpenDetails?: (urnOrId: string) => void
   /** Export, save as view, keep in this browser. Absent = no control. */
   keep?: TraceKeepActions
   /** What changed since the saved copy of this trace, once its walk has
@@ -95,6 +101,7 @@ export function TraceDockTitleBar({
   focusLabel,
   seeds,
   onRemoveSeed,
+  onOpenDetails,
   keep,
   sinceSaved,
 }: TraceDockTitleBarProps) {
@@ -117,6 +124,7 @@ export function TraceDockTitleBar({
   const focusNode = trace.focusId ? displayMap.get(trace.focusId) : undefined
   const focusName = focusLabel || focusNode?.name || trace.focusId || 'Unknown'
   const focusType = focusNode?.typeId
+  const focusRef = seeds?.[0]?.urn ?? trace.focusId
   const liveMsg = `Tracing ${focusName}${focusType ? `, ${focusType}` : ''}. ${trace.upstreamCount} upstream, ${trace.downstreamCount} downstream nodes.`
 
   const upDisplay = useCountUp(trace.upstreamCount)
@@ -319,33 +327,38 @@ export function TraceDockTitleBar({
             <TraceSeedsPopover
               seeds={seeds!}
               onRemove={onRemoveSeed!}
+              onOpenDetails={onOpenDetails}
               onClose={() => { setSeedsOpen(false); seedsTriggerRef.current?.focus() }}
               triggerRef={seedsTriggerRef}
             />
           )}
         </div>
+      ) : onOpenDetails && focusRef ? (
+        // The traced entity, one click from its details — in every view. The
+        // Business view opens details only when asked, and during a trace the
+        // selection bar stands aside for the dock, so this is where to ask.
+        // Shrinks with the dock like the combined chip: the name gives way
+        // inside its own box, never spilling over the counts beside it.
+        <HoverTip label="Open details" detail={focusName} className="flex min-w-[4.5rem] shrink">
+          <button
+            type="button"
+            data-trace-control
+            aria-label={`Open details for ${focusName}`}
+            onClick={() => onOpenDetails(focusRef)}
+            className={cn(
+              FOCUS_CHIP,
+              'max-w-full overflow-hidden transition-all duration-200',
+              'hover:bg-white/[0.12] hover:border-accent-lineage/40',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+            )}
+          >
+            <FocusChipBody name={focusName} type={focusType} level={trace.result?.effectiveLevel} />
+          </button>
+        </HoverTip>
       ) : (
-      <div
-        className={cn(
-          'flex items-center gap-2 px-3 h-9 rounded-xl min-w-0 shrink',
-          'bg-white/[0.06] border border-white/[0.12]',
-        )}
-        title={focusName}
-      >
-        <span className="text-sm font-display font-semibold text-ink truncate max-w-[180px] tracking-tight">
-          {focusName}
-        </span>
-        {focusType && (
-          <span className="hidden xl:inline-flex shrink-0 px-1.5 py-0.5 rounded-md bg-accent-lineage/20 text-accent-lineage text-[10px] font-bold uppercase tracking-wider border border-accent-lineage/30">
-            {focusType}
-          </span>
-        )}
-        {typeof trace.result?.effectiveLevel === 'number' && (
-          <span className="hidden 2xl:inline-flex shrink-0 px-1.5 py-0.5 rounded-md bg-white/[0.10] text-ink text-[10px] font-bold tabular-nums">
-            L{trace.result.effectiveLevel}
-          </span>
-        )}
-      </div>
+        <div className={FOCUS_CHIP} title={focusName}>
+          <FocusChipBody name={focusName} type={focusType} level={trace.result?.effectiveLevel} />
+        </div>
       )}
 
       {/* Counts — neutral glass pills with accent icon + bright value */}
@@ -627,6 +640,32 @@ export function TraceDockTitleBar({
         <X className="w-4 h-4" strokeWidth={2.4} />
       </button>
     </div>
+  )
+}
+
+const FOCUS_CHIP = cn(
+  'flex items-center gap-2 px-3 h-9 rounded-xl min-w-0 shrink',
+  'bg-white/[0.06] border border-white/[0.12]',
+)
+
+function FocusChipBody({ name, type, level }: { name: string; type?: string; level?: number }) {
+  return (
+    <>
+      <span className="text-sm font-display font-semibold text-ink truncate max-w-[180px] tracking-tight">
+        {name}
+      </span>
+      {/* The type gives way before the name does. */}
+      {type && (
+        <span className="hidden xl:inline-flex min-w-0 shrink-[100] overflow-hidden px-1.5 py-0.5 rounded-md bg-accent-lineage/20 text-accent-lineage text-[10px] font-bold uppercase tracking-wider border border-accent-lineage/30">
+          {type}
+        </span>
+      )}
+      {typeof level === 'number' && (
+        <span className="hidden 2xl:inline-flex shrink-0 px-1.5 py-0.5 rounded-md bg-white/[0.10] text-ink text-[10px] font-bold tabular-nums">
+          L{level}
+        </span>
+      )}
+    </>
   )
 }
 

@@ -6,8 +6,9 @@
  * is ANCHOR_RAIL_CAP chips per column. Candidates are ranked by bundled
  * edge count (strongest flows earn the slots) with the node id as a
  * deterministic tie-break so the rail never reshuffles between frames.
- * Partners beyond the cap are reported as `moreCount` — the UI routes
- * that overflow to the Lineage Lens, which lists every connection,
+ * Partners beyond the cap are counted by the side they lie on (`moreUp`,
+ * `moreDown`), so each tray says how many more are that way — the UI
+ * routes that overflow to the Lineage Lens, which lists every connection,
  * grouped and searchable.
  */
 import type { AnchorProxy, AnchorProxyGroup } from './types'
@@ -84,9 +85,12 @@ export function groupAnchorProxies(
   const out = new Map<string, AnchorProxyGroup>()
   byLayer.forEach((list, layerId) => {
     list.sort((a, b) => b.count - a.count || (a.nodeId < b.nodeId ? -1 : 1))
+    const rest = list.slice(cap)
+    const moreUp = rest.filter(c => c.direction === 'up').length
     out.set(layerId, {
       proxies: list.slice(0, cap).map(({ layerId: _layerId, ...proxy }) => proxy),
-      moreCount: Math.max(0, list.length - cap),
+      moreUp,
+      moreDown: rest.length - moreUp,
     })
   })
   return out
@@ -108,7 +112,7 @@ export function anchorRailFingerprint(
     parts.push(
       `${layerId}=${g.proxies.map(p =>
         `${p.nodeId}:${p.count}:${p.direction}:${p.flow}:${p.realId ?? ''}:${p.partners ?? ''}:${p.realIds?.join(' ') ?? ''}`,
-      ).join(',')}+${g.moreCount}`,
+      ).join(',')}+${g.moreUp}/${g.moreDown}`,
     )
   }
   return parts.join('|')

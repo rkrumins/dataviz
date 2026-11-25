@@ -43,6 +43,10 @@ export interface ColumnGeometryApi {
    *  column is collapsed or the node has no row here. Compensates for
    *  canvas zoom (CSS scale on the columns wrapper). */
   getNodeRect(nodeId: string): { top: number; height: number; left: number; right: number } | null
+  /** The column list's viewport in viewport space — below the sticky header,
+   *  above the reserved bottom band: where its rows can be seen. null when
+   *  the column is collapsed. */
+  getListRect(): { top: number; bottom: number; left: number; right: number } | null
 }
 
 /** Docked stand-in chip for an off-screen partner of the FOCUSED
@@ -75,8 +79,10 @@ export type AnchorProxy = {
 
 export type AnchorProxyGroup = {
   proxies: AnchorProxy[]
-  /** Partners beyond the rail cap — surfaced as "+N · Open lens". */
-  moreCount: number
+  /** Partners beyond the rail cap, by the side they are off-screen on —
+   *  each surfaced as "N more in the lens" in that side's tray. */
+  moreUp: number
+  moreDown: number
 }
 
 export type OverflowDirection = 'up' | 'down' | 'left' | 'right'

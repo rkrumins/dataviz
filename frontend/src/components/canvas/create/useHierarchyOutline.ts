@@ -79,10 +79,15 @@ function sortByLevelThenName(types: EntityTypeSchema[]): EntityTypeSchema[] {
 
 export function useHierarchyOutline(opts: {
   scopeParentUrn: string | null
+  /** The type to start each batch with, where the parent allows it (a palette's type, or the one a
+   *  layer's scope prefers) — and the one to prefer once a parent is picked for it. */
   initialTypeId: string | null
+  /** The type needs a parent and none was obvious: nothing is added until one is picked (or the top
+   *  level is, by `placeAtTopLevel`). */
+  askParent?: boolean
   onEntityStaged?: (tempUrn: string, parentUrn?: string) => void
 }) {
-  const { scopeParentUrn, initialTypeId, onEntityStaged } = opts
+  const { scopeParentUrn, initialTypeId, askParent = false, onEntityStaged } = opts
 
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
@@ -102,6 +107,7 @@ export function useHierarchyOutline(opts: {
   const batchId = useHierarchyBuilderStore((s) => s.batchId)
   const batchUrns = useHierarchyBuilderStore((s) => s.batchUrns)
   const registerBatchUrn = useHierarchyBuilderStore((s) => s.registerBatchUrn)
+  const rememberType = useHierarchyBuilderStore((s) => s.rememberType)
 
   const [active, setActive] = useState<ActiveRow>(() => ({
     name: '',
@@ -112,8 +118,14 @@ export function useHierarchyOutline(opts: {
     identifier: '',
   }))
   const [indentBlockedReason, setIndentBlockedReason] = useState<string | null>(null)
+  /** Asked where the entity goes, and not answered yet. */
+  const [awaitingParent, setAwaitingParent] = useState(askParent)
 
-  const firstOpenConsumed = useRef(false)
+  /** The batch whose starting type has been applied — once its parent is the scope's. Keyed on the
+   *  batch, not set by the batch-reset effect below, which runs after the inference effect. */
+  const seededBatch = useRef<number | null>(null)
+  /** A type asked for outright (`placeAtTopLevel`), taken by the next inference. */
+  const typeHint = useRef<string | null>(null)
   const lastUsedTypeAtDepth = useRef(new Map<number, string>())
   const lastCommittedTempUrn = useRef<string | null>(null)
 
@@ -207,28 +219,43 @@ export function useHierarchyOutline(opts: {
     [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, parentTypeOf],
   )
 
-  const allowedTypes = useMemo(() => allowedTypesFor(active.parentUrn), [allowedTypesFor, active.parentUrn])
-
-  // --- Type inference (rule 3): recompute only when the PARENT changes — a
-  // user's manual `setType` pick persists across renders until then.
-  useEffect(() => {
-    const allowed = allowedTypesFor(active.parentUrn)
-    const depth = depthForParent(active.parentUrn)
-    let nextType: string | null
-    if (!firstOpenConsumed.current && initialTypeId && allowed.some((t) => t.id === initialTypeId)) {
-      nextType = initialTypeId
-    } else if (allowed.length === 1) {
-      nextType = allowed[0].id
-    } else {
-      const lastUsed = lastUsedTypeAtDepth.current.get(depth)
-      nextType = lastUsed && allowed.some((t) => t.id === lastUsed) ? lastUsed : (allowed[0]?.id ?? null)
+  // Waiting for a parent: only the type asked for is on offer — nothing can be added until it has
+  // somewhere to go.
+  const waiting = awaitingParent && !active.parentUrn
+  const allowedTypes = useMemo(() => {
+    if (waiting) {
+      const asked = initialTypeId ? entityTypes.find((et) => et.id === initialTypeId) : undefined
+      return asked ? [asked] : []
     }
-    firstOpenConsumed.current = true
+    return allowedTypesFor(active.parentUrn)
+  }, [waiting, initialTypeId, entityTypes, allowedTypesFor, active.parentUrn])
+
+  // --- Type inference (rule 3): recompute only when the PARENT changes, or a batch starts — a
+  // user's manual `setType` pick persists across renders until then. A row starts as: the type
+  // asked for outright (placeAtTopLevel); at the batch's scope, its starting type; else the only one
+  // allowed; else the last used at that depth; else the starting type; else the first allowed.
+  // While waiting for a parent it is the starting type.
+  useEffect(() => {
+    let nextType: string | null = initialTypeId
+    if (!waiting) {
+      const allowed = allowedTypesFor(active.parentUrn)
+      const has = (id: string | null) => !!id && allowed.some((t) => t.id === id)
+      const hint = typeHint.current
+      typeHint.current = null
+      const atScope = active.parentUrn === scopeParentUrn && seededBatch.current !== batchId
+      if (atScope) seededBatch.current = batchId
+      const lastUsed = lastUsedTypeAtDepth.current.get(depthForParent(active.parentUrn)) ?? null
+      if (has(hint)) nextType = hint
+      else if (atScope && has(initialTypeId)) nextType = initialTypeId
+      else if (allowed.length === 1) nextType = allowed[0].id
+      else if (has(lastUsed)) nextType = lastUsed
+      else if (!has(initialTypeId)) nextType = allowed[0]?.id ?? null
+    }
     setActive((prev) => (prev.typeId === nextType ? prev : { ...prev, typeId: nextType }))
-    // Intentionally keyed on parentUrn only (rule 3): a manual setType() pick
+    // Intentionally keyed on parentUrn/batch only (rule 3): a manual setType() pick
     // must persist across unrelated re-renders until the parent itself changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active.parentUrn])
+  }, [active.parentUrn, batchId, waiting])
 
   // --- Edge options + auto-pick (rule 4). No parent = nothing to nest into,
   // so no containment edge is relevant (mirrors UnifiedCreatePanel).
@@ -283,7 +310,7 @@ export function useHierarchyOutline(opts: {
   const identifierProblem = identifierUrn && (heldHere || heldInGraph.has(identifierUrn)) ? IDENTIFIER_TAKEN : null
 
   const blockedReason = indentBlockedReason ?? edgeBlockedReason
-  const canCommit = Boolean(active.name.trim() && active.typeId && !blockedReason && !identifierProblem)
+  const canCommit = Boolean(active.name.trim() && active.typeId && !blockedReason && !identifierProblem && !waiting)
 
   // --- Vanished parent fallback (rule 7): mirrors UnifiedCreatePanel ~:244.
   useEffect(() => {
@@ -303,6 +330,7 @@ export function useHierarchyOutline(opts: {
   // seeds parentUrn from scopeParentUrn.
   useEffect(() => {
     setIndentBlockedReason(null)
+    setAwaitingParent(askParent)
     setActive((prev) => (prev.parentUrn === scopeParentUrn ? prev : { ...prev, parentUrn: scopeParentUrn }))
     lastCommittedTempUrn.current = null
     // Intentionally keyed on batchId only: scopeParentUrn is read fresh from
@@ -325,10 +353,26 @@ export function useHierarchyOutline(opts: {
   const setDetails = useCallback((details: ActiveRow['details']) => setActive((prev) => ({ ...prev, details })), [])
   const setIdentifier = useCallback((identifier: string) => setActive((prev) => ({ ...prev, identifier })), [])
 
+  /** Add inside `parentUrn` from now on (null: the top level) — which answers "where does it go?". */
   const retarget = useCallback((parentUrn: string | null) => {
     setIndentBlockedReason(null)
+    setAwaitingParent(false)
     setActive((prev) => ({ ...prev, parentUrn }))
   }, [])
+
+  /** Add at the top level from now on, as `typeId` when it is a top-level type (else as inferred). */
+  const placeAtTopLevel = useCallback((typeId?: string | null) => {
+    setIndentBlockedReason(null)
+    setAwaitingParent(false)
+    // Set here for when nothing re-infers (already at the top level), and hinted for when the
+    // move does (the parent or the wait changes).
+    typeHint.current = typeId ?? null
+    const allowed = allowedTypesFor(null)
+    const has = (id: string | null | undefined): id is string => !!id && allowed.some((t) => t.id === id)
+    setActive((prev) => ({
+      ...prev, parentUrn: null, typeId: has(typeId) ? typeId : has(prev.typeId) ? prev.typeId : (allowed[0]?.id ?? null),
+    }))
+  }, [allowedTypesFor])
 
   const commitSibling = useCallback((): string | null => {
     if (!canCommit || !active.typeId) return null
@@ -348,11 +392,12 @@ export function useHierarchyOutline(opts: {
     })
     registerBatchUrn(tempUrn)
     lastUsedTypeAtDepth.current.set(depthForParent(active.parentUrn), active.typeId)
+    rememberType(active.parentUrn, active.typeId)
     lastCommittedTempUrn.current = tempUrn
     onEntityStaged?.(tempUrn, active.parentUrn ?? undefined)
     setActive((prev) => ({ ...prev, name: '', details: { description: '', tags: '', fieldValues: {} }, identifier: '' }))
     return tempUrn
-  }, [canCommit, active, identifierUrn, stageEntity, depthForParent, onEntityStaged, registerBatchUrn])
+  }, [canCommit, active, identifierUrn, stageEntity, depthForParent, onEntityStaged, registerBatchUrn, rememberType])
 
   const commitAndNest = useCallback((): string | null => {
     const tempUrn = commitSibling()
@@ -482,7 +527,9 @@ export function useHierarchyOutline(opts: {
     setIdentifier,
     identifierUrn,
     identifierProblem,
+    awaitingParent: waiting,
     retarget,
+    placeAtTopLevel,
     commitSibling,
     commitAndNest,
     indent,
