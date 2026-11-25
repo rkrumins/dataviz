@@ -75,6 +75,8 @@ REVISION_WRITES = frozenset({
     (_GRAPH, "get_allowed_edges"),
     (_GRAPH, "bootstrap_versioned_graph_endpoint"),
     (_GRAPH, "bootstrap_decision_endpoint"),
+    (_GRAPH, "bootstrap_review_choice_endpoint"),
+    (_GRAPH, "bootstrap_review_decision_endpoint"),
     (_GRAPH, "bootstrap_retry_endpoint"),
     (_GRAPH, "bootstrap_abandon_endpoint"),
     (_GRAPH, "refresh_introspection"),
