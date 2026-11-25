@@ -54,7 +54,8 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
     const source = primarySource(workspace)
     const settled = useDebouncedValue(layers, 400)
     const schema = useWorkspaceEntityTypes(workspace.id, source?.id)
-    const fit = useMemo(() => (schema.types ? fitTemplate(settled, schema.types) : null), [settled, schema.types])
+    // Fitted once the source's schema is read, as a view built from it would be.
+    const fit = useMemo(() => (schema.types ? fitTemplate(settled, schema.target) : null), [settled, schema.types, schema.target])
     const sampled = useMemo(() => (fit ? sampleTypes(fit.layers) : []), [fit])
     const contract = useFeature('placementContractEnabled')
     const pages = useQueries({
@@ -89,9 +90,6 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
                 ) : (
                     <span>Data from <span className="font-semibold text-ink">{workspace.name}</span></span>
                 )}
-                {fit && fit.typedLayers > 0 && (
-                    <span>· matches {fit.matchedLayers} of {fit.typedLayers} layer{fit.typedLayers === 1 ? '' : 's'}</span>
-                )}
             </div>
 
             {failed ? (
@@ -111,12 +109,6 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
                         />
                     ))}
                 </div>
-            )}
-
-            {fit && fit.unmatchedTypes.length > 0 && (
-                <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                    Not in {workspace.name}'s semantic layer: {fit.unmatchedTypes.join(', ')}. Views there fill those layers by hand.
-                </p>
             )}
         </div>
     )
