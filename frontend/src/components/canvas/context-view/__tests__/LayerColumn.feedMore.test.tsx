@@ -32,7 +32,7 @@ function node(id: string): HierarchyNode {
     }
 }
 
-function renderColumn(feedMore?: { loading: boolean; failed: boolean }) {
+function renderColumn(feedMore?: { loading: boolean; failed: boolean }, isTracing = false) {
     installJsdomLayout()
     const onFeedMore = vi.fn()
     const session = stubSession()
@@ -54,7 +54,7 @@ function renderColumn(feedMore?: { loading: boolean; failed: boolean }) {
                     onContextMenu={vi.fn()}
                     onDoubleClick={vi.fn()}
                     onLoadMore={vi.fn()}
-                    isTracing={false}
+                    isTracing={isTracing}
                     traceFocusId={null}
                     traceNodes={new Set<string>()}
                     traceContextSet={new Set<string>()}
@@ -78,6 +78,11 @@ describe('LayerColumn — paging an open view by type', () => {
         const { onFeedMore } = renderColumn({ loading: false, failed: true })
         fireEvent.click(screen.getByRole('button', { name: /couldn't load the next/i }))
         expect(onFeedMore).toHaveBeenCalledWith('L-domains')
+    })
+
+    it('draws no row during a trace, which has nothing to page in', () => {
+        renderColumn({ loading: false, failed: false }, true)
+        expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
     })
 
     it('draws no row once the feeds are exhausted', () => {

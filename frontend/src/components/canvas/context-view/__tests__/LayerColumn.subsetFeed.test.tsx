@@ -90,6 +90,14 @@ describe('LayerColumn — a subset layer', () => {
     expect(onExportLayer).toHaveBeenCalledWith('L1')
   })
 
+  it('a capped layer under a trace says nothing of the layer\u2019s first rows', () => {
+    renderColumn({
+      subsetFeed: feed({ delivered: 2000, total: 80412, capped: true }), onSearchInLayer: vi.fn(), isTracing: true,
+    })
+    expect(screen.queryByText('Showing 2,000 of 80,412')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Search in this layer/ })).not.toBeInTheDocument()
+  })
+
   it('a match says where it sits', () => {
     const step = (urn: string) => ({ urn: `urn:${urn}`, displayName: urn, entityType: 'schema' })
     renderColumn({ nodes: [node('A', { ancestorPath: [step('warehouse'), step('sales')] })], subsetFeed: feed({ delivered: 1, total: 1 }) })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MOTION_FOCUS_LIMIT, pickMovingLines, type MotionLine } from '../lineMotion'
+import { CALM_MOTION_AT, MOTION_FOCUS_LIMIT, pickLineMotion, pickMovingLines, type MotionLine } from '../lineMotion'
 import { lineDash, nextRenderTier } from '../lineDensity'
 
 const line = (id: string, source: string, target: string, isFocusIncident = false): MotionLine =>
@@ -39,6 +39,28 @@ describe('pickMovingLines — lines move when they are looked at', () => {
     const moving = pickMovingLines(fan, 'focus', { ...idle, hoveredNodeId: 'hub', hoveredEdgeId: 'h-399' })
     expect(moving).toHaveLength(MOTION_FOCUS_LIMIT)
     expect(moving[0].id).toBe('h-399')
+  })
+
+  it("'calm' moves a small group as 'focus' does, and holds a big fan still", () => {
+    expect(pickLineMotion(board, 'calm', { ...idle, hoveredNodeId: 'b' }))
+      .toEqual(pickLineMotion(board, 'focus', { ...idle, hoveredNodeId: 'b' }))
+    const fan = Array.from({ length: CALM_MOTION_AT + 1 }, (_, i) => line(`t-${i}`, 'lake', `d${i}`, true))
+    const atRest = pickLineMotion(fan, 'calm', idle)
+    expect(atRest.moving).toEqual([])
+    expect(atRest.held).toHaveLength(CALM_MOTION_AT + 1)
+    // What the reader narrows to still moves: the line under the pointer, and a
+    // hovered entity with a handful of lines.
+    const pointed = pickLineMotion(fan, 'calm', { ...idle, hoveredEdgeId: 't-3' })
+    expect(pointed.moving.map(l => l.id)).toEqual(['t-3'])
+    expect(pointed.held).toHaveLength(CALM_MOTION_AT)
+    const small = [...fan, line('d0-x', 'd0', 'x')]
+    const hovered = pickLineMotion(small, 'calm', { ...idle, hoveredNodeId: 'd0' })
+    expect(hovered.moving.map(l => l.id)).toEqual(['t-0', 'd0-x'])
+  })
+
+  it("'focus' holds nothing back, as before", () => {
+    const fan = Array.from({ length: 40 }, (_, i) => line(`t-${i}`, 'lake', `d${i}`, true))
+    expect(pickLineMotion(fan, 'focus', idle)).toEqual({ moving: fan, held: [] })
   })
 
   it("'all' moves every line; 'off' moves none, whatever is focused", () => {

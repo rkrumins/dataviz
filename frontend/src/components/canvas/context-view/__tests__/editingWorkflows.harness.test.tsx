@@ -7,18 +7,25 @@
  *     no dragging; Escape backs out a step at a time;
  *   • Duplicate… — offered in an entity's menu, opening its dialog;
  *   • a draft edited end to end in the Business view, from its own menus —
- *     up to Review & Save and Done (the harness has no graph to save to).
+ *     up to Review & Save and Done (the harness has no graph to save to);
+ *   • where each way of adding from a layer puts the new entity — inside the
+ *     entity a column is mapped to, inside the selection, at the top level with
+ *     the column's entities one click away, or "where?" for a type that needs a
+ *     parent — and what the rail and Build say about it.
  */
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
-import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { anchoredEstate, cfoEstate } from '@/test/fixtures/traceEstates'
 import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaStore } from '@/store/persona'
+import { useSchemaStore } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
+import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
+import type { ViewLayerConfig } from '@/types/schema'
 
 /** The columns, left to right, as rendered. */
 const columnIds = () =>
@@ -316,5 +323,254 @@ describe('a draft edited end to end in the Business view', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Done' })) })
     await h.settle()
     expect(useBranchStore.getState().isDraftMode()).toBe(false)
+  }, 30000)
+})
+
+// ─── Where a layer's ways of adding put a new entity ─────────────────────────
+
+const ontologyType = (id: string, name: string, canContain: string[], canBeContainedBy: string[], level: number) => ({
+  id, name, pluralName: `${name}s`, visual: {}, properties: [], fields: [], behavior: {},
+  hierarchy: { level, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
+})
+/** The harness seeds no relationship types: one containment relationship, so things can nest. */
+const allowNesting = () => act(() => {
+  useSchemaStore.setState((s) => ({
+    schema: { ...s.schema!, relationshipTypes: [{
+      id: 'CONTAINS', name: 'Contains', sourceTypes: [], targetTypes: [], isContainment: true,
+      visual: { strokeColor: '#94a3b8', strokeWidth: 1, strokeStyle: 'solid', animated: false, curveType: 'bezier' },
+    }] },
+  }) as never)
+})
+
+/**
+ *   Domains (a column of the domain type): Finance ⊃ Billing, Sales, Ops
+ *   Apps    (a column of the app type, which needs a domain)
+ */
+function domainsEstate() {
+  const n = (urn: string, type: string, childCount = 0) => ({
+    id: urn, type: 'default', position: { x: 0, y: 0 },
+    data: { urn, label: urn, type, childCount }, urn, displayName: urn, entityType: type,
+  }) as unknown as LensWalkNode
+  const model: LensWalkModel = {
+    focusUrn: 'Finance', nodes: [n('Finance', 'domain', 1), n('Sales', 'domain'), n('Ops', 'domain'), n('Billing', 'app')],
+    lineageEdges: [], containmentEdges: [{ sourceUrn: 'Finance', targetUrn: 'Billing' }],
+    upstreamUrns: new Set(), downstreamUrns: new Set(), frontierUp: [], frontierDown: [],
+    truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'domains', name: 'Domains', order: 0, entityTypes: ['domain'] },
+    { id: 'apps', name: 'Apps', order: 1, entityTypes: ['app'] },
+  ]
+  const assignments = { Finance: { layerId: 'domains' }, Sales: { layerId: 'domains' }, Ops: { layerId: 'domains' } }
+  return { model, layers, assignments }
+}
+
+describe('where a layer\'s ways of adding put a new entity', () => {
+  const builder = () => useHierarchyBuilderStore.getState()
+  const scope = () => screen.getByTestId('builder-scope')
+  const staged = () => useStagedChangesStore.getState().changes
+  const createdAfter = () => staged().filter((c) => c.type === 'create_entity')
+    .map((c) => c.after as { entityType?: string; parentUrn?: string; displayName?: string })
+
+  const openAnchored = async (persona?: 'business') => {
+    const h = await renderCanvasWithTrace(anchoredEstate(), {
+      focus: 'SRC.orders', draft: true, deferTrace: true, persona,
+      entityTypes: [
+        ontologyType('dataPlatform', 'Data Platform', ['dataset'], [], 0),
+        ontologyType('dataset', 'Dataset', [], ['dataPlatform'], 1),
+      ],
+    })
+    allowNesting()
+    await h.settle()
+    return h
+  }
+  const openDomains = async (persona?: 'business') => {
+    const h = await renderCanvasWithTrace(domainsEstate(), {
+      focus: 'Finance', draft: true, deferTrace: true, persona,
+      entityTypes: [
+        ontologyType('domain', 'Domain', ['app'], [], 0),
+        ontologyType('app', 'App', [], ['domain'], 1),
+      ],
+    })
+    allowNesting()
+    await h.settle()
+    return h
+  }
+  const click = async (h: TraceCanvasHarness, el: HTMLElement) => {
+    await act(async () => { fireEvent.click(el) })
+    await h.settle()
+  }
+  const addNamed = async (h: TraceCanvasHarness, name: string) => {
+    const input = screen.getByPlaceholderText('Enter display name...')
+    await act(async () => { fireEvent.change(input, { target: { value: name } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await h.settle()
+  }
+
+  beforeEach(() => {
+    useStagedChangesStore.setState({ changes: [], redoStack: [], isReviewPanelOpen: false })
+    useHierarchyBuilderStore.getState().close()
+    useHierarchyBuilderStore.setState({ lastTypeIn: {} })
+  })
+
+  it('a column mapped to an entity: its "+" adds inside it, as what it holds, and the rail says so', async () => {
+    const h = await openAnchored()
+    await click(h, within(headerOf('src')).getByRole('button', { name: 'Add inside SRC' }))
+    expect(builder()).toMatchObject({ isOpen: true, surface: 'rail', layerId: 'src', parentUrn: 'SRC', initialTypeId: 'dataset', askParent: false })
+    expect(builder().choices.map((c) => c.urn)).toEqual(['SRC'])
+    expect(scope()).toHaveTextContent('Adding inside SRC · Data Platform')
+
+    await addNamed(h, 'events')
+    expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'events', entityType: 'dataset', parentUrn: 'SRC' })])
+    // A child follows its parent's column: nothing is pinned for it.
+    expect(staged().some((c) => c.type === 'layer_config')).toBe(false)
+
+    // One click to a new top-level entity instead.
+    await click(h, within(scope()).getByRole('button', { name: 'Change' }))
+    await click(h, screen.getByRole('option', { name: /New top-level Data Platform/ }))
+    expect(scope()).toHaveTextContent('Adding at the top level')
+    // …and the column's own entity is one click back.
+    await click(h, within(screen.getByRole('group', { name: 'Or add inside' })).getByRole('button', { name: /SRC/ }))
+    expect(scope()).toHaveTextContent('Adding inside SRC')
+  }, 30000)
+
+  it('a column mapped to an entity: Build, its menu, its empty space and N add inside it too', async () => {
+    const h = await openAnchored()
+    await click(h, within(headerOf('src')).getByRole('button', { name: 'Build a lot at once in Source' }))
+    expect(builder()).toMatchObject({ isOpen: true, surface: 'build', parentUrn: 'SRC', layerId: 'src' })
+    expect(screen.getByTestId('build-scope')).toHaveTextContent('Adding inside SRC · Data Platform')
+    act(() => builder().close())
+    await h.settle()
+
+    await act(async () => { fireEvent.contextMenu(headerOf('dst')) })
+    await h.settle()
+    await click(h, screen.getByText('Add inside DST'))
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'DST', layerId: 'dst' })
+    act(() => builder().close())
+    await h.settle()
+
+    const empty = document.querySelector<HTMLElement>('[data-layer-id="dst"].group\\/column .custom-scrollbar')!
+    await act(async () => { fireEvent.contextMenu(empty) })
+    await h.settle()
+    await click(h, screen.getByText('Add inside DST'))
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'DST', layerId: 'dst' })
+    act(() => builder().close())
+    await h.settle()
+
+    // N, with something in the column selected: inside the column's entity.
+    act(() => useCanvasStore.getState().setSelection(['SRC.customers']))
+    await act(async () => { fireEvent.keyDown(document, { key: 'n' }) })
+    await h.settle()
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'SRC', layerId: 'src' })
+  }, 30000)
+
+  it('asked where a type goes, the columns\' own entities are among the parents offered, by name', async () => {
+    const h = await openAnchored()
+    await act(async () => { fireEvent.keyDown(document, { key: 'p', metaKey: true, shiftKey: true }) })
+    await h.settle()
+    await click(h, screen.getByText('Create Dataset'))
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: null, initialTypeId: 'dataset', askParent: true })
+    // Neither is drawn as a row — each IS its column — yet both can hold a dataset.
+    expect(builder().choices.map((c) => c.urn)).toEqual(['DST', 'SRC'])
+  }, 30000)
+
+  it('a column of several top-level entities adds at the top level, as before — inside one of them one click away', async () => {
+    const h = await openDomains()
+    await click(h, within(headerOf('domains')).getByRole('button', { name: 'Add entity to Domains' }))
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: null, initialTypeId: 'domain', askParent: false, topLevelTypeId: 'domain' })
+    expect(scope()).toHaveTextContent('Adding at the top level')
+    const quick = screen.getByRole('group', { name: 'Or add inside' })
+    expect(within(quick).getAllByRole('button').map((b) => b.textContent)).toEqual(['Finance', 'Ops', 'Sales'])
+
+    await click(h, within(quick).getByRole('button', { name: /Sales/ }))
+    expect(scope()).toHaveTextContent('Adding inside Sales')
+    await addNamed(h, 'Payroll')
+    expect(createdAfter()).toEqual([expect.objectContaining({ entityType: 'app', parentUrn: 'Sales' })])
+  }, 30000)
+
+  it('with one of a column\'s entities selected, its "+" (and N) adds inside it', async () => {
+    const h = await openDomains()
+    act(() => useCanvasStore.getState().setSelection(['Ops']))
+    await click(h, within(headerOf('domains')).getByRole('button', { name: 'Add entity to Domains' }))
+    expect(builder()).toMatchObject({ parentUrn: 'Ops', layerId: 'domains' })
+    expect(scope()).toHaveTextContent('Adding inside Ops')
+    act(() => builder().close())
+    await h.settle()
+
+    act(() => useCanvasStore.getState().setSelection(['Sales']))
+    await act(async () => { fireEvent.keyDown(document, { key: 'n' }) })
+    await h.settle()
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'Sales', layerId: 'domains' })
+
+    // Nothing selected, N opens at the top level as it always did.
+    act(() => builder().close())
+    act(() => useCanvasStore.getState().setSelection([]))
+    await act(async () => { fireEvent.keyDown(document, { key: 'n' }) })
+    await h.settle()
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: null, layerId: null })
+  }, 30000)
+
+  it('a column whose type needs a parent asks where first — and adds that type there', async () => {
+    const h = await openDomains()
+    await click(h, within(headerOf('apps')).getByRole('button', { name: 'Add entity to Apps' }))
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: null, initialTypeId: 'app', askParent: true })
+    expect(scope()).toHaveTextContent('Choose a parent for an App')
+    const picker = screen.getByRole('listbox', { name: 'Where to add' })
+    expect(picker).toHaveTextContent('Can hold an App')
+    expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^Finance/), expect.stringMatching(/^Sales/), expect.stringMatching(/^Ops/)]))
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+
+    await click(h, within(picker).getByRole('option', { name: /^Finance/ }))
+    expect(scope()).toHaveTextContent('Adding inside Finance')
+    await addNamed(h, 'Ledger')
+    expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'Ledger', entityType: 'app', parentUrn: 'Finance' })])
+  }, 30000)
+
+  it('an App added from the Apps column lands in the Apps column, though its parent is in Domains', async () => {
+    const h = await openDomains()
+    await click(h, within(headerOf('apps')).getByRole('button', { name: 'Add entity to Apps' }))
+    await click(h, within(screen.getByRole('listbox', { name: 'Where to add' })).getByRole('option', { name: /^Sales/ }))
+    await addNamed(h, 'Quotes')
+    expect(createdAfter()).toEqual([expect.objectContaining({ displayName: 'Quotes', entityType: 'app', parentUrn: 'Sales' })])
+    // The view is curated: left to containment, the App would follow Sales into Domains.
+    const column = (id: string) => document.querySelector<HTMLElement>(`[data-layer-id="${id}"]`)!
+    expect(within(column('apps')).getByText('Quotes')).toBeTruthy()
+    expect(within(column('domains')).queryByText('Quotes')).toBeNull()
+  }, 30000)
+
+  it('an App added with a Domain\'s row "+" stays under its Domain, as before', async () => {
+    const h = await openDomains()
+    await click(h, within(cardBody('Sales')).getByRole('button', { name: 'Add child entity' }))
+    await addNamed(h, 'Forecast')
+    const column = (id: string) => document.querySelector<HTMLElement>(`[data-layer-id="${id}"]`)!
+    expect(within(column('domains')).getByText('Forecast')).toBeTruthy()
+    expect(within(column('apps')).queryByText('Forecast')).toBeNull()
+  }, 30000)
+
+  it('the palette\'s Create App: inside the selection when it can hold one, else it asks', async () => {
+    const h = await openDomains()
+    const createApp = async () => {
+      await act(async () => { fireEvent.keyDown(document, { key: 'p', metaKey: true, shiftKey: true }) })
+      await h.settle()
+      await click(h, screen.getByText('Create App'))
+    }
+    act(() => useCanvasStore.getState().setSelection(['Ops']))
+    await createApp()
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: 'Ops', initialTypeId: 'app', askParent: false })
+    act(() => builder().close())
+    await h.settle()
+
+    act(() => useCanvasStore.getState().setSelection([]))
+    await createApp()
+    expect(builder()).toMatchObject({ isOpen: true, parentUrn: null, initialTypeId: 'app', askParent: true })
+  }, 30000)
+
+  it('in the Business view it asks in plain words, from the layer\'s ⋯', async () => {
+    const h = await openDomains('business')
+    await act(async () => { fireEvent.click(within(headerOf('apps')).getByRole('button', { name: /: layer actions$/ })) })
+    await h.settle()
+    await click(h, screen.getByText('Add entity'))
+    expect(scope()).toHaveTextContent('Where does an App go?')
   }, 30000)
 })

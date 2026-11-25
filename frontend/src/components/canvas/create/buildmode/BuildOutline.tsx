@@ -26,8 +26,9 @@
  *
  * Each row's type label is also a picker (Task 4) — options are the
  * ontology-legal children of the row's PARENT type (`builderAllowedChildTypeIds`,
- * the same gate `useHierarchyOutline.ts` uses), or the legal top-level types
- * for a depth-0 row; picking one writes `updateRow(id, { typeId })`.
+ * the same gate `useHierarchyOutline.ts` uses) — for a depth-0 row, of the
+ * entity Build adds inside, or the legal top-level types; picking one writes
+ * `updateRow(id, { typeId })`.
  */
 import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -50,6 +51,8 @@ export interface BuildOutlineProps {
   /** Validated rows (BuildPanel's `validateBuildRows(rows, ctx)`) — live type inference + status. */
   rows: BuildRow[]
   typeById: Map<string, EntityTypeSchema>
+  /** Type of the entity Build adds inside (null: the top level) — what a depth-0 row may be. */
+  rootParentType?: string | null
 }
 
 const STATUS_BADGE: Record<BuildRow['status'], { icon: string; cls: string } | null> = {
@@ -70,7 +73,7 @@ function TypeChip({ type }: { type?: EntityTypeSchema }) {
   )
 }
 
-export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
+export function BuildOutline({ rows, typeById, rootParentType = null }: BuildOutlineProps) {
   const rawRows = useBuildRowsStore((s) => s.rows)
   const addSibling = useBuildRowsStore((s) => s.addSibling)
   const addChild = useBuildRowsStore((s) => s.addChild)
@@ -107,15 +110,16 @@ export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
   const rawIds = new Set(rawRows.map((r) => r.id))
 
   /** `row`'s parent's typeId — looked up in the validated `rows` (so an
-   *  auto-inserted synthetic ancestor's type counts too), or `null` at the
-   *  top level. */
+   *  auto-inserted synthetic ancestor's type counts too), or, at depth 0, the
+   *  type of the entity Build adds inside (`null` at the top level). */
   const parentTypeOf = (row: BuildRow): string | null => {
-    if (row.parentId == null) return null
+    if (row.parentId == null) return rootParentType
     return rows.find((r) => r.id === row.parentId)?.typeId ?? null
   }
 
   /** Task 4: the ontology-legal types for `row`'s slot — the legal children
-   *  of its parent's type (or the legal top-level types at depth 0). */
+   *  of its parent's type (at depth 0, of the entity Build adds inside, or the
+   *  legal top-level types). */
   const legalTypesForRow = (row: BuildRow): EntityTypeSchema[] => {
     const ids = builderAllowedChildTypeIds(
       parentTypeOf(row), entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes,

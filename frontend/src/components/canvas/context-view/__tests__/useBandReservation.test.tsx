@@ -68,4 +68,22 @@ describe('useBandReservation', () => {
     unmount()
     expect(body.style.getPropertyValue('--test-chrome-height')).toBe('')
   })
+
+  it('follows an element that mounts after the hook does, in and out', () => {
+    const { container, rerender } = render(<div data-canvas-body><Late shown={false} /></div>)
+    const read = () => container.querySelector<HTMLElement>('[data-canvas-body]')!.style.getPropertyValue('--test-late-height')
+    expect(read()).toBe('')
+    rerender(<div data-canvas-body><Late shown /></div>)
+    expect(read()).toBe('48px')
+    rerender(<div data-canvas-body><Late shown={false} /></div>)
+    expect(read()).toBe('')
+  })
 })
+
+/** Chrome whose measured element only exists while it is shown — a bar in
+ *  an AnimatePresence, say. */
+function Late({ shown }: { shown: boolean }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useBandReservation(ref, '--test-late-height', undefined, shown)
+  return shown ? <div ref={ref} data-measure="whole" /> : null
+}

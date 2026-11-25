@@ -26,6 +26,14 @@ export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
  *  `minimal` is one line per entity. */
 export type CanvasDensity = 'minimal' | 'compact' | 'comfortable' | 'spacious'
 
+/** How large a Context View layer's header is drawn — its row, padding, icon
+ *  and name (`layerHeaderTokens`). `comfortable` is the header as it was. */
+export type CanvasHeaderSize = 'compact' | 'comfortable' | 'spacious'
+
+/** When an empty layer column says it is empty: always, not while a trace is
+ *  on (most layers hold nothing of its lineage then), or never. */
+export type EmptyLayerMessage = 'always' | 'tracing-hidden' | 'never'
+
 // Canvas zoom range — wide enough to support both tiny-overview ("zoom out
 // to see the whole hierarchy") and large-text accessibility ("zoom in for
 // readability") without forcing users into browser zoom (which scales the
@@ -54,10 +62,11 @@ const LINEAGE_RENDER_MODES: readonly LineageRenderMode[] = ['stubs', 'click', 'a
 
 /**
  * Which lineage lines move (the chevrons marching along a line) — see
- * `lineMotion.ts`. 'focus': the lines being looked at; 'all': every line
- * while the board is sparse; 'off': none.
+ * `lineMotion.ts`. 'focus': the lines being looked at; 'calm': as focus, but a
+ * crowd of them (a trace's big fan) is held still at full colour; 'all': every
+ * line while the board is sparse; 'off': none.
  */
-export type LineageMotion = 'focus' | 'all' | 'off'
+export type LineageMotion = 'focus' | 'calm' | 'all' | 'off'
 /** How heavy lineage lines are drawn on the canvas, in a trace as elsewhere. */
 export type LineWeight = 'thin' | 'regular' | 'thick'
 
@@ -336,6 +345,17 @@ interface PreferencesState {
   setCanvasZoom: (n: number) => void
   canvasDensity: CanvasDensity
   setCanvasDensity: (density: CanvasDensity) => void
+  /** How large each layer's header is. Comfortable by default. */
+  canvasHeaderSize: CanvasHeaderSize
+  setCanvasHeaderSize: (size: CanvasHeaderSize) => void
+  /** The "↑ N more · M lines" markers at a column's top and bottom: what is
+   *  scrolled past its ends, and the lines that lead there. On by default. */
+  showOffscreenLineMarkers: boolean
+  toggleOffscreenLineMarkers: () => void
+  /** When an empty layer says so. Always by default. A column whose anchor
+   *  entity is gone, or held by another column, says why whatever this is. */
+  emptyLayerMessage: EmptyLayerMessage
+  setEmptyLayerMessage: (mode: EmptyLayerMessage) => void
   showCanvasTypeBadge: boolean
   toggleCanvasTypeBadge: () => void
   /** Each row's entity-type icon, from the ontology. Off, a row is its
@@ -641,6 +661,12 @@ export const usePreferencesStore = create<PreferencesState>()(
       // first-load state or after Reset.
       canvasDensity: 'spacious',
       setCanvasDensity: (canvasDensity) => set({ canvasDensity }),
+      canvasHeaderSize: 'comfortable',
+      setCanvasHeaderSize: (canvasHeaderSize) => set({ canvasHeaderSize }),
+      showOffscreenLineMarkers: true,
+      toggleOffscreenLineMarkers: () => set((s) => ({ showOffscreenLineMarkers: !(s.showOffscreenLineMarkers ?? true) })),
+      emptyLayerMessage: 'always',
+      setEmptyLayerMessage: (emptyLayerMessage) => set({ emptyLayerMessage }),
       showCanvasTypeBadge: true,
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
       showCanvasEntityIcons: true,
@@ -654,6 +680,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       resetCanvasDisplaySettings: () => set({
         canvasZoom: 1,
         canvasDensity: 'spacious',
+        canvasHeaderSize: 'comfortable',
+        showOffscreenLineMarkers: true,
+        emptyLayerMessage: 'always',
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,
         showCanvasEntityIds: true,
