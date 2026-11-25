@@ -1,7 +1,7 @@
 # Release Notes — People Analytics
 
 **Date:** 2026-12-02
-**Migrations:** `20261202_1000_pev_actor_ws`, `20261202_1100_people_index` (revise `20261201_1000_ontology_create`)
+**Migrations:** `20261202_1000_pev_actor_ws`, `20261202_1100_people_index`, `20261203_1000_people_rollup` (revise `20261201_1000_ontology_create`)
 
 ---
 
@@ -86,22 +86,81 @@ tens of millions of rows. So nothing that reports on everyone reads an event tab
 indexer folds each UTC day of all three stores into a rollup, and every roster, activity line
 and day panel reads only that:
 
-| Table | One row per | Holds |
-|---|---|---|
-| `person_activity_daily` | day × person × workspace × kind | count, first and last instant — and the same three for what a workspace admin may see (`n_ws`, …) |
-| `people_daily_facets` | day × workspace × hour or event type | counts, with no person — the punchcard and "what people do" |
+| Table | One row per | Holds | Read by |
+|---|---|---|---|
+| `person_daily_totals` | day × person × scope: each workspace they were in, and `*` for everywhere | actions (and what a workspace admin may see), sign-ins, last action and sign-in, the sections they moved to (a bitmask) | every roster |
+| `person_activity_daily` | day × person × workspace × kind | count, first and last instant, and the same for what a workspace admin may see (`n_ws`, …) | lines, the day panel, one person |
+| `people_daily_facets` | day × scope × hour, event type, kind or section | counts, with no person | the punchcard, "what people do", the series by kind, section visits |
 
-- **The roster** is a handful of `GROUP BY` reads whose results are one row per person, or per
-  period and kind. Weekly windows are bucketed in SQL by a portable `CASE`.
-- **The cached document is a summary**: numbers per person, no series, dates or addresses.
-  Those are added per **page** (24 people): their lines, from `(user_id, day)`; their dates,
-  from the timeline; addresses for privileged readers only.
+- **The roster reads one row per person-day.** A day that spread over a dozen workspaces and
+  five kinds is still one row on the platform's roster, and one in each workspace's. The
+  per-kind rollup alone did not compress: in the benchmark below its 14.4M rows were nearly as
+  many as the events, and a year's roster took a minute.
+- **The cached document is a summary**: numbers per person, no series, kinds, dates or
+  addresses. Those are added per **page** (24 people): their lines and top kind, from
+  `(user_id, day)`; their dates, from the timeline; addresses for privileged readers only.
+- **A full-lens workspace roster** also counts its people's sign-ins, which happened in no
+  workspace: their everywhere rows are read through `(user_id, workspace_id, day)`, beside the
+  workspace's own.
+- **Planned for their values.** From its sixth run a prepared statement may keep one generic
+  plan. For a workspace roster's chunked `user_id IN (…)` that plan read every person's days and
+  made every build after the first 20× slower (22 s instead of 1.1 s). The roster, lines, page
+  and day reads `SET LOCAL plan_cache_mode = force_custom_plan` on Postgres, the same as the
+  versioning service's keyed reads.
 - **The day panel** reads that day's rollup rows: exact, not a sample of the most active.
 - **One person** reads the rollup for their totals, line and calendar; the details only raw
   events hold (types, hours, views opened) and their feed come from each store's actor index.
 - Tests pin it: the roster runs the same statements with 10× the events and 9× the people, and
   never scans an event table (single-row `min`/`max` seeks for the coverage notes excepted);
-  and every person's actions from the rollup equal a direct count of the raw events.
+  every person's actions from the rollup equal a direct count of the raw events; and the totals
+  agree with the per-kind rollup for the platform, a workspace and the workspace lens.
+
+#### Measured
+
+`backend/scripts/bench_people_analytics.py` on Postgres 16 (4 vCPU, the database on the same
+machine). The data:
+
+- 10,000 accounts, 5,000 of them active, in 100 workspaces; the largest has 2,000 members.
+- 365 days: 18.4M product events and 666k ledger rows.
+- About 2,250 people active a day, each in about 12 workspaces. That spread is a worst case for
+  the rollups.
+- The rollups: 14.4M per-kind rows and 7.8M person-day totals.
+
+Every read below was run 8 times with the cache cleared, so prepared statements are past the
+point where Postgres may switch to a generic plan.
+
+| Read | p50 | Slowest | Python peak |
+|---|---:|---:|---:|
+| Roster, platform, 7 days | 218 ms | 315 ms | 11 MB |
+| Roster, platform, 30 days | 601 ms | 711 ms | 13 MB |
+| Roster, platform, 90 days | 1.2 s | 1.4 s | 13 MB |
+| Roster, platform, 365 days | 3.2 s | 3.3 s | 16 MB |
+| Roster, largest workspace, 30 days | 736 ms | 789 ms | 12 MB |
+| Roster, largest workspace, 365 days | 4.0 s | 4.2 s | 14 MB |
+| Roster, largest workspace, workspace lens, 30 days | 426 ms | 493 ms | 12 MB |
+| Roster, largest workspace, workspace lens, 365 days | 2.0 s | 2.2 s | 14 MB |
+| Roster page from the cache (redact, sort, slice, 24 lines) | 19 ms | 20 ms | — |
+| Lines, 24 people, 30 days | 11 ms | 18 ms | 1 MB |
+| Lines, 24 people, 365 days | 133 ms | 215 ms | 3 MB |
+| Day panel, platform | 44 ms | 56 ms | 4 MB |
+| Person page, the heaviest person, 365 days | 62 ms | 109 ms | 1 MB |
+| Person calendar | 5 ms | 6 ms | 0 MB |
+| Person feed, a page of 50 | 8 ms | 14 ms | 0 MB |
+
+- **The cold rosters are built once per window and cached.** Readers get the cached page, in
+  about 20 ms. The platform roster is also warmed.
+- **The roster document is 1.5 MB at 5,000 active people.**
+- **Indexer, first pass:** 6–7 s a day, 365 days in about 35 minutes. Most of it is writing
+  each day's rows, about 80k of them.
+- **Indexer, recomputing a day already attributed:** 3.9 s:
+  - attribution 0.3 s;
+  - the fold 0.5 s;
+  - writing the rows 2.2 s;
+  - the timeline 0.6 s.
+
+  This is what the minute's refresh of today costs by the end of a day this busy. The target was
+  2 s, and this misses it: the cost follows rollup rows, and this tenancy's 12 workspaces per
+  person-day multiply them.
 
 ### New indexes
 
@@ -149,7 +208,9 @@ For each day:
    - **First and last active** come from all three stores.
    - The table outlives raw-event retention.
 
-3. **The rollup.** The day's rows in `person_activity_daily` and `people_daily_facets`.
+3. **The rollup.** The day's rows in `person_daily_totals`, `person_activity_daily` and
+   `people_daily_facets`, folded from one grouped read of each store. A recomputed day leaves
+   timeline rows it does not move unwritten.
 
 Figures are at most about two minutes behind, in line with the rest of Analytics. While history
 is being indexed, the page says how far it has got and which days are still to come; join dates
@@ -192,6 +253,9 @@ non-existent id gets, so the endpoint cannot be used to discover who has an acco
 
 - **Days are UTC**, like the rest of Analytics. Times on a day's timeline are UTC clocks.
 - **Sessions are derived** from 30-minute gaps. The platform records no "session started".
+- **The indexer recomputes today in full every minute.** Its cost follows the day's rollup rows.
+  On the benchmark's busiest days that is about 4 s a minute by evening (see
+  [Measured](#measured)): steady, but not free.
 - **Traces and searches recorded before this release** are placed in a workspace by the
   inference above. Where it cannot place one, that signal counts platform-wide only.
 - **Figures need the indexer.** Rosters read only the rollup, which the scheduler-owner role

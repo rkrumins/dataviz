@@ -26,6 +26,7 @@ way out by the redactors at the bottom, so one computation serves every reader o
 """
 from __future__ import annotations
 
+import functools
 import json
 from bisect import bisect_right
 from collections import Counter
@@ -34,7 +35,7 @@ from datetime import date, datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Iterable, Optional, Sequence
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
@@ -103,6 +104,32 @@ A = PersonActivityDailyORM
 T = PersonDailyTotalORM
 F = PeopleDailyFacetORM
 EVERYWHERE = people_index_repo.EVERYWHERE
+
+
+# ── Planning ──────────────────────────────────────────────────────────
+
+_PLAN_CACHE_MODE = text("SELECT set_config('plan_cache_mode', :mode, true)")
+
+
+def _planned_per_call(fn):
+    """Plan each of ``fn``'s statements for its own values, on Postgres.
+
+    A prepared statement is planned for its values five times, and may then keep one generic
+    plan for every later run. These reads take a window and lists of people, and the generic
+    plan fits none of them: for a workspace roster's ``user_id IN (…)`` chunks it read every
+    person's days and made the build 20× slower from its second run on. ``SET LOCAL``, put back
+    afterwards — the same as ``versioning.service`` does for its keyed reads.
+    """
+    @functools.wraps(fn)
+    async def wrapper(session: AsyncSession, *args, **kwargs):
+        if session.get_bind().dialect.name != "postgresql":
+            return await fn(session, *args, **kwargs)
+        was = await session.scalar(text("SELECT current_setting('plan_cache_mode')"))
+        await session.execute(_PLAN_CACHE_MODE, {"mode": "force_custom_plan"})
+        result = await fn(session, *args, **kwargs)
+        await session.execute(_PLAN_CACHE_MODE, {"mode": was})
+        return result
+    return wrapper
 
 
 # ── Scope over the rollup ─────────────────────────────────────────────
@@ -294,6 +321,7 @@ async def _views(session: AsyncSession, ids: Iterable[str]) -> dict[str, dict]:
 # ── The roster ────────────────────────────────────────────────────────
 
 
+@_planned_per_call
 async def people_doc(
     session: AsyncSession, *, days: Optional[int] = None,
     start: Optional[str] = None, end: Optional[str] = None,
@@ -610,6 +638,7 @@ async def _coverage(session: AsyncSession, now: datetime) -> dict:
 # ── A page of people, and their lines ─────────────────────────────────
 
 
+@_planned_per_call
 async def lines(
     session: AsyncSession, user_ids: Sequence[str], *, days: Optional[int] = None,
     start: Optional[str] = None, end: Optional[str] = None, now: Optional[datetime] = None,
@@ -653,6 +682,7 @@ async def _drawn(session: AsyncSession, user_ids: Sequence[str], w: Window,
     return out, top
 
 
+@_planned_per_call
 async def enrich_page(
     session: AsyncSession, rows: list[dict], *, days: Optional[int] = None,
     start: Optional[str] = None, end: Optional[str] = None, now: Optional[datetime] = None,
@@ -689,6 +719,7 @@ async def enrich_page(
     return out
 
 
+@_planned_per_call
 async def scope_day(
     session: AsyncSession, day: str, *, workspace_id: Optional[str] = None, lens: str = FULL,
     limit: int = 200,

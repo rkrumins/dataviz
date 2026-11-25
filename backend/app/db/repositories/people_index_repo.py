@@ -33,7 +33,7 @@ from collections import defaultdict
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import case, delete, func, insert as sa_insert, select, update
+from sqlalchemy import case, delete, func, insert as sa_insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
@@ -208,19 +208,22 @@ async def upsert(session: AsyncSession, rows: Iterable[dict]) -> int:
     T = PersonWorkspaceActivityORM.__table__
     insert = _insert(session)
     ordered = [merged[k] | {"updated_at": now} for k in sorted(merged)]
+    stmt = insert(T)
+    ex = stmt.excluded
+    moved = {
+        "joined_at": _earlier(T.c.joined_at, ex.joined_at),
+        "first_active_at": _earlier(T.c.first_active_at, ex.first_active_at),
+        "last_active_at": _later(T.c.last_active_at, ex.last_active_at),
+    }
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["user_id", "workspace_id"],
+        set_={**moved, "updated_at": ex.updated_at},
+        # A recomputed day mostly confirms what is stored: leave those rows unwritten.
+        where=or_(*(v.is_distinct_from(T.c[k]) for k, v in moved.items())),
+    )
+    # One statement, compiled once and run for each batch of rows.
     for start in range(0, len(ordered), _UPSERT_CHUNK):
-        stmt = insert(T).values(ordered[start:start + _UPSERT_CHUNK])
-        ex = stmt.excluded
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["user_id", "workspace_id"],
-            set_={
-                "joined_at": _earlier(T.c.joined_at, ex.joined_at),
-                "first_active_at": _earlier(T.c.first_active_at, ex.first_active_at),
-                "last_active_at": _later(T.c.last_active_at, ex.last_active_at),
-                "updated_at": ex.updated_at,
-            },
-        )
-        await session.execute(stmt)
+        await session.execute(stmt, ordered[start:start + _UPSERT_CHUNK])
     return len(ordered)
 
 

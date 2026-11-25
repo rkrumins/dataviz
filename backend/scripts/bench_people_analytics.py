@@ -208,7 +208,9 @@ async def main() -> None:
     p.add_argument("--views", type=int, default=5_000)
     p.add_argument("--big-members", type=int, default=2_000)
     p.add_argument("--events", type=int, default=12, help="Mean events per active person-day.")
-    p.add_argument("--runs", type=int, default=3)
+    p.add_argument("--runs", type=int, default=8,
+                   help="Timed runs per read. Keep it above five: from its sixth run a prepared "
+                        "statement may switch to a generic plan, and that is what production runs.")
     p.add_argument("--skip-seed", action="store_true")
     p.add_argument("--skip-index", action="store_true")
     a = p.parse_args()
