@@ -61,7 +61,8 @@ class _Result:
         self.result_set = rows
 
 
-def _falkor(stored: Dict[str, Any] | None, native: Dict[str, Any] | None = None):
+def _falkor(stored: Dict[str, Any] | None, native: Dict[str, Any] | None = None,
+            registered=()):
     """A FalkorDB provider whose `_query` plays one edge with ``stored`` as its JSON bag — and
     ``native`` as the properties it holds on itself, as a graph another tool wrote keeps them."""
     provider = FalkorDBProvider.__new__(FalkorDBProvider)
@@ -83,11 +84,22 @@ def _falkor(stored: Dict[str, Any] | None, native: Dict[str, Any] | None = None)
                 assert v is None
                 state["native"].pop(k, None)
             state["props"] = params["props"]
+            state["native"].update(params["native"])     # SET r += $native
             return _Result([["a", "b", "FLOWS_TO", _rel()]])
         return _Result([["FLOWS_TO", _rel()]])
 
+    async def _names(*_a, **_k):
+        return set(registered)
+
+    async def _noop(*_a, **_k):
+        return None
+
     provider._ensure_connected = _ensure_connected
     provider._query = _query
+    provider._registered_property_names = _names
+    provider._reserve_platform_property_names = _noop
+    provider._graph_name = "g"
+    provider._extra_config = {}
     return provider, state
 
 
@@ -95,9 +107,20 @@ def _falkor(stored: Dict[str, Any] | None, native: Dict[str, Any] | None = None)
 async def test_falkordb_patch_keeps_unnamed_properties_and_removes_marked_ones():
     provider, state = _falkor({"a": 1, "b": 2, "c": 3})
     edge = await provider.update_edge("e1", {"b": 20, "c": PROP_DELETE, "d": 4})
-    assert json.loads(state["props"]) == {"a": 1, "b": 20, "d": 4}
+    # Written as a node's are: natively within the name budget, so the bag empties.
+    assert state["native"] == {"a": 1, "b": 20, "d": 4} and json.loads(state["props"]) == {}
     assert edge.properties == {"a": 1, "b": 20, "d": 4}
     assert PROP_DELETE not in state["props"]
+
+
+@pytest.mark.asyncio
+async def test_falkordb_patch_past_the_name_budget_keeps_new_keys_in_the_bag(monkeypatch):
+    monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+    provider, state = _falkor({}, native={"weight": 3},
+                              registered={"weight", *(f"filler{i}" for i in range(99))})
+    edge = await provider.update_edge("e1", {"brand_new": {"nested": 1}, "other": "x"})
+    assert edge.properties == {"weight": 3, "brand_new": {"nested": 1}, "other": "x"}
+    assert json.loads(state["props"]) == {"brand_new": {"nested": 1}, "other": "x"}
 
 
 @pytest.mark.asyncio
@@ -108,7 +131,7 @@ async def test_falkordb_patch_of_a_relationship_another_tool_wrote_keeps_and_rem
     edge = await provider.update_edge("e1", {"weight": 4, "old": PROP_DELETE})
     assert edge.properties == {"my prop": "val1", "weight": 4}
     assert "old" not in state["native"], "removed natively as well as from the bag"
-    assert json.loads(state["props"]) == {"my prop": "val1", "weight": 4}
+    assert state["native"] == {"my prop": "val1", "weight": 4}
 
 
 @pytest.mark.asyncio

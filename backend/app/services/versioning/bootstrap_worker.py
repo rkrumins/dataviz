@@ -509,11 +509,10 @@ def _unaccounted(raw: dict, payload: dict, *, label: Optional[str] = None,
     nothing new; an edge's ``id`` is its identity. ``rel`` marks an edge."""
     names: List[str] = []
     bags = ("properties",) if rel is not None else ("properties", "propertiesRaw")
-    projected = rel is not None and "gvHash" in raw
     for k, v in raw.items():
         if k in bags and _json_object(v) is not None:
             names.extend(_json_object(v))
-        elif not projected:
+        else:
             names.append(k)
     props = payload.get("properties") or {}
     lost = []

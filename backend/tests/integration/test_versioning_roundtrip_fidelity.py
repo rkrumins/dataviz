@@ -126,7 +126,9 @@ async def _assert_roundtrip(nodes, edges) -> None:
         assert ge["type"] == _sanitize_label(e.edge_type), (e.id, ge["type"], e.edge_type)
         assert ge["src"] == e.source_urn and ge["tgt"] == e.target_urn, e.id
         assert ge["conf"] == e.confidence, (e.id, "confidence", ge["conf"], e.confidence)  # THE fix
-        assert json.loads(ge["props"] or "{}") == e.properties, (e.id, "properties", ge["props"])  # THE fix
+        # Natively within the name budget, the rest in the bag: the edge holds them all.
+        held = {**(ge.get("native") or {}), **json.loads(ge["props"] or "{}")}
+        assert held == e.properties, (e.id, "properties", ge)  # THE fix
 
     # ---- Nodes: label (entityType), displayName, and user properties round-trip ----
     by_urn = {n["urn"]: n for n in g2.nodes.values()}
@@ -211,10 +213,14 @@ async def _run_customer_graph_end_to_end() -> None:
     async with db.graphver_session() as s:
         name = (await s.get(ProjectionStateORM, gid)).falkor_graph_name
     ge = fake_falkor.graphs[name].edges["r1"]
-    assert json.loads(ge["props"]) == _NATIVE, "the rebuilt key holds all ten"
+    assert {**(ge.get("native") or {}), **json.loads(ge["props"])} == _NATIVE, \
+        "the rebuilt key holds all ten"
+    # Each that FalkorDB can store natively is on the relationship itself, where every search
+    # operator reaches it; the rest stay in the bag.
+    assert ge["native"] and set(ge["native"]) | set(json.loads(ge["props"])) == set(_NATIVE)
     served = _edge_from_row(ge["src"], ge["tgt"], ge["type"],
-                            {"id": "r1", "confidence": ge["conf"], "properties": ge["props"],
-                             "gvHash": ge.get("gvHash")})
+                            {**ge["native"], "id": "r1", "confidence": ge["conf"],
+                             "properties": ge["props"], "gvHash": ge.get("gvHash")})
     assert served.properties == _NATIVE, "and serves all ten"
 
     # ---- export it, and import the file into a fresh graph: all ten again ----

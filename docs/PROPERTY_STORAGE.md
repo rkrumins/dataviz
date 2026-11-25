@@ -112,11 +112,16 @@ The invariant, pinned by a test that loads a million nodes carrying 100k distinc
   with today's warning, `None` dropped, nested values kept);
 - `n.searchableText` computed from the full bag, not from native values only, under the
   existing 8,192-byte cap;
-- edges unchanged: `r.properties` stays one JSON string and registers nothing. A graph another
-  tool built keeps a relationship's properties on it (`r.weight`); the reader folds those into the
-  edge's properties, the bag winning a name both hold, except on a relationship the projector
-  wrote (`gvHash`: the bag is the whole of it) and on a rollup. Nothing is written natively;
-  `update_edge` only clears a native key the edit removes;
+- edges as nodes (as built): every writer (`save_custom_graph`, `create_edge`, `create_node`'s
+  containment edge, `update_edge`, the projector) writes a relationship's properties natively
+  within the same budget as nodes, one admission over both, and the rest in the `r.properties`
+  bag. The envelope (`id`, `confidence`, `properties`, `gvHash`) never goes native, and neither
+  does a rollup's. The reader folds native properties and the bag into the edge's properties,
+  the bag winning a name both hold. The projector and `update_edge` remove a native key the edge
+  no longer holds natively. On a customer's key, the projector removes only a key history held.
+  Relationships written before this keep everything in the bag until they are written again.
+  The edge fingerprint's shape changed, so the next full reconcile rewrites each one once.
+  Search reads a native value with every operator, and the bag with presence and equality;
 - **marker**: one node `(:_PropIdx)` with a label and no properties. Labels live in their
   own id space, so it costs no attribute id, lands on a graph at the ceiling, and is wiped
   by `GRAPH.DELETE` exactly when the physical layout is gone. `_PropIdx` joins
@@ -367,6 +372,10 @@ distinct ms to 1 s; discovery tens of ms.
   only be recreated. A registered name that appears on few nodes costs almost nothing
   — an entity's attribute set is sized by the attributes PRESENT on it — so what a
   demoted key costs is searchability, not memory, and a generous budget is the safer one.
+- Nodes and relationships share the one name map. Each projector pass records the graph's
+  reading (`projection_state.property_names`: names registered, the platform's share, the budget,
+  the ceiling, and the keys it stored as values, by nodes and edges). A versioned graph's health
+  shows it, and falls back to the data source's statistics poll for a graph not updated since.
 - FalkorDB indexes on user keys were never serving deep search: the candidate scan is a
   bare `MATCH (n)` the planner never rewrites to an index scan.
 - The graph at the ceiling does not have to be dropped for search to come back: Mode A

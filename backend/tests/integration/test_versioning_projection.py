@@ -140,10 +140,10 @@ class FakeGraph:
         if cypher == _SCAN_EDGES:
             # RETURN toString(r.id), type(r), properties(r) (r.id == eid; parallel edges already
             # collapsed to one entry in self.edges by the MERGE interpreter above)
-            rows = sorted(([eid, e.get("type"), {k: v for k, v in (
+            rows = sorted(([eid, e.get("type"), {**(e.get("native") or {}), **{k: v for k, v in (
                                ("id", eid), ("confidence", e.get("conf")),
                                ("properties", e.get("props")), ("gvHash", e.get("gvHash")))
-                               if v is not None}]
+                               if v is not None}}]
                            for eid, e in self.edges.items()
                            if e.get("type") != "AGGREGATED" and eid is not None),
                           key=lambda r: r[0])
@@ -217,6 +217,15 @@ class FakeGraph:
                             if e["src"] in self.nodes and e["tgt"] in self.nodes
                             and e["type"] != "AGGREGATED"
                             and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
+        # The edge merge's removed-property read: the keys each relationship holds, its envelope
+        # and its native properties.
+        if cypher.startswith("UNWIND $batch AS it MATCH (a:") and cypher.endswith(
+                "RETURN it.src, it.tgt, keys(r)"):
+            rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]
+            return _Result([[it["src"], it["tgt"],
+                             ["id", "properties", "gvHash", *(e.get("native") or {})]]
+                            for it in params["batch"] for e in self.edges.values()
+                            if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel])
         # The node merge's removed-property read: the keys each node still holds.
         if cypher.startswith("UNWIND $urns AS u MATCH (n:") and "RETURN u, keys(n)" in cypher:
             return _Result([[u, [k for k in self.nodes[u] if not k.startswith("_")],
@@ -251,12 +260,17 @@ class FakeGraph:
                     # (src, type, tgt) TRIPLE, so N edges sharing a triple become ONE (r.id = last
                     # writer). Drop any existing same-triple edge before (re-)adding — a no-op for a
                     # graph with no parallel edges, faithful for one that has them.
+                    native: dict = {}
                     for _k in [k for k, e in self.edges.items()
                                if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel]:
-                        self.edges.pop(_k, None)
+                        native.update(self.edges.pop(_k, None).get("native") or {})
+                    # ``SET r += item.gone`` (nulls remove), then ``SET r += item.nativeProps``.
+                    for k in it.get("gone") or {}:
+                        native.pop(k, None)
+                    native.update(it.get("nativeProps") or {})
                     self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel,
                                              "props": it.get("props"), "conf": it.get("conf"),
-                                             "gvHash": it.get("gvHash")}
+                                             "gvHash": it.get("gvHash"), "native": native}
             return None
         # Reconcile's edge delete by triple (no id): MATCH (a:{slb} {urn: item.src})
         #   MATCH (b:{tlb} {urn: item.tgt}) MATCH (a)-[r:{rel}]->(b) DELETE r

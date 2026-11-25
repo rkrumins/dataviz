@@ -81,6 +81,15 @@ Every new capability ships behind its own switch, off by default.
   — their types and fields, not anyone's data — to build on them. Layers kept to one workspace
   and system layers stay hidden.
 - The Explorer keeps a selection to its list; the Review Center reads one workspace or all.
+- **A relationship's properties are stored and searched as an item's are**: natively, within the
+  same property-name budget as items (one count over both, since the graph store numbers them in
+  one map and never frees a name), and the rest as values in the relationship's JSON. An edge
+  filter now takes every operator (greater than, contains, between, …) on a relationship's own
+  property. A property still held in the JSON is matched by is set, is, is not and is one of, and
+  the search builder offers just those for it.
+- **A versioned graph's health shows its property names**: how many it uses of the graph store's
+  65,534, the budget past which new names are kept as values (still shown and exported), a warning
+  near and at it, and which keys on items and on relationships were kept as values.
 
 ### Fixed
 
@@ -132,6 +141,12 @@ Every new capability ships behind its own switch, off by default.
   (its sandbox provider) before turning it on.
 - **`20261202_1000_bootstrap_review`** adds `graphver.bootstrap_review`, what an enable holds for a
   review (created by the versioning worker where alembic doesn't reach the graphver schema).
+- **`20261203_1000_gv_ps_prop_names`** adds `projection_state.property_names`, the reading each
+  update records (created by the versioning worker where alembic doesn't reach the graphver
+  schema). Until a graph's next update, its health shows its data source's last statistics count.
+- **Existing relationships keep their properties in their JSON** until they are written again, and
+  read and search as before meanwhile. The next full rebuild of a graph rewrites each relationship
+  once into the new form; nothing has to be run.
 - **Graphs enabled before this release** may lack their relationships' own properties in history.
   **Check sync** now reports them as differing; **Bring into history** copies whatever the graph
   still holds. A graph already rebuilt from history no longer holds them.

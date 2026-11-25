@@ -130,9 +130,10 @@ class TestValidation:
                 "where": {"kind": "is", "refs": [{"urn": "x"}]}})))
 
     def test_the_edge_filter_is_checked(self):
-        with pytest.raises(ValidationError, match=r"\$.edgePredicate \(mode\).*not 'gt'"):
+        with pytest.raises(ValidationError, match=r"\$.edgePredicate \(mode\)"):
             _validate_predicate(P(edges(edgePredicate={
-                "kind": "edgeProperty", "key": "mode", "op": "gt", "value": 3})))
+                "kind": "edgeProperty", "key": "mode", "op": "gt", "value": "abc",
+                "valueType": "number"})))
 
     def test_an_ends_comparisons_are_resolved(self):
         with pytest.raises(ValidationError, match=r"\$.sourceWhere \(size\)"):

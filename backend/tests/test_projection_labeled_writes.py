@@ -72,11 +72,15 @@ def test_edge_merges_are_label_anchored():
     client = _CaptureClient()
     p = _projector()
     _run(p._apply(client, [_NODE_A, _NODE_B], [_EDGE], [], []))
-    edge_cyphers = [c for c in client.cyphers() if ":FLOWS" in c]
+    edge_cyphers = [c for c in client.cyphers() if ":FLOWS" in c and "MERGE" in c]
     assert edge_cyphers, f"no edge merge issued: {client.cyphers()}"
     for c in edge_cyphers:
         assert "MATCH (a:Table {urn: item.src})" in c
         assert "MATCH (b:Dataset {urn: item.tgt})" in c
+    # The read of what each relationship holds (for the properties it no longer has) seeks too.
+    reads = [c for c in client.cyphers() if ":FLOWS" in c and "keys(r)" in c]
+    assert reads and all("MATCH (a:Table {urn: it.src})" in c
+                         and "MATCH (b:Dataset {urn: it.tgt})" in c for c in reads)
     assert not any("MATCH (a {urn:" in c for c in client.cyphers())
 
 

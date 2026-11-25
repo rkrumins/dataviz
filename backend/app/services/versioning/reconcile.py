@@ -659,8 +659,8 @@ class ProjectionReconciler:
         payload the ``entity_heads`` pointer names — the SAME source the projector serialised into
         the cache, so the deep check compares the cache against exactly what SHOULD have been
         written. Confidence/edgeType/properties are taken from the payload (not the denormalised
-        columns) because ``_edge_item`` writes ``r.confidence = payload['confidence']`` and
-        ``r.properties = json.dumps(payload['properties'] or {})``."""
+        columns) because ``_edge_item`` writes ``r.confidence = payload['confidence']`` and the
+        payload's properties (natively within the name budget, the rest in ``r.properties``)."""
         cursor = ""
         while True:
             async with self._session() as s:

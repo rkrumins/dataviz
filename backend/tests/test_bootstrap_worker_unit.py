@@ -558,8 +558,13 @@ def test_unaccounted_is_empty_for_the_conversion_and_names_what_it_lost():
     _eid, edge = _edge_payload("urn:a", "urn:b", "T", dict(raw_edge), None)
     assert _unaccounted(raw_edge, edge, rel="T") == []
     assert _unaccounted(raw_edge, {"properties": {"inner": 1}}, rel="T") == ["confidence", "my prop"]
-    projected = {"id": "e1", "gvHash": 1, "stale": "x", "properties": '{"kept": 1}'}
-    assert _unaccounted(projected, {"properties": {"kept": 1}}, rel="T") == [], "stale keys aren't the edge's"
+    # A projected relationship holds its properties natively within the name budget, as well as
+    # in its bag: each is the edge's, and accounted for only where the payload holds it.
+    projected = {"id": "e1", "gvHash": 1, "native": "x", "properties": '{"kept": 1}'}
+    _eid, edge = _edge_payload("urn:a", "urn:b", "T", dict(projected), None)
+    assert edge["properties"] == {"native": "x", "kept": 1}
+    assert _unaccounted(projected, edge, rel="T") == []
+    assert _unaccounted(projected, {"properties": {"kept": 1}}, rel="T") == ["native"]
     raw_node = {"urn": "urn:n", "name": 7, "entityId": "E", "level": 2, "owner": "a",
                 "description": "d", "propertiesRaw": '{"deep": {"x": 1}}'}
     node = _node_payload(dict(raw_node), "Table", None)

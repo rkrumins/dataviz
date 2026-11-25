@@ -10,7 +10,8 @@ provider-direct writers dropped edge attributes:
   never written, so a containment edge created with properties lost them until the next rebuild.
 
 These pin the fix: confidence passes through RAW (0.0 and None survive) and properties are always
-written, matching ``save_custom_graph`` / the projector reseed.
+written, matching ``save_custom_graph`` / the projector reseed: natively on the relationship where
+the graph's property-name budget admits them (as a node's), the rest in the ``r.properties`` bag.
 """
 import asyncio
 import json
@@ -26,8 +27,9 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _provider():
-    """A FalkorDBProvider whose writes are captured as (cypher, params) — no infra."""
+def _provider(registered=()):
+    """A FalkorDBProvider whose writes are captured as (cypher, params) — no infra; the graph
+    holds ``registered`` property names."""
     p = FalkorDBProvider(host="x", graph_name="g")
     p.calls = []
 
@@ -47,6 +49,12 @@ def _provider():
     p._query = query
     p._cache_urn_label = noop
     p._redis = None
+
+    async def names(*a, **k):
+        return set(registered)
+
+    p._registered_property_names = names
+    p._reserve_platform_property_names = noop
     return p
 
 
@@ -77,8 +85,41 @@ def test_create_edge_writes_confidence_and_properties():
                                  confidence=0.7, properties={"sql": "select 1", "n": 3})))
     cypher, params = _edge_query(p)
     assert params["conf"] == 0.7
-    assert json.loads(params["props"]) == {"sql": "select 1", "n": 3}
-    assert "r.properties = $props" in cypher
+    assert params["native"] == {"sql": "select 1", "n": 3}
+    assert json.loads(params["props"]) == {}
+    assert "r.properties = $props" in cypher and "SET r += $native" in cypher
+
+
+def test_create_edge_keeps_envelope_names_and_nested_values_in_the_bag():
+    p = _provider()
+    props = {"id": "theirs", "confidence": "high", "properties": "raw", "gvHash": 1,
+             "nested": {"a": 1}, "plain": "x"}
+    _run(p.create_edge(GraphEdge(id="e1", sourceUrn="a", targetUrn="b", edgeType="FLOWS_TO",
+                                 properties=props)))
+    _cypher, params = _edge_query(p)
+    assert params["native"] == {"plain": "x"}
+    assert json.loads(params["props"]) == {k: v for k, v in props.items() if k != "plain"}
+    stored = {**params["native"], "id": params["eid"], "properties": params["props"]}
+    assert _edge_from_row("a", "b", "FLOWS_TO", stored).properties == props
+
+
+def test_create_edge_writes_a_rollup_from_its_bag_alone():
+    p = _provider()
+    _run(p.create_edge(GraphEdge(id="e1", sourceUrn="a", targetUrn="b", edgeType="AGGREGATED",
+                                 properties={"plain": "x"})))
+    _cypher, params = _edge_query(p)
+    assert params["native"] == {} and json.loads(params["props"]) == {"plain": "x"}
+
+
+def test_create_edge_stores_a_key_past_the_budget_as_a_value(monkeypatch):
+    """The names a graph can hold are shared by nodes and relationships: past the budget, a new
+    key goes into the bag instead of spending one more."""
+    monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+    p = _provider(registered={f"filler{i}" for i in range(100)})      # a full graph
+    _run(p.create_edge(GraphEdge(id="e1", sourceUrn="a", targetUrn="b", edgeType="FLOWS_TO",
+                                 properties={"brand_new": 1})))
+    _cypher, params = _edge_query(p)
+    assert params["native"] == {} and json.loads(params["props"]) == {"brand_new": 1}
 
 
 def test_create_node_containment_edge_writes_properties():
@@ -91,8 +132,8 @@ def test_create_node_containment_edge_writes_properties():
     ))
     assert ok
     cypher, params = _edge_query(p)                  # the containment edge write
-    assert "r.properties = $props" in cypher, cypher
-    assert json.loads(params["props"]) == {"origin": "manual"}
+    assert "r.properties = $props" in cypher and "SET r += $native" in cypher, cypher
+    assert params["native"] == {"origin": "manual"} and json.loads(params["props"]) == {}
     assert params["conf"] == 0.9                     # confidence still passes through raw
 
 
@@ -134,12 +175,12 @@ def test_the_bag_wins_a_name_both_hold_on_a_relationship_the_projector_never_wro
     assert e.properties == {"owner": "bag", "only": 1}
 
 
-def test_a_projected_relationship_reads_from_its_bag_alone():
-    """The projector writes the bag (and ``gvHash``) and never removes a native key: a property
-    deleted in history must not come back from a stale native copy."""
-    e = _edge_from_row("urn:a", "urn:b", "T", {"id": "e1", "gvHash": 42, "stale": "gone",
+def test_a_projected_relationship_reads_its_native_properties_and_its_bag():
+    """The projector writes an edge's properties as a node's — natively within the budget, the
+    rest in the bag — and removes a native one the edge no longer holds, so both are the edge's."""
+    e = _edge_from_row("urn:a", "urn:b", "T", {"id": "e1", "gvHash": 42, "native": "n",
                                                "properties": '{"kept": 1}'})
-    assert e.properties == {"kept": 1}
+    assert e.properties == {"native": "n", "kept": 1}
 
 
 @pytest.mark.parametrize("rel", ["AGGREGATED", "aggregated"])

@@ -491,6 +491,11 @@ class ProjectionStateORM(VersioningBase):
     # ``{at, nodes, edges, via}``, NULL when nothing. Cleared once it is gone or brought into
     # history (20261028_1000_gv_ps_unowned).
     external_drift = Column(JSONB, nullable=True)
+    # The graph's property names as its last pass left them: ``{registered, platform, budget,
+    # ceiling, at, demoted: {nodes, edges, count}}`` — how many of FalkorDB's per-graph names are
+    # used, how many the platform's writes may use, and the keys stored as values instead. Graph
+    # health shows it. NULL until a pass writes (20261203_1000_gv_ps_prop_names).
+    property_names = Column(JSONB, nullable=True)
     # When the graph's quarantined entities (``projection_quarantine``) are next retried, NULL
     # when it holds none: what a pass and the poll read, so a graph with nothing held costs no
     # query of the quarantine (20261112_1000_gv_proj_quarantine).
@@ -1306,6 +1311,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # more slowly.
     _bounded_step(conn, "ix_jobs_property_unnotified was not built",
                   lambda: ensure_jobs_unnotified_index(conn))
+    # 20261203_1000_gv_ps_prop_names.
+    _bounded_step(conn, "the property names column was not added",
+                  lambda: ensure_ps_property_names_column(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -1569,6 +1577,20 @@ def ensure_ps_customer_key_columns(conn) -> None:
     ps = f'"{_SCHEMA}"."projection_state"'
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS physical_types JSONB"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS external_drift JSONB"))
+
+
+def ensure_ps_property_names_column(conn) -> None:
+    """Add ``projection_state.property_names``, how many property names the graph uses. A no-op
+    without the table, and once it is there (an ALTER takes the table's ACCESS EXCLUSIVE lock even
+    when it adds nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "property_names" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                      schema=_SCHEMA)}:
+        return
+    conn.execute(text(
+        f'ALTER TABLE "{_SCHEMA}"."projection_state" ADD COLUMN IF NOT EXISTS property_names JSONB'))
 
 
 def ensure_branch_visibility(conn) -> None:

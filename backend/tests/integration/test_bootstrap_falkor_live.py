@@ -474,8 +474,8 @@ _NATIVE = {"my prop": "val1", "MyProp": "a", "MySpecialProp": "b", "MyLogicalPro
 async def test_a_relationships_own_properties_are_copied_served_and_kept_as_history_says(graph):
     """A graph another tool built keeps a relationship's properties on the relationship itself.
     The enable copies every one — under an integer id too — and the graph serves them; once
-    history removes one, it is not served though the relationship still holds its old copy; and a
-    delete in history reaches the relationship whose id is a number."""
+    history removes one, the projector removes it from the relationship (it was one history held);
+    and a delete in history reaches the relationship whose id is a number."""
     from backend.common.models.graph import EdgeQuery
     from backend.common.property_patch import PROP_DELETE
     from backend.app.providers.falkordb_provider import _edge_from_row
@@ -519,9 +519,10 @@ async def test_a_relationships_own_properties_are_copied_served_and_kept_as_hist
     assert res.get("verify_error") is None and await _fresh(gid), res
     (raw,) = [r[0] for r in await _rows(
         client, "MATCH ()-[r:FEEDS]->() WHERE r.id = 'r1' RETURN properties(r)")]
-    assert raw.get("MyProp") == "a", "the projector never removes a native copy"
-    assert "MyProp" not in _edge_from_row("urn:a", "urn:b", "FEEDS", raw).properties, \
-        "a relationship the projector wrote reads from its bag: what history removed stays gone"
+    assert "MyProp" not in raw, "history removed it, and it was history's: the projector removes it"
+    assert raw.get("my prop") == "val1", "the rest stay on the relationship, natively"
+    expected = {k: v for k, v in _NATIVE.items() if k != "MyProp"}
+    assert _edge_from_row("urn:a", "urn:b", "FEEDS", raw).properties == expected
 
     await svc.apply_ops(graph_id=gid, actor="bob", message="drop 42", ops=[
         {"op": "delete", "entity_kind": "edge", "entity_id": "42", "payload": None}])

@@ -649,7 +649,8 @@ class TestWritersUnderBudget:
             for k, v in blob.items():
                 assert k in tail[room - 1:] and k not in it["nativeProps"]
         assert any(
-            "stored as values in propertiesRaw" in r.getMessage() for r in caplog.records
+            "stored as values (an item's propertiesRaw" in r.getMessage()
+            for r in caplog.records
         )
 
     def test_a_registered_name_stays_native_on_a_full_graph(self, monkeypatch):

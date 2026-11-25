@@ -1,7 +1,8 @@
 /**
  * GraphHealthPanel — how a graph is doing right now, at the top of its settings: how far its
  * readers are behind and where reads come from, the read mode in force and why, its last update,
- * its memory, its last new-version build, and what happened to it in the last day.
+ * its memory, its last new-version build, what happened to it in the last day, and how many of
+ * the graph store's property names it uses.
  *
  * Every part is the server's and best effort: a part it couldn't read says "—" and why. Until the
  * server reports health (404), the panel draws nothing. A fork has no copy of its own: what it
@@ -20,7 +21,8 @@ import { DateTime } from '@/components/ui/DateTime'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { CATALOGUE, type Lens } from '@/components/settings'
 import { UpdateProgress } from '@/features/versioning/components/UpdateProgress'
-import { settingsError, useGraphHealth, type GraphHealth, type Revision, type SignalDefinition } from '@/services/settingsService'
+import { settingsError, useGraphHealth, type GraphHealth, type PropertyNames, type Revision, type SignalDefinition } from '@/services/settingsService'
+import { PropertyNameBudget } from '../PropertyNameBudget'
 import { ResidencyChip } from './GraphInventory'
 
 const READS = CATALOGUE.settings.find((s) => s.key === 'reads.mode')!
@@ -114,6 +116,71 @@ function LastBuildFact({ b, asOf }: { b: LastBuild; asOf: string }) {
             {b.copyRemovedAfter && (
                 <span className="block text-[11.5px] text-ink-secondary">
                     <CopyRemoval after={b.copyRemovedAfter} asOf={asOf} whose={switched ? 'Previous copy' : 'Its copy'} />
+                </span>
+            )}
+        </>
+    )
+}
+
+/** At most this many of the keys kept as values are named, per kind; the rest are counted. */
+const NAMED_KEYS = 8
+
+function KeptAsValues({ what, keys }: { what: string; keys: string[] }) {
+    if (keys.length === 0) return null
+    const shown = keys.slice(0, NAMED_KEYS)
+    return (
+        <span className="mt-1 flex flex-wrap items-center gap-1">
+            <span className="text-[11.5px] text-ink-secondary">{what}:</span>
+            {shown.map((k) => (
+                <code key={k} className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[11px] text-ink dark:bg-white/[0.07]">{k}</code>
+            ))}
+            {keys.length > shown.length && <span className="text-[11.5px] text-ink-secondary">and {formatNumber(keys.length - shown.length)} more</span>}
+        </span>
+    )
+}
+
+/**
+ * The graph's property names against the two limits that matter: the platform's budget, past which
+ * a new name is kept as a value (nothing is lost; it is searched by presence and equality), and the
+ * graph store's ceiling, which no write can pass and which is never given back.
+ */
+function PropertyNamesFact({ n }: { n: PropertyNames }) {
+    const budget = formatNumber(n.budget)
+    const kept = n.storedAsValues
+    return (
+        <>
+            <PropertyNameBudget
+                total={n.registered}
+                platform={n.platform}
+                source={n.registered != null && n.platform != null ? Math.max(0, n.registered - n.platform) : null}
+                budget={n.budget}
+                compact
+            />
+            <span className="mt-1.5 block text-[11.5px] text-ink-secondary">
+                {n.registered == null
+                    ? 'Counted at its next update. Items and relationships share these names, and none is ever freed.'
+                    : `Items and relationships share these names, and none is ever freed. The mark is the ${budget} the platform writes as searchable properties.`}
+            </span>
+            {n.state === 'near_budget' && (
+                <span role="status" className="mt-1 block text-[11.5px] text-amber-700 dark:text-amber-300">
+                    Close to {budget}: property names added past it are kept as values — still shown and exported, and searched with is set, is, is not and is one of.
+                </span>
+            )}
+            {n.state === 'at_budget' && (
+                <span role="status" className="mt-1 block text-[11.5px] text-rose-700 dark:text-rose-300">
+                    At {budget}: new property names are kept as values — still shown and exported, and searched with is set, is, is not and is one of. Reuse existing names where you can.
+                </span>
+            )}
+            {kept && kept.count > 0 && (
+                <span className="mt-1 block text-[11.5px] text-ink">
+                    {formatCount(kept.count, 'property key')} kept as values
+                    <KeptAsValues what="On items" keys={kept.nodes} />
+                    <KeptAsValues what="On relationships" keys={kept.edges} />
+                </span>
+            )}
+            {n.measuredAt && (
+                <span className="mt-1 block text-[11px] text-ink-muted">
+                    <DateTime at={n.measuredAt} prefix={n.measuredBy === 'poll' ? 'As its data source was last counted, ' : 'As its last update found, '} />
                 </span>
             )}
         </>
@@ -229,6 +296,11 @@ export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: defin
                 <Fact label={root ? 'Last new-version build, its root’s' : 'Last new-version build'} missing={missing('lastBuild', h.lastBuild)}>
                     {h.lastBuild && <LastBuildFact b={h.lastBuild} asOf={h.asOf} />}
                 </Fact>
+                {h.propertyNames !== undefined && (
+                    <Fact label={root ? 'Property names, its root’s copy' : 'Property names'} missing={missing('propertyNames', h.propertyNames)} className="sm:col-span-2">
+                        {h.propertyNames && <PropertyNamesFact n={h.propertyNames} />}
+                    </Fact>
+                )}
                 <Fact label="Last 24 hours" missing={missing('signals', h.signals)} className="sm:col-span-2">
                     {happened.length === 0 ? 'Nothing out of the ordinary.' : (
                         <ul className="mt-1 space-y-1">
