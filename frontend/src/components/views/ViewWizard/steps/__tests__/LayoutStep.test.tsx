@@ -4,23 +4,27 @@
  * Applying a template is a client-side copy of layer STRUCTURE only: it never
  * carries assignments into formData.assignments (a fresh create or template
  * switch always resets them to {}), every layer gets a fresh id, and a library
- * template is recorded as where the view started. Its entity types resolve
- * against THIS data's semantic layer, and what doesn't match is said, not
- * silently dropped.
+ * template is recorded as where the view started. It is FITTED to this data:
+ * each layer is filled with the data's own types — suggested, for the person to
+ * keep or change in place — and a layer nothing fits invites them to fill it.
+ * Nothing says a template "doesn't match".
  */
 import { useState } from 'react'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 
 // The data source's ontology, as useDataSourceSchema reports it — mutable so a
 // case can give the source an ontology, or hold it loading.
-const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], isLoading: false }))
+const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], rootEntityTypes: [] as string[], isLoading: false }))
 const lib = vi.hoisted(() => ({ templates: [] as unknown[], isLoading: false, enabled: true }))
 
 vi.mock('@/hooks/useDataSourceSchema', () => ({
-  useDataSourceSchema: () => ({ entityTypes: ds.entityTypes, isLoading: ds.isLoading, isError: false }),
+  useDataSourceSchema: () => ({
+    entityTypes: ds.entityTypes, relationshipTypes: [], rootEntityTypes: ds.rootEntityTypes, containmentEdgeTypes: [],
+    isLoading: ds.isLoading, isError: false,
+  }),
 }))
 
 vi.mock('@/hooks/useLayoutTemplates', () => ({
@@ -41,6 +45,8 @@ vi.mock('@/store/workspaces', () => {
   return { useWorkspacesStore }
 })
 
+import { useSchemaStore } from '@/store/schema'
+import type { WorkspaceSchema } from '@/types/schema'
 import { LayoutStep } from '../LayoutStep'
 import type { WizardFormData } from '../../ViewWizard'
 
@@ -77,6 +83,29 @@ const DATA_MESH = template({
   ],
 })
 
+/** The built-in "Analytics Pipeline" (backend/app/db/seed_templates.py): stages, not containment. */
+const ANALYTICS = template({
+  id: 'tpl_analytics', name: 'Analytics Pipeline',
+  layers: [
+    { id: 'raw', name: 'Raw', entityTypes: ['raw', 'source', 'extract'], order: 0 },
+    { id: 'curated', name: 'Curated', entityTypes: ['curated', 'clean', 'validated'], order: 1 },
+    { id: 'aggregated', name: 'Aggregated', entityTypes: ['aggregated', 'summary', 'metric'], order: 2 },
+    { id: 'dashboard', name: 'Dashboard', entityTypes: ['dashboard', 'report', 'visualization'], order: 3 },
+  ],
+})
+
+/** Domain contains System contains Dataset. */
+const DSD = [
+  { id: 'Domain', name: 'Domain', pluralName: 'Domains', hierarchy: { level: 0, canContain: ['System'] }, visual: { color: '#7c3aed' } },
+  { id: 'System', name: 'System', pluralName: 'Systems', hierarchy: { level: 1, canContain: ['Dataset'] }, visual: { color: '#2563eb' } },
+  { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 2, canContain: [] }, visual: { color: '#059669' } },
+]
+
+/** The layer editor's row for a layer. */
+const layerRow = (name: string) => screen.getByText(name, { selector: 'span' }).closest('li') as HTMLElement
+const SUGGESTED = 'Suggested from your data'
+const TO_FILL = 'Choose what fills this layer — or place entities in it by hand'
+
 function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
   return {
     name: 'Test view',
@@ -112,6 +141,8 @@ function Harness({ spy, ...props }: { spy: (u: Partial<WizardFormData>) => void 
 
 afterEach(() => {
   ds.entityTypes = []
+  ds.rootEntityTypes = []
+  useSchemaStore.setState({ schema: null })
   ds.isLoading = false
   lib.templates = []
   lib.isLoading = false
@@ -140,26 +171,100 @@ describe('LayoutStep — the template library', () => {
     expect(call.layers.map((l: { templateLayerId: string }) => l.templateLayerId)).toEqual(['bronze', 'silver', 'gold'])
   })
 
-  it("resolves a template's types against the data source and names what didn't match", () => {
-    ds.entityTypes = [
-      { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 0, canContain: [] } },
-      { id: 'System', name: 'System', pluralName: 'Systems', hierarchy: { level: 0, canContain: [] } },
-    ]
-    lib.templates = [DATA_MESH]
+  it('shows on each card how the template will look on this data, never how far it falls short', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS, MEDALLION]
+    render(<Harness spy={vi.fn()} dataSourceId="ds1" />)
+
+    const analytics = screen.getByText('Analytics Pipeline').closest('button')!
+    expect(analytics).toHaveTextContent('Domains · Systems · Datasets')
+    expect(analytics).toHaveTextContent('1 by hand')
+    expect(screen.getByText('Medallion').closest('button')).toHaveTextContent('Filled by hand')
+    expect(screen.queryByText(/Matches \d+ of|Fits your data/)).not.toBeInTheDocument()
+  })
+
+  it('applying a template fills each layer from the data, suggested for the person to keep', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS]
     const spy = vi.fn()
     render(<Harness spy={spy} dataSourceId="ds1" />)
 
-    // The card says how well it fits before anyone applies it.
-    expect(screen.getByText('Matches 1 of 2 layers')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Data Mesh'))
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
 
     const call = spy.mock.calls[0][0]
-    // A layer whose types the ontology lacks survives, empty; a declared type
-    // takes the ontology's spelling, once.
-    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domain', 'Data Product'])
-    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], ['Dataset']])
-    expect(screen.getByRole('status')).toHaveTextContent('matches 1 of 2 layers')
-    expect(screen.getByRole('status')).toHaveTextContent('bounded-context, data-product, domain, table')
+    // Every layer stays; its stages take the hierarchy's levels in order.
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Raw', 'Curated', 'Aggregated', 'Dashboard'])
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([['Domain'], ['System'], ['Dataset'], []])
+    expect(call.entityScope).toBe('all')
+
+    expect(within(layerRow('Raw')).getByText('Domains')).toBeInTheDocument()
+    expect(within(layerRow('Raw')).getByText(SUGGESTED)).toBeInTheDocument()
+    expect(within(layerRow('Aggregated')).getByText(SUGGESTED)).toBeInTheDocument()
+    // The one nothing fits invites filling — not a warning.
+    expect(within(layerRow('Dashboard')).getByText(TO_FILL)).toBeInTheDocument()
+    expect(within(layerRow('Dashboard')).queryByText(SUGGESTED)).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText(/matches \d+ of \d+ layers/i)).not.toBeInTheDocument()
+    expect(screen.getByText('Started from “Analytics Pipeline”. Refine its layers below.')).toBeInTheDocument()
+  })
+
+  it('what each layer shows follows its current types: kept, changed in place, or filled', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+
+    // Kept: the types stay, the suggestion is settled.
+    fireEvent.click(within(layerRow('Raw')).getByRole('button', { name: 'Keep' }))
+    expect(within(layerRow('Raw')).queryByText(SUGGESTED)).not.toBeInTheDocument()
+    expect(within(layerRow('Raw')).getByText('Domains')).toBeInTheDocument()
+    expect(within(layerRow('Curated')).getByText(SUGGESTED)).toBeInTheDocument()
+
+    // Changed in place: it is the person's choice now.
+    fireEvent.click(within(layerRow('Curated')).getByRole('button', { name: 'Change' }))
+    fireEvent.click(within(layerRow('Curated')).getByRole('button', { name: 'Domain' }))
+    expect(within(layerRow('Curated')).queryByText(SUGGESTED)).not.toBeInTheDocument()
+    expect(spy.mock.calls.at(-1)![0].layers[1].entityTypes).toEqual(['System', 'Domain'])
+
+    // Filled: the invitation gives way to what fills it.
+    fireEvent.click(within(layerRow('Dashboard')).getByRole('button', { name: new RegExp(TO_FILL) }))
+    fireEvent.click(within(layerRow('Dashboard')).getByRole('button', { name: 'Dataset' }))
+    expect(within(layerRow('Dashboard')).queryByText(TO_FILL)).not.toBeInTheDocument()
+    expect(within(layerRow('Dashboard')).getByText('Datasets')).toBeInTheDocument()
+  })
+
+  it('switching templates fits the new one afresh', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS, DATA_MESH]
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch template' }))
+    fireEvent.click(screen.getByText('Data Mesh'))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([['Domain'], ['Dataset']])
+    expect(Object.keys(call.suggestedFills)).toEqual(call.layers.map((l: { id: string }) => l.id))
+    expect(within(layerRow('Data Product')).getByText(SUGGESTED)).toBeInTheDocument()
+    expect(screen.queryByText('Raw', { selector: 'span' })).not.toBeInTheDocument()
+    confirm.mockRestore()
+  })
+
+  it("keeps a template's types as written when the data declares none, and claims nothing", () => {
+    lib.templates = [ANALYTICS]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    expect(screen.getByText('Analytics Pipeline').closest('button')).not.toHaveTextContent('by hand')
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+
+    const call = spy.mock.calls[0][0]
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual(ANALYTICS.layers.map(l => l.entityTypes))
+    expect(screen.queryByText(SUGGESTED)).not.toBeInTheDocument()
+    expect(screen.queryByText(TO_FILL)).not.toBeInTheDocument()
   })
 
   it('waits for the ontology before a template can be applied', () => {
@@ -176,7 +281,7 @@ describe('LayoutStep — the template library', () => {
 
     expect(spy).toHaveBeenCalledTimes(1)
     expect(spy.mock.calls[0][0].contextModelId).toBe('tpl_medallion')
-    expect(screen.getByRole('status')).toHaveTextContent('Started from "Medallion"')
+    expect(screen.getByText('Started from “Medallion”. Refine its layers below.')).toBeInTheDocument()
   })
 
   it("starts from the workspace's default, with one click back to an empty canvas", () => {
@@ -226,5 +331,31 @@ describe('LayoutStep — the template library', () => {
     expect(spy.mock.calls[0][0].contextModelId).toBeUndefined()
     expect(spy.mock.calls[0][0].contextModelVersion).toBeUndefined()
     expect(spy.mock.calls[0][0].assignments).toEqual({})
+  })
+})
+
+describe('LayoutStep — a brand-new model', () => {
+  it('offers one layer per top-level type, matching the roots in any case', () => {
+    useSchemaStore.setState({
+      schema: {
+        id: 'ont', name: 'Ontology', version: '1', views: [], defaultViewId: '',
+        entityTypes: DSD, relationshipTypes: [], containmentEdgeTypes: [], lineageEdgeTypes: [],
+        // Spelled otherwise than the type it names: still that type.
+        rootEntityTypes: ['domain'],
+      } as unknown as WorkspaceSchema,
+    })
+    const spy = vi.fn()
+    render(<Harness spy={spy} blank />)
+
+    expect(screen.getByText('From your ontology')).toBeInTheDocument()
+    expect(screen.getByText('Start empty')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('One layer per top-level type'))
+
+    const call = spy.mock.calls[0][0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domains'])
+    expect(call.layers[0].entityTypes).toEqual(['Domain'])
+    expect(call.layoutTemplateId).toBe('per-root-type')
+    // Its layers place by rule, which resolves only in open scope.
+    expect(call.entityScope).toBe('all')
   })
 })
