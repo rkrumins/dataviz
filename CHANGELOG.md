@@ -87,6 +87,14 @@ Every new capability ships behind its own switch, off by default.
   filter now takes every operator (greater than, contains, between, …) on a relationship's own
   property. A property still held in the JSON is matched by is set, is, is not and is one of, and
   the search builder offers just those for it.
+- **A relationship's drawer does what an item's does**: a relationship drawn or reversed in a draft
+  can be given properties before it is saved, and reversing one keeps its properties and
+  confidence; every kind of relationship but a roll-up has editable properties, typed from its
+  type's fields with suggested names and values; a relationship deleted in a draft can be restored
+  from its drawer or its History.
+- **Restoring a deleted item brings back its relationships too**, with their properties and ids, as
+  Discard in Review does. It is now one change to the draft, made at once, rather than a staged
+  re-create.
 - **A relationship can be watched as an item can**: Watch in the relationship drawer; a publish
   that changes it says so in the Inbox, and the digest lists it by its ends and type.
 - **The import template and record schema know a relationship's fields**: an edge row's
