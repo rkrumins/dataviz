@@ -352,6 +352,11 @@ interface PreferencesState {
    *  scrolled past its ends, and the lines that lead there. On by default. */
   showOffscreenLineMarkers: boolean
   toggleOffscreenLineMarkers: () => void
+  /** The versioning bar's note of what was published since the reader last looked ("3 new
+   *  versions since your last visit"). On by default; off hides it on every graph. A review
+   *  waiting on the reader still shows. */
+  showGraphDigest: boolean
+  toggleGraphDigest: () => void
   /** When an empty layer says so. Always by default. A column whose anchor
    *  entity is gone, or held by another column, says why whatever this is. */
   emptyLayerMessage: EmptyLayerMessage
@@ -665,6 +670,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setCanvasHeaderSize: (canvasHeaderSize) => set({ canvasHeaderSize }),
       showOffscreenLineMarkers: true,
       toggleOffscreenLineMarkers: () => set((s) => ({ showOffscreenLineMarkers: !(s.showOffscreenLineMarkers ?? true) })),
+      showGraphDigest: true,
+      toggleGraphDigest: () => set((s) => ({ showGraphDigest: !(s.showGraphDigest ?? true) })),
       emptyLayerMessage: 'always',
       setEmptyLayerMessage: (emptyLayerMessage) => set({ emptyLayerMessage }),
       showCanvasTypeBadge: true,
@@ -682,6 +689,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         canvasDensity: 'spacious',
         canvasHeaderSize: 'comfortable',
         showOffscreenLineMarkers: true,
+        showGraphDigest: true,
         emptyLayerMessage: 'always',
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,
