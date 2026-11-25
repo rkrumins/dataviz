@@ -31,6 +31,7 @@ import { useBranchStore } from '../store/branchStore'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { usePreferencesStore } from '../store/preferences'
 import { useSchemaStore } from '../store/schema'
+import { useViewLibraryStore } from '../store/viewLibraryStore'
 import type { SearchCatalogProperty, SearchCatalogRequest, SearchCatalogResult } from '../types/search'
 
 
@@ -115,6 +116,23 @@ function relationshipCatalog(): SearchCatalogResult {
     return all
 }
 
+/** What the search builders discover, from the same fixtures: each entity type's and each
+ *  relationship type's keys, with sample values. */
+function discovery() {
+    const samples = (props: SearchCatalogProperty[]) =>
+        Object.fromEntries(props.map((prop) => [prop.key, prop.values.map((x) => x.value)]))
+    const labels = Object.fromEntries(['Dataset', 'Table', 'Column'].map((label) => [label, {
+        keys: ENTITY_PROPERTIES.map((prop) => prop.key), sampled: 200, valueSamplesByKey: samples(ENTITY_PROPERTIES),
+    }]))
+    const edges = Object.fromEntries(RELATIONSHIP_TYPES.map((t) => {
+        const props = RELATIONSHIP_PROPERTIES.filter((prop) => t.id in prop.byEntityType)
+        return [t.id, { keys: props.map((prop) => prop.key), sampled: Math.min(t.count, 5_000),
+            valueSamplesByKey: samples(props),
+            storedAs: Object.fromEntries(props.map((prop) => [prop.key, prop.residual ? 'json' : 'native'])) }]
+    }))
+    return { labels, edges, blobOnlyLabels: [], tagValues: [] }
+}
+
 class StatusError extends Error {
     constructor(message: string, readonly status: number) { super(message) }
 }
@@ -122,6 +140,13 @@ class StatusError extends Error {
 const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
 Object.assign(provider, {
     fetch: async (path: string, opts: { body?: string; signal?: AbortSignal } = {}) => {
+        if (path === '/search/counts') {
+            // What a rule matches, counted: the editor's live "N will be styled".
+            const asked = JSON.parse(opts.body ?? '{}') as { items?: Array<{ id: string }> }
+            return { counts: Object.fromEntries((asked.items ?? []).map((item) =>
+                [item.id, { count: 4_820, status: 'complete' }])) }
+        }
+        if (path === '/search/discover') return discovery()
         if (path !== '/search/catalog') return {}
         const body = JSON.parse(opts.body ?? '{}') as SearchCatalogRequest
         if (body.subject !== 'relationships') return ENTITY_CATALOG
@@ -132,6 +157,10 @@ Object.assign(provider, {
         return relationshipCatalog()
     },
 })
+
+// The view's display rules, read: none yet, and this viewer may add some.
+useViewLibraryStore.setState({ viewId: VIEW, branchId: 'harness-draft', status: 'ready', error: null, canEdit: true,
+    savedQueries: [], reusableChanges: [] } as never)
 
 // A draft is open on a versioned data source: every change is offered.
 useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, editModeEnabled: true, versioningEnabled: true } } as never)

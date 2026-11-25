@@ -115,7 +115,7 @@ export function DisplayRuleList({
                         <Tags className="w-5 h-5 text-accent-lineage" strokeWidth={1.8} />
                     </div>
                     <div className="text-base font-display font-semibold text-ink leading-tight">
-                        Tag entities by criteria
+                        Tag entities and style relationships by criteria
                     </div>
                     <p className="mt-1.5 text-xs text-ink-muted leading-snug max-w-[34ch] mx-auto">
                         Create a display rule to decorate matching entities with a colored
