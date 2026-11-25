@@ -1,5 +1,5 @@
 """``20261203_1000_watch_edges``, without a database server: the revision follows
-``20261202_1000_bootstrap_review`` and fits ``alembic_version``; it gives ``graph_watches`` the
+``20261203_1000_gv_ps_prop_names`` and fits ``alembic_version``; it gives ``graph_watches`` the
 ORM's ``entity_kind``, every watch there already an entity's (``node``); its DDL is guarded, so it
 runs on a database ``create_all`` already built and runs again; the downgrade takes the
 relationship watches away with the column.
@@ -70,7 +70,7 @@ def _watches(conn) -> list:
 def test_the_revision_follows_the_bootstrap_review_and_fits_alembic_version():
     module = _module()
     assert module.revision == _REVISION.stem and len(module.revision) <= 32
-    assert module.down_revision == "20261202_1000_bootstrap_review"
+    assert module.down_revision == "20261203_1000_gv_ps_prop_names"
 
 
 def test_every_watch_there_already_is_an_entitys_and_it_runs_again(conn):

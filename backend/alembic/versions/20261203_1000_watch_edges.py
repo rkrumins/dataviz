@@ -11,7 +11,7 @@ the revisions before it. The downgrade drops the column and, with it, the relati
 left behind, each would read as an entity's urn that names nothing, held against the limit.
 
 Revision ID: 20261203_1000_watch_edges
-Revises: 20261202_1000_bootstrap_review
+Revises: 20261203_1000_gv_ps_prop_names
 Create Date: 2026-12-03 10:00
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20261203_1000_watch_edges"
-down_revision: Union[str, None] = "20261202_1000_bootstrap_review"
+down_revision: Union[str, None] = "20261203_1000_gv_ps_prop_names"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
