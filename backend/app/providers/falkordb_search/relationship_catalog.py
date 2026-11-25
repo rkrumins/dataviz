@@ -49,6 +49,11 @@ from backend.common.models.search import EdgesPredicate, SearchQuery, SearchScop
 #: The relationships whose properties are all native: their bag is empty.
 _NO_BAG = "(e.properties IS NULL OR e.properties = '{}')"
 
+#: A value ``_v`` of key ``_k`` that is a user's: never the platform's own
+#: numeric confidence (one that isn't a number is the user's, as the readers
+#: take it) — so its values and probe count only the user's.
+_USERS = "NOT (_k = 'confidence' AND typeOf(_v) IN ['Integer', 'Float'])"
+
 #: Native keys that are never a user's property on a relationship with an
 #: empty bag: its identity, content hash and the bag itself. (A ``confidence``
 #: is the platform's only when it is a number, ``_native_keys``.)
@@ -107,7 +112,7 @@ def probe_statement(unit: Unit, ectx: EdgeContext, clamps, keys: List[str]
     params["_keys"] = list(keys)
     params["_probe"] = catalog.PROBE_ENTITIES
     return (f"{head} WITH e WHERE {_NO_BAG} WITH e LIMIT $_probe UNWIND $_keys AS _k "
-            "WITH _k, e[_k] AS _v WHERE _v IS NOT NULL "
+            f"WITH _k, e[_k] AS _v WHERE _v IS NOT NULL AND {_USERS} "
             "RETURN _k, count(DISTINCT _v)", params)
 
 
@@ -118,7 +123,7 @@ def bounds_statement(unit: Unit, ectx: EdgeContext, clamps, keys: List[str]
     head, params = _match(unit, ectx, clamps)
     params["_keys"] = list(keys)
     return (f"{head} WITH e WHERE {_NO_BAG} UNWIND $_keys AS _k WITH _k, e[_k] AS _v "
-            "WHERE typeOf(_v) IN ['Integer', 'Float'] "
+            "WHERE typeOf(_v) IN ['Integer', 'Float'] AND _k <> 'confidence' "
             "RETURN _k, min(CASE WHEN _v >= 0 THEN _v END), max(CASE WHEN _v >= 0 THEN _v END), "
             "min(CASE WHEN _v < 0 THEN _v END), max(CASE WHEN _v < 0 THEN _v END)", params)
 
@@ -131,7 +136,7 @@ def values_statement(unit: Unit, ectx: EdgeContext, clamps, keys: List[str]
     params["_keys"] = list(keys)
     params["_cap"] = catalog.VALUES_MAX + 1
     return (f"{head} WITH e WHERE {_NO_BAG} UNWIND $_keys AS _k "
-            "WITH e, _k, e[_k] AS _v WHERE _v IS NOT NULL "
+            f"WITH e, _k, e[_k] AS _v WHERE _v IS NOT NULL AND {_USERS} "
             "WITH e, _k, CASE WHEN typeOf(_v) = 'List' THEN _v ELSE [_v] END AS _vs "
             "UNWIND _vs AS _x WITH _k, typeOf(_x) AS _t, _x, count(DISTINCT e) AS _c "
             "WITH _k, collect([_t, _x, _c]) AS _vals "

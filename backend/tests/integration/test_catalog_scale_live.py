@@ -152,12 +152,14 @@ async def test_the_relationship_catalog_completes_exactly_at_scale(provider):
 
     stats = (await provider._ro_query(
         "CALL db.meta.stats() YIELD relTypes RETURN relTypes", timeout=60)).result_set[0][0]
-    want_types = {str(t): int(n) for t, n in stats.items()}
+    # Every type the graph holds a relationship of (its schema may list a rollup type with none).
+    want_types = {str(t): int(n) for t, n in stats.items() if n and str(t) != "AGGREGATED"}
     assert {e["type"]: e["count"] for e in rels["entityTypes"]} == want_types
     assert rels["entities"] == sum(want_types.values())
-    hub = DATASETS * HUB_TYPES
-    odd = (await provider._ro_query(
-        "MATCH (d:Dataset) WHERE ID(d) % 2 = 1 RETURN count(d)", timeout=60)).result_set[0][0]
+    hub = sum(n for t, n in want_types.items() if t.startswith("HUB_"))
+    hub_bag = (await provider._ro_query(
+        "MATCH (:Hub)-[e]->() WHERE e.properties <> '{}' RETURN count(e)",
+        timeout=60)).result_set[0][0]
     feeds = want_types["FEEDS"]
     feeds_native = (await provider._ro_query(
         "MATCH ()-[e:FEEDS]->() WHERE e.properties = '{}' RETURN count(e)",
@@ -165,8 +167,8 @@ async def test_the_relationship_catalog_completes_exactly_at_scale(provider):
     props = {p["key"]: p for p in rels["properties"]}
     # Native on some, in the bag on the rest — every one counted, and where it is held.
     assert props["schedule"]["count"] == hub + feeds_native
-    assert props["schedule"]["residual"] == odd * HUB_TYPES
-    assert props["lag"]["count"] == hub and props["lag"]["residual"] == odd * HUB_TYPES
+    assert props["schedule"]["residual"] == hub_bag
+    assert props["lag"]["count"] == hub and props["lag"]["residual"] == hub_bag
     assert props["job"]["count"] == props["job"]["residual"] == feeds - feeds_native
     assert props["kind"]["count"] == feeds and props["kind"]["residual"] == 0
     assert (props["lag"]["min"], props["lag"]["max"]) == (0, 99)

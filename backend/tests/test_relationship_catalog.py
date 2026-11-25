@@ -52,6 +52,11 @@ class _Graph:
         label = cypher.split("MATCH (n:`", 1)[1].split("`", 1)[0]
         self.statements.append(cypher)
         rows = self.rows(label, params)
+        if rc._USERS in cypher or "_k <> 'confidence'" in cypher:
+            # What the statement asks of each value: never the platform's numeric confidence.
+            rows = [(i, t, {k: v for k, v in p.items()
+                            if not (k == "confidence" and _kind(v) in ("Integer", "Float"))})
+                    for i, t, p in rows]
         no_bag = [(i, t, p) for i, t, p in rows if p.get("properties") in (None, "{}")]
         if "RETURN type(e), count(e)" in cypher:
             tally = {}
@@ -72,7 +77,7 @@ class _Graph:
             head = no_bag[:params["_probe"]]
             return _Result([[k, len({json.dumps(p[k]) for _, _, p in head if k in p})]
                             for k in params["_keys"]])
-        if "IN ['Integer', 'Float']" in cypher:
+        if "min(CASE WHEN" in cypher:
             out = []
             for k in params["_keys"]:
                 nums = [p[k] for _, _, p in no_bag if _kind(p.get(k)) in ("Integer", "Float")]
@@ -196,6 +201,24 @@ class TestRelationshipCatalog:
         assert props["job"]["residual"] == 1 and props["job"]["byEntityType"] == {"FEEDS": 1}
         assert props["since"]["kinds"] == {"Integer": 1}
         assert props["confidence"]["values"] == [{"value": "high", "kind": "String", "count": 1}]
+
+    async def test_a_numeric_confidence_beside_a_users_is_never_counted(self, monkeypatch):
+        """In one unit: the platform's numeric confidence on most relationships, a user's text
+        one on a few — only the user's are its values, and the platform's never make the key
+        look high-cardinality."""
+        monkeypatch.setattr(catalog_mod, "VALUES_MAX", 3)
+        graph = _Graph({"Dataset": [("FEEDS", {"properties": "{}", "confidence": i / 10})
+                                    for i in range(8)]
+                                   + [("FEEDS", {"properties": "{}", "confidence": "high"}),
+                                      ("FEEDS", {"properties": "{}", "confidence": "low"})]})
+        monkeypatch.setattr(rc, "relationship_plan",
+                            _plan([Unit("range", "Dataset", 0, None, size=10)]))
+        out, _ = await _follow(_Provider(graph), SearchRunContext(data_version="1", scope_hash="h"))
+        confidence = {p["key"]: p for p in out["properties"]}["confidence"]
+        assert confidence["count"] == 2 and confidence["kinds"] == {"String": 2}
+        assert confidence["distinctExact"] and confidence["distinct"] == 2
+        assert {v["value"] for v in confidence["values"]} == {"high", "low"}
+        assert confidence["min"] is None and confidence["max"] is None
 
     async def test_bags_past_a_reply_are_read_a_page_at_a_time(self, monkeypatch):
         monkeypatch.setattr(rc, "relationship_plan", _plan(UNITS))
