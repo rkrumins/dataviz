@@ -220,11 +220,18 @@ export function PropertyBrowser({
     }
     if (!catalog) {
         return error ? (
-            <div className="flex flex-col gap-2 px-3 py-4 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
-                <span>Couldn't read this view's {edges ? 'relationship properties' : 'properties'} — {error}</span>
-                <button type="button" onClick={refresh} className="self-start underline hover:text-rose-200">
-                    Try again
-                </button>
+            <div role="alert" className="flex items-start gap-2.5 px-3.5 py-3.5 rounded-xl bg-rose-500/[0.07] border border-rose-500/30 text-[11.5px] leading-snug">
+                <AlertTriangle className="mt-px w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400" aria-hidden />
+                <span className="flex-1 min-w-0 flex flex-col items-start gap-2">
+                    <span className="text-rose-700 dark:text-rose-300">Couldn't read this view's {edges ? 'relationship properties' : 'properties'} — {error}</span>
+                    <button
+                        type="button"
+                        onClick={refresh}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-rose-500/10 text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 transition-colors"
+                    >
+                        Try again
+                    </button>
+                </span>
             </div>
         ) : (
             <div className="flex flex-col items-center gap-2 px-3 py-6 text-[11px] text-ink-muted">
@@ -291,7 +298,7 @@ export function PropertyBrowser({
                         type="text"
                         value={query}
                         onChange={(e) => { setQuery(e.target.value); setShown(ROWS_PAGE) }}
-                        placeholder={edges ? 'Filter relationship properties…' : 'Filter properties and tags…'}
+                        placeholder={edges ? 'Filter properties…' : 'Filter properties and tags…'}
                         aria-label={edges ? 'Filter relationship properties' : 'Filter properties and tags'}
                         className={cn(fieldClass, 'pl-9')}
                     />

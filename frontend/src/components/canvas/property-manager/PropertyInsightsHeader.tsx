@@ -9,7 +9,7 @@
  * Relationships · Properties · Relationship types, under a line saying what
  * they are read from — and what they leave out.
  */
-import { Boxes, Database, Info, Layers, RefreshCw, Spline, Tag, Waypoints } from 'lucide-react'
+import { AlertTriangle, Boxes, Database, Info, Layers, RefreshCw, Spline, Tag, Waypoints } from 'lucide-react'
 import { type FC, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -104,7 +104,6 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
                     <div className="flex items-center gap-2 text-[10.5px] text-ink-muted">
                         <span className="min-w-0 truncate" title={catalog.asOf ? formatUtc(catalog.asOf) : undefined}>
                             Exact — {every} read{catalog.asOf ? ` ${timeAgo(catalog.asOf)}` : ''}
-                            {catalog.stale && <span className="text-amber-400"> · the data has changed since</span>}
                         </span>
                         <button
                             type="button"
@@ -115,6 +114,13 @@ export const PropertyInsightsHeader: FC<PropertyInsightsHeaderProps> = ({
                             <RefreshCw className="w-3 h-3" /> Refresh
                         </button>
                     </div>
+                )}
+                {/* Its own line, never cut short: what it says matters more than when. */}
+                {reading === null && catalog.stale && (
+                    <p className="mt-1 flex items-start gap-1 text-[10.5px] leading-snug text-amber-700 dark:text-amber-400">
+                        <AlertTriangle className="mt-px w-3 h-3 shrink-0" aria-hidden />
+                        Out of date — the data has changed since. Refresh to read it again.
+                    </p>
                 )}
                 {error && (
                     <p className="mt-1 text-[10.5px] text-rose-400">

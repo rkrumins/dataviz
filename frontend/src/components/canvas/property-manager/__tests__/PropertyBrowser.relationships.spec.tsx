@@ -271,7 +271,8 @@ describe('PropertyBrowser — the view’s relationships, before and without a c
 
     it('says when what it shows was read before the data changed', () => {
         renderBrowser({ catalog: catalog({ stale: true, asOf: new Date(Date.now() - 3_600_000).toISOString() }) })
-        expect(screen.getByText(/every relationship read 1h ago/)).toHaveTextContent(/the data has changed since/)
+        expect(screen.getByText(/every relationship read 1h ago/)).toBeInTheDocument()
+        expect(screen.getByText(/the data has changed since/)).toHaveTextContent('Out of date — the data has changed since. Refresh to read it again.')
     })
 
     it('says why it can’t list them here, and where they can still be changed', () => {
