@@ -59,6 +59,20 @@ describe('the canvas is the server view plus pending edits', () => {
     expect(out.edges.map((e) => e.id).sort()).toEqual(['flow', 'staged-edge-9'])
   })
 
+  it('keeps a moved node, and its old and new parents\' counts, when the server load does not hold them', () => {
+    // After a reload the server knows nothing of the move: X still sits under P1, whose children
+    // were not loaded, so X is not in the load at all — and both parents carry the old counts.
+    const moved = { ...move('X', 'P2', 'staged-edge-9'), before: { removedLinks: [edge('old', 'P1', 'X', 'HAS')], pin: null } }
+    const newLink = edge('staged-edge-9', 'P2', 'X', 'HAS', { isPending: 'create' })
+    const out = overlayOnReplace(
+      { nodes: [node('P1', 'P1', { childCount: 3 }), node('P2', 'P2', { childCount: 2 })], edges: [] },
+      { nodes: [node('P1', 'P1', { childCount: 2 }), node('P2', 'P2', { childCount: 3 }), node('X', 'Days of cover', { type: 'metric' })], edges: [newLink] },
+      [moved as StagedChange],
+    )
+    expect(out.nodes.map((n) => [n.id, n.data?.childCount ?? n.data?.label])).toEqual([['P1', 2], ['P2', 3], ['X', 'Days of cover']])
+    expect(out.edges.map((e) => e.id)).toEqual(['staged-edge-9'])
+  })
+
   it('a page merged in never re-adds a moved node\'s old parent link', () => {
     const incoming = [edge('old', 'P1', 'X', 'HAS'), edge('sib', 'P1', 'Y', 'HAS')]
     expect(filterIncomingEdges(incoming, [move('X', null, null)]).map((e) => e.id)).toEqual(['sib'])

@@ -66,6 +66,13 @@ function indexChanges(changes: readonly StagedChange[]): PendingIndex {
         const m = c.after as MoveAfter
         idx.moves.set(m.childId, m)
         if (m.edgeId) idx.touchedEdges.add(m.edgeId)
+        // The moved node — which a load may not hold, its old parent's children not being loaded —
+        // and its old and new parents, whose child counts the move shifted.
+        idx.touchedNodes.add(m.childId)
+        if (m.parentId) idx.touchedNodes.add(m.parentId)
+        for (const e of (c.before as { removedLinks?: LineageEdge[] } | undefined)?.removedLinks ?? []) {
+          idx.touchedNodes.add(e.source)
+        }
         break
       }
       default:
