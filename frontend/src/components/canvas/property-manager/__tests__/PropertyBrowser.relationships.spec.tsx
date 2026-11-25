@@ -27,6 +27,7 @@ const notify = vi.fn()
 let relationships: PropertyCatalogState
 let entities: PropertyCatalogState
 let editing: EntityEditing
+let canEditLayer = false
 const asked: Array<[string, CatalogSubject]> = []
 
 vi.mock('@/hooks/usePropertyCatalog', () => ({
@@ -41,6 +42,15 @@ vi.mock('@/components/ui/notifications', () => ({
 vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
     useEntityEditing: () => editing,
+}))
+vi.mock('@/features/ontology/lib/useSemanticLayerAccess', () => ({
+    useSemanticLayerAccess: () => ({ canEdit: canEditLayer }),
+}))
+vi.mock('../PromoteFieldDialog', () => ({
+    PromoteFieldDialog: () => <div role="dialog" aria-label="An entity type's field" />,
+    PromoteRelationshipFieldDialog: ({ propertyKey, types, kinds }: { propertyKey: string; types: object; kinds: object }) => (
+        <div role="dialog" aria-label={`Make ${propertyKey} a field`}>{JSON.stringify({ types, kinds })}</div>
+    ),
 }))
 
 
@@ -102,6 +112,7 @@ const WITH = (key: string, negate = false) => ({ kind: 'edges', edgeClass: 'any'
 beforeEach(() => {
     notify.mockReset()
     asked.length = 0
+    canEditLayer = false
     editing = { offered: true, blocked: null }
     entities = state({ catalog: { ...catalog(), subject: 'entities', entities: 12_400 } })
     localStorage.clear()
@@ -209,12 +220,19 @@ describe('PropertyBrowser — the view’s relationships', () => {
         expect(take()).toEqual({ kind: 'convert', key: 'retries', toKind: 'Integer', target: { kind: 'relationshipsWithKey', key: 'retries' } })
     })
 
-    it('offers to make a property a field only when the caller can', async () => {
+    it('offers to make a property a field of the relationship types carrying it — to who may edit the layer', async () => {
         const user = userEvent.setup()
-        const onPromoteRelationship = vi.fn()
-        renderBrowser({}, { onPromoteRelationship })
+        canEditLayer = true
+        renderBrowser()
         await user.click((await openMenu(user, 'sla')).getByRole('menuitem', { name: 'Make it a field…' }))
-        expect(onPromoteRelationship).toHaveBeenCalledWith(SLA)
+        expect(screen.getByRole('dialog', { name: 'Make sla a field' })).toHaveTextContent(
+            JSON.stringify({ types: SLA.byEntityType, kinds: SLA.kinds }))
+    })
+
+    it('offers no field to who may not edit the layer', async () => {
+        renderBrowser()
+        const menu = await openMenu(userEvent.setup(), 'sla')
+        expect(menu.queryByRole('menuitem', { name: 'Make it a field…' })).toBeNull()
     })
 
     it('marks the properties the draft’s relationship changes touch — never an entity change’s', () => {

@@ -19,8 +19,9 @@
  * elsewhere they are disabled and say why. With several entities selected on
  * the canvas, it offers to compare and edit them in the entity drawer.
  *
- * "Make it a field…" promotes a property to a field of the entity types that carry it, in the
- * data source's semantic layer (``PromoteFieldDialog``) — offered to who may edit the layer.
+ * "Make it a field…" promotes a property to a field of the entity types that carry it — or of the
+ * relationship types — in the data source's semantic layer (``PromoteFieldDialog``,
+ * ``PromoteRelationshipFieldDialog``) — offered to who may edit the layer.
  *
  * The same tab lists the properties of the relationships between the view's entities (``subject``
  * ``relationships``): counted per relationship type, each coloured as the canvas draws it; found
@@ -67,7 +68,7 @@ import { similarGroups } from './op/cleanup'
 import { ANY_RELATIONSHIP, relationshipsWith } from './op/opModel'
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyJobsPanel } from './PropertyJobsPanel'
-import { PromoteFieldDialog } from './PromoteFieldDialog'
+import { PromoteFieldDialog, PromoteRelationshipFieldDialog } from './PromoteFieldDialog'
 import { ReusableChangesPanel } from './ReusableChangesPanel'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, RelationshipTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
@@ -81,9 +82,6 @@ export interface PropertyBrowserProps {
     onCreateRuleFromPredicate: (predicate: Predicate, suggestedName: string) => void
     /** Open + run a predicate in the Advanced Search panel (canvas-owned). */
     onSearchPredicate?: (predicate: Predicate) => void
-    /** Relationships: make a property a field of the relationship types that carry it — "Make it a
-     *  field…" in its row's menu, offered only when this is given. */
-    onPromoteRelationship?: (property: SearchCatalogProperty) => void
 }
 
 /** A bound "search this in Advanced Search" callback passed to rows. */
@@ -114,7 +112,7 @@ const WORDS: Record<CatalogSubject, { one: string; many: string }> = {
 
 
 export function PropertyBrowser({
-    viewId, subject = 'entities', onCreateRuleFromPredicate, onSearchPredicate, onPromoteRelationship,
+    viewId, subject = 'entities', onCreateRuleFromPredicate, onSearchPredicate,
 }: PropertyBrowserProps) {
     const edges = subject === 'relationships'
     const words = WORDS[subject]
@@ -359,9 +357,7 @@ export function PropertyBrowser({
                                 onCreateRule={edges ? undefined : () => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
                                 onCopy={() => copyKey(property.key)}
-                                onPromote={edges
-                                    ? (onPromoteRelationship ? () => onPromoteRelationship(property) : undefined)
-                                    : (canEditLayer ? () => setPromoting(property) : undefined)}
+                                onPromote={canEditLayer ? () => setPromoting(property) : undefined}
                             />
                         ))}
                     </div>
@@ -416,7 +412,10 @@ export function PropertyBrowser({
 
             {promoting && (
                 <PanelErrorBoundary resetKeys={[promoting.key]} onClose={() => setPromoting(null)}>
-                    <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />
+                    {edges
+                        ? <PromoteRelationshipFieldDialog propertyKey={promoting.key} types={promoting.byEntityType}
+                            kinds={promoting.kinds} onClose={() => setPromoting(null)} />
+                        : <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />}
                 </PanelErrorBoundary>
             )}
 
