@@ -73,8 +73,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import csv
 import functools
+import hashlib
 import inspect
 import io
 import json
@@ -87,9 +89,19 @@ from hashlib import blake2b
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from backend.app.providers.falkordb_provider import _edge_from_row, _json_object
+
 from . import config, db, job_lease
+from .entity_serde import (
+    SOURCE_DERIVED_NODE_KEYS,
+    SOURCE_KEY_PREFIX,
+    edge_to_payload,
+    source_node_payload,
+    storable,
+)
 from .falkor_indexes import ensure_urn_indexes
 from .job_lease import AWAITING_DECISION, Draining, Lease, Superseded
 from .job_lease import friendly_infra_error as _friendly_infra_error
@@ -100,15 +112,18 @@ from . import provenance
 from .provenance import commit_provenance
 from .models import (
     BootstrapNodeORM,
+    BootstrapReviewORM,
     BranchORM,
     CommitORM,
+    EdgeVersionORM,
     GraphORM,
     JobORM,
     NodeVersionORM,
     ProjectionStateORM,
     _now,
 )
-from .projection import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
+from .ontology import canonicalize_payload_types
+from .projection import _graph_edge_id, _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
 from .purge_worker import create_purge_job, delete_window
 from .service import (
     ConcurrencyError,
@@ -139,8 +154,8 @@ BOOTSTRAP_JOB_TYPE = "bootstrap"
 #
 # `reset` is first and only ever entered by a restart (:func:`retry_bootstrap`): a new job
 # starts at `counting`, with nothing to throw away.
-PHASES = ("reset", "counting", "nodes", "edges", "validate", "heads", "merkle", "backfill",
-          "finalize")
+PHASES = ("reset", "counting", "nodes", "edges", "connections", "resolve", "validate", "heads",
+          "merkle", "backfill", "finalize")
 # A package seed (``package_seed``) writes a brand-new key instead of backfilling a source graph:
 # its urn indexes are made (and waited for) first, then the copy is projected into it — all before
 # `finalize` flips the head, so the source goes live with its graph in place.
@@ -150,7 +165,8 @@ _PHASES_BY_ORIGIN = {"graph": PHASES, "package": PACKAGE_PHASES}
 
 # Percent shown to the user. Scanning dominates the wall clock, so it owns the bulk
 # of the bar; the tail phases are bounded work with honest, distinct labels.
-_PHASE_FLOOR = {"reset": 0, "counting": 0, "nodes": 2, "edges": 2, "validate": 72,
+_PHASE_FLOOR = {"reset": 0, "counting": 0, "nodes": 2, "edges": 2, "connections": 72,
+                "resolve": 72, "validate": 72,
                 "heads": 76, "merkle": 88, "backfill": 92, "index": 89, "project": 90,
                 "finalize": 98}
 _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
@@ -165,6 +181,7 @@ _RESET = (
     ("merkle_nodes", "graph_id, commit_id, path", "commit_id = :c"),
     ("entity_heads", "graph_id, branch_id, entity_id", "branch_id = :b"),
     ("bootstrap_nodes", "graph_id, falkor_id", ""),
+    ("bootstrap_review", "graph_id, kind, entity_id, seq", ""),
 )
 
 # What a person can do about a failed job, by its failure code: an INTEGRITY failure (the copy
@@ -414,6 +431,37 @@ async def _insert_versions(s, kind: str, ctx, graph_id: str, dicts: List[dict]) 
     return set(res.scalars().all())
 
 
+async def _land_every_edge(s, ctx, graph_id: str, dicts: List[dict],
+                           landed: Set[str]) -> Tuple[int, Set[str]]:
+    """Give each edge row that didn't land — its id is a connection's an earlier window copied —
+    an id of its own (:func:`_own_id`) and insert it again, until every one has landed: another
+    connection that shares a source id, or another version of one, is never dropped. Returns how
+    many were re-keyed, and every entity id that landed."""
+    taken = {d["entity_id"] for d in dicts}
+    left = [d for d in dicts if d["entity_id"] not in landed]
+    moved = 0
+    for _attempt in range(8):
+        if not left:
+            return moved, landed
+        for d in left:
+            d["entity_id"] = _own_id(d["entity_id"], taken)
+            d["id"] = _vid("evb", ctx.commit_id, d["entity_id"])
+            taken.add(d["entity_id"])
+        moved += len(left)
+        landed = landed | await _insert_versions(s, "edges", ctx, graph_id, left)
+        left = [d for d in left if d["entity_id"] not in landed]
+    raise BootstrapFailure("Some connections could not be given an id of their own, so the copy "
+                           "would lose them. Start over; if it happens again, report it.",
+                           "internal")
+
+
+async def _insert_review(s, rows: List[dict]) -> None:
+    """Hold rows for the review (``bootstrap_review``), in the window's own transaction; a row a
+    replayed window held already is kept as it is."""
+    for chunk in _chunks(rows, 1000):
+        await s.execute(pg_insert(BootstrapReviewORM).values(list(chunk)).on_conflict_do_nothing())
+
+
 def _readable(props: dict) -> dict:
     """A source node's properties as the node model takes them: a ``lastSyncedAt`` some loader
     stored as a bare epoch number, as its text. The model takes a string and the reader drops a
@@ -422,6 +470,76 @@ def _readable(props: dict) -> dict:
     if synced is not None and not isinstance(synced, str):
         props["lastSyncedAt"] = str(synced)
     return props
+
+
+def _node_payload(props: dict, label: Optional[str], rules) -> Optional[dict]:
+    """A source node (``properties(n)`` and its label) as the payload history keeps — every
+    property it holds (``entity_serde.source_node_payload``), its type in the ontology's spelling.
+    None when it has no urn. A value history can't hold is still in it (see :func:`storable`)."""
+    payload = source_node_payload(_readable(dict(props or {})), label)
+    if payload is None or not payload.get("urn"):
+        return None
+    canonicalize_payload_types(payload, rules)
+    if not payload.get("entityType"):
+        payload["entityType"] = label or "unknown"
+    return _sanitize_node_properties(payload)
+
+
+def _edge_payload(src_urn: str, tgt_urn: str, rel, props: dict, rules) -> Tuple[str, dict]:
+    """A source relationship (``properties(r)``) as ``(its id, the payload history keeps)``: every
+    property it holds (``falkordb_provider._edge_from_row``), its type in the ontology's spelling."""
+    edge = _edge_from_row(src_urn, tgt_urn, str(rel), props)
+    payload = edge_to_payload(edge)
+    canonicalize_payload_types(payload, rules)
+    payload["edgeType"] = str(payload.get("edgeType") or rel)
+    return edge.id, payload
+
+
+#: A source node's top-level fields the copy fills from its own properties of those names.
+_NODE_FIELDS = ("displayName", "qualifiedName", "description", "tags", "layerAssignment",
+                "sourceSystem", "lastSyncedAt", "entityType")
+
+
+def _unaccounted(raw: dict, payload: dict, *, label: Optional[str] = None,
+                 rel: Optional[str] = None) -> List[str]:
+    """The source's property names the payload has nowhere — the check that a conversion lost
+    nothing, made by name, apart from the conversion itself: a name is accounted for as one of
+    the payload's properties, as ``__src.<name>``, or as the field of that name. A node's derived
+    bookkeeping, an ``entityId`` that is its urn and an ``entityType`` that is its label say
+    nothing new; an edge's ``id`` is its identity. ``rel`` marks an edge."""
+    names: List[str] = []
+    bags = ("properties",) if rel is not None else ("properties", "propertiesRaw")
+    projected = rel is not None and "gvHash" in raw
+    for k, v in raw.items():
+        if k in bags and _json_object(v) is not None:
+            names.extend(_json_object(v))
+        elif not projected:
+            names.append(k)
+    props = payload.get("properties") or {}
+    lost = []
+    for k in dict.fromkeys(names):
+        if k in props or f"{SOURCE_KEY_PREFIX}{k}" in props:
+            continue
+        if rel is not None:
+            if k in ("id", "gvHash") or (k == "confidence" and payload.get("confidence") is not None):
+                continue
+        else:
+            if k in SOURCE_DERIVED_NODE_KEYS or k == "urn" or (k in _NODE_FIELDS and k in payload):
+                continue
+            if (k == "entityId" and raw.get(k) == raw.get("urn")) or (
+                    k == "entityType" and raw.get(k) == label):
+                continue
+        lost.append(k)
+    return lost
+
+
+def _value_rows(graph_id: str, entity_id: str, issues: List[dict], about: dict) -> List[dict]:
+    """``bootstrap_review`` rows (kind ``values``) for the values one entity's payload had to change
+    to be stored (``entity_serde.storable``), each naming its property and what was wrong."""
+    return [{"graph_id": graph_id, "kind": "values", "entity_id": entity_id, "seq": i,
+             "detail": {**about, "property": i_["path"].removeprefix("properties."),
+                        "problem": i_["problem"], "storedAs": i_["value"]}}
+            for i, i_ in enumerate(issues)]
 
 
 def _label_of(labels) -> Optional[str]:
@@ -476,7 +594,8 @@ class _Window:
     rejects: dict
     meta: Dict[str, Tuple[str, int]]             # nodes: entity id → (source label, internal id)
     self_loops: int = 0                          # edges: between two copies of one urn
-    dupes: int = 0                               # edges: same id twice in the window
+    dupes: int = 0                               # edges: one connection said twice under one id
+    reidentified: int = 0                        # edges: given an id of their own (`_own_id`)
     # The graph's own spellings of each declared type (``projection_state.physical_types``).
     spellings: Dict[str, Set[str]] = field(default_factory=dict)
 
@@ -585,8 +704,9 @@ class BootstrapRunner:
                 if done == _PAUSED:
                     # The pre-flight already put the job back to pending, waiting for a person —
                     # it holds no slot while it waits, and a decision re-queues it.
-                    logger.info("bootstrap %s paused: duplicate identifiers await a decision "
-                                "(graph=%s)", job_id, graph_id)
+                    logger.info("bootstrap %s paused: %s await a decision (graph=%s)", job_id,
+                                "connections and values held for review"
+                                if phase == "connections" else "duplicate identifiers", graph_id)
                     return {"job_id": job_id, "status": "paused"}
                 if not done:
                     continue                                   # same phase, next window
@@ -831,6 +951,7 @@ class BootstrapRunner:
             pause = dup is not None and decided != dup["fingerprint"]
             values: Dict[str, Any] = {"summary": summary}
             if pause:
+                summary["awaiting"] = "duplicates"
                 values.update(_phase_start(AWAITING_DECISION), status="pending")
             await lease.checkpoint(s, expect_cursor=cursor, **values)
         src = summary.get("source") or {}
@@ -948,12 +1069,20 @@ class BootstrapRunner:
             # come from what RETURNING says LANDED, not from the batch: whatever didn't land is a
             # duplicate. (Rows and cursor commit together, and only from the cursor this window
             # started at, so a resume never re-scans a window that landed — a conflict here really
-            # is a duplicate.)
+            # is a duplicate.) A node that didn't land is a duplicate identifier; a connection
+            # gets an id of its own and lands — whether it is another version of one already
+            # copied is the ``connections`` phase's to settle, never a silent drop here.
             landed = await _insert_versions(s, kind, ctx, graph_id, win.dicts)
+            if kind == "edges":
+                more, landed = await _land_every_edge(s, ctx, graph_id, win.dicts, landed)
+                rekeyed += more
             job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             written: Dict[str, int] = {}
             sample = None
+            await _insert_review(s, [
+                r for d in win.dicts if d.get("issues") and d["entity_id"] in landed
+                for r in _value_rows(graph_id, d["entity_id"], d["issues"], d["about"])])
             if kind == "nodes":
                 sample = _Reservoir(config.BOOTSTRAP_SAMPLE_K,
                                     (summary.get("sample") or {}).get("nodes"),
@@ -973,17 +1102,24 @@ class BootstrapRunner:
                         _add_reject_sample(win.rejects, {
                             "kind": "node", "id": eid,
                             "reason": "another item shares this identifier"})
-                sample = {"nodes": sample.items, "nodesSeen": sample.seen}
+                sample = {**(summary.get("sample") or {}), "nodes": sample.items,
+                          "nodesSeen": sample.seen}
             else:
+                # The edges validation re-reads from the source, where it holds them (``at``).
+                sample = _Reservoir(config.BOOTSTRAP_SAMPLE_K,
+                                    (summary.get("sample") or {}).get("edges"),
+                                    (summary.get("sample") or {}).get("edgesSeen", 0))
                 for d in win.dicts:
                     if d["entity_id"] in landed:
                         _bump(written, d["edge_type"])
-                win.dupes += len(win.dicts) - len(landed)
+                        sample.offer([*d["at"], d["entity_id"]])
+                sample = {**(summary.get("sample") or {}), "edges": sample.items,
+                          "edgesSeen": sample.seen}
             summary = _merge_scan_summary(
                 summary, kind, scanned=len(rows), written=len(landed), tallies=win.scanned,
                 rejects=win.rejects, sample=sample, dupes=win.dupes, written_tallies=written,
-                collapsed=win.collapsed, self_loops=win.self_loops, rekeyed=rekeyed,
-                spellings=win.spellings)
+                collapsed=win.collapsed, self_loops=win.self_loops,
+                rekeyed=rekeyed + win.reidentified, spellings=win.spellings)
             done, total = (int(summary["written"]["nodes"]) + int(summary["written"]["edges"]),
                            job.total)
             # The next window's width: the one that worked — and, for edges in a sparse band,
@@ -1038,6 +1174,105 @@ class BootstrapRunner:
             return False
         self._logged[job_id] = now
         return True
+
+    async def _phase_connections(self, lease: Lease, graph_id: str):
+        """Settle every connection the source holds more than once — the same ends and type,
+        whether under one id or several — before anything is checked or goes live. Version history
+        keeps one connection per source, type and target, and the projector writes one.
+
+        Copies that say the same thing lose nothing: one read twice under one source id folds,
+        ones with ids of their own stay (:func:`_settle`). Copies that differ are held whole
+        (``bootstrap_review``, kind ``copies``), out of the copy, for a person to decide — keep
+        one, or merge them. A window of groups at a time, each its
+        own fenced transaction (``connections:<key>``), found by one aggregate over the import
+        commit. When none is left, the job pauses for review if anything is held — the values
+        stored as text included — and no decision was made on this very list."""
+        ctx = await self._ctx(lease, graph_id)
+        async with self._session() as s:
+            job = await s.get(JobORM, lease.job_id)
+            cursor, summary = job.last_cursor, dict(job.summary or {})
+            after = json.loads(cursor.split(":", 1)[1]) if cursor else None
+            groups = await _connection_groups(s, graph_id, ctx.commit_id, after,
+                                              _CONNECTIONS_PAGE)
+            if groups:
+                held_vids = [c[1] for g in groups if _differ(g) for c in g[3]]
+                payloads = await _payloads_of(s, graph_id, held_vids)
+                held, drop, tally = _settle(graph_id, groups, payloads)
+                await _insert_review(s, held)
+                for chunk in _chunks(drop, 5000):
+                    await s.execute(text(
+                        f'DELETE FROM {_t("edge_versions")} WHERE graph_id = :g AND id = ANY(:ids)'
+                    ).bindparams(g=graph_id, ids=list(chunk)))
+                summary = _merge_connections(summary, tally)
+                key = json.dumps(list(groups[-1][:3]))
+                await lease.checkpoint(s, expect_cursor=cursor, summary=summary,
+                                       last_cursor=f"connections:{key}")
+                return False                               # the next call starts after them
+            review = await _review_summary(s, graph_id)
+            if review is None:
+                return True
+            summary["review"] = review
+            decided = (summary.get("reviewPolicy") or {}).get("fingerprint") == review["fingerprint"]
+            values: Dict[str, Any] = {"summary": summary}
+            if not decided:
+                summary["awaiting"] = "review"
+                values.update(_phase_start(AWAITING_DECISION), status="pending")
+            await lease.checkpoint(s, expect_cursor=cursor, **values)
+        logger.info("bootstrap %s: %s connection(s) held in %s version(s), %s value(s) stored as "
+                    "text — %s", lease.job_id, review["copies"]["connections"],
+                    review["copies"]["versions"], review["values"]["count"],
+                    "as decided" if decided else "waiting for a review")
+        return True if decided else _PAUSED
+
+    async def _phase_resolve(self, lease: Lease, graph_id: str) -> bool:
+        """Copy each held connection as the review decided (:func:`_resolved`): the version kept,
+        or the versions merged. A window of connections at a time (``resolve:<last id>``), each
+        its own fenced transaction; version rows insert ON CONFLICT DO NOTHING, so a replayed
+        window is a no-op. Values were stored as text by the copy: nothing to do for them."""
+        ctx = await self._ctx(lease, graph_id)
+        async with self._session() as s:
+            job = await s.get(JobORM, lease.job_id)
+            cursor, summary = job.last_cursor, dict(job.summary or {})
+            policy = (summary.get("reviewPolicy") or {}).get("copies") or {}
+            after = cursor.split(":", 1)[1] if cursor else None
+            ids = (await s.execute(text(
+                f'SELECT DISTINCT entity_id FROM {_t("bootstrap_review")} '
+                "WHERE graph_id = :g AND kind = 'copies' AND (CAST(:a AS text) IS NULL "
+                "OR entity_id > :a) ORDER BY entity_id LIMIT :n"
+            ).bindparams(g=graph_id, a=after, n=_CONNECTIONS_PAGE))).scalars().all()
+            if not ids:
+                return True
+            rows = (await s.execute(select(
+                BootstrapReviewORM.entity_id, BootstrapReviewORM.seq, BootstrapReviewORM.detail,
+                BootstrapReviewORM.choice).where(
+                BootstrapReviewORM.graph_id == graph_id, BootstrapReviewORM.kind == "copies",
+                BootstrapReviewORM.entity_id.in_(list(ids))).order_by(
+                BootstrapReviewORM.entity_id, BootstrapReviewORM.seq))).all()
+            groups: Dict[str, List[dict]] = {}
+            choices: Dict[str, Optional[dict]] = {}
+            for eid, seq, detail, choice in rows:
+                groups.setdefault(eid, []).append({"seq": seq, "detail": detail})
+                if seq == 1:
+                    choices[eid] = choice
+            now = _now()
+            dicts = []
+            for eid, copies in groups.items():
+                payload = _resolved(copies, choices.get(eid), policy)
+                dicts.append(dict(
+                    graph_id=graph_id, id=_vid("evb", ctx.commit_id, eid), entity_id=eid,
+                    content_hash=content_hash(payload), payload=payload,
+                    source_entity_id=payload["sourceEntityId"],
+                    target_entity_id=payload["targetEntityId"], edge_type=payload["edgeType"],
+                    confidence=payload.get("confidence"), discriminator=None, created_at=now))
+            landed = await _insert_versions(s, "edges", ctx, graph_id, dicts)
+            written: Dict[str, int] = {}
+            for d in dicts:
+                if d["entity_id"] in landed:
+                    _bump(written, d["edge_type"])
+            summary = _merge_connections(summary, {"resolved": len(landed), "byType": written})
+            await lease.checkpoint(s, expect_cursor=cursor, summary=summary,
+                                   last_cursor=f"resolve:{ids[-1]}")
+        return False                                       # the next call starts after them
 
     async def _phase_validate(self, lease: Lease, graph_id: str) -> bool:
         """Prove the copy before ANY of it becomes visible.
@@ -1110,6 +1345,13 @@ class BootstrapRunner:
             graph_id, ctx.commit_id, ctx, sampled, await self._rules(lease, ctx))
         check("sample_matches", not mismatched,
               f"{matched} of {len(sampled)} re-checked items match exactly")
+        # 7b. The same for connections: re-read where the source holds them, every property.
+        edge_sampled = list((summary.get("sample") or {}).get("edges") or [])
+        edge_matched, edge_mismatched, edge_skipped = await self._verify_edge_sample(
+            graph_id, ctx, edge_sampled, await self._rules(lease, ctx))
+        check("edge_sample_matches", not edge_mismatched,
+              f"{edge_matched} of {len(edge_sampled) - edge_skipped} re-checked connections match "
+              "exactly")
         # 8. One spelling per type. History keeps the declared spelling; the projector writes the
         #    graph's own back into it (projection_state.physical_types), so there must be one.
         spelled = _spelled_two_ways(summary)
@@ -1126,7 +1368,16 @@ class BootstrapRunner:
             "edgeTypes": dict(scanned.get("byType") or {}),
             "sampleChecked": len(sampled),
             "sampleMismatched": mismatched[:10],
-            "mergedDuplicateConnections": int(summary.get("collapsedParallelEdges", 0)),
+            "edgeSampleChecked": len(edge_sampled) - edge_skipped,
+            "edgeSampleMismatched": edge_mismatched[:10],
+            # Copies of one connection that said the same thing: one is kept, nothing is lost.
+            "mergedDuplicateConnections": int(summary.get("collapsedParallelEdges", 0))
+            + int((summary.get("connections") or {}).get("folded", 0)),
+            # What the review decided, and what was kept as the source has it but elsewhere.
+            "resolvedConnections": int((summary.get("connections") or {}).get("resolved", 0)),
+            "reidentifiedConnections": int(summary.get("rekeyedEdges") or 0),
+            "valuesStoredAsText": int(((summary.get("review") or {}).get("values") or {})
+                                      .get("count", 0)),
             # Not copied because the app can't see them either (no identifier) — stated
             # plainly rather than hidden, so "everything was copied" stays true.
             "skippedWithoutIdentifier": {
@@ -1579,37 +1830,43 @@ class BootstrapRunner:
         paged reader is not that: a page a node with no urn shortened read as the last one, and
         it read relationships to such nodes, the rollups, and child counts no history holds.
 
-        Returns the rows; each declared type's spellings in the graph (``{"nodes": {type:
-        {labels}}, "edges": {...}}``, as the enable's ``physicalTypes``); and the identifiers
-        several nodes share with different contents, left out of the rows, since no one copy is
-        the graph's. A server that cuts replies short is refused first (:class:`BootstrapFailure`)."""
-        from backend.app.providers.falkordb_provider import _edge_from_row, _node_from_props
-        from backend.app.providers.versioned_bootstrap import canonicalize_rows
-
+        Returns the rows — every property each holds, as the enable copies it; each declared
+        type's spellings in the graph (``{"nodes": {type: {labels}}, "edges": {...}}``, as the
+        enable's ``physicalTypes``); and the identifiers several nodes share with different
+        contents, and the connections held more than once with different properties, left out of
+        the rows, since no one copy is the graph's. A server that cuts replies short is refused
+        first, and so is a value history can't store (:class:`BootstrapFailure`)."""
         await self._require_whole_replies(client)
         max_id = await self._max_id(client)
         full = min(config.BOOTSTRAP_SCAN_WIDTH, _PROPS_ROWS_CAP)
         nodes: Dict[str, dict] = {}
-        edges: Dict[str, dict] = {}
         spellings: Dict[str, Dict[str, Set[str]]] = {"nodes": {}, "edges": {}}
         clashes: Set[str] = set()
+        unstorable: List[str] = []
         lo, width = 0, full
         while max_id is not None and lo <= max_id:
             found, width = await self._scan(client, "nodes", lo, width)
             lo += width
             for _fid, labels, props in found:
                 label = _label_of(labels)
-                node = _node_from_props(_readable(dict(props or {})), label)
-                if node is None or not node.urn:
+                payload = _node_payload(dict(props or {}), label, rules)
+                if payload is None:
                     continue
-                row = {"kind": "node", "id": node.urn,
-                       **node.model_dump(by_alias=True, exclude_none=True)}
-                canonicalize_rows([row], rules)
-                row["entityType"] = row.get("entityType") or label or "unknown"
+                payload, issues = storable(payload)
+                urn = str(payload["urn"])
+                unstorable.extend(f"the item {urn}: {i['path'].removeprefix('properties.')} "
+                                  f"({i['problem']})" for i in issues)
+                row = {"kind": "node", "id": urn, **payload}
                 if label:
                     spellings["nodes"].setdefault(row["entityType"], set()).add(label)
-                if nodes.setdefault(node.urn, row) != row:
-                    clashes.add(node.urn)
+                if nodes.setdefault(urn, row) != row:
+                    clashes.add(urn)
+        # As the enable copies them: a connection read twice under one id is one; one sharing
+        # another's id gets one of its own; copies of one connection (same ends and type) that
+        # differ are left out and listed, as identifiers several nodes share are — there is no
+        # review here, the enable is where they are decided.
+        by_id: Dict[str, dict] = {}
+        versions: Dict[Tuple[str, str, str], Dict[str, List[str]]] = {}
         lo = 0
         while max_id is not None and lo <= max_id:
             width, _held = await self._fit_edge_window(client, lo, full)
@@ -1618,18 +1875,36 @@ class BootstrapRunner:
             for src_id, tgt_id, src_urn, tgt_urn, rel, props in found:
                 if src_urn == tgt_urn and src_id != tgt_id:
                     continue                       # two copies of one urn joined: not lineage
-                edge = _edge_from_row(src_urn, tgt_urn, str(rel), dict(props or {}))
-                row = {"kind": "edge", "id": edge.id, "edgeType": edge.edge_type,
-                       "source": src_urn, "target": tgt_urn}
-                if edge.confidence is not None:
-                    row["confidence"] = edge.confidence
-                if edge.properties:
-                    row["properties"] = dict(edge.properties)
-                canonicalize_rows([row], rules)
+                eid, payload = _edge_payload(src_urn, tgt_urn, rel, dict(props or {}), rules)
+                payload, issues = storable(payload)
+                unstorable.extend(f"the connection {eid}: {i['path'].removeprefix('properties.')} "
+                                  f"({i['problem']})" for i in issues)
+                row = {"kind": "edge", "edgeType": payload["edgeType"], "source": src_urn,
+                       "target": tgt_urn}
+                for k in ("confidence", "properties"):
+                    if payload.get(k) is not None:
+                        row[k] = payload[k]
                 spellings["edges"].setdefault(row["edgeType"], set()).add(str(rel))
-                edges.setdefault(edge.id, row)
+                key = (src_urn, row["edgeType"].upper(), tgt_urn)
+                said = json.dumps(row, sort_keys=True, default=str)
+                held = by_id.get(eid)
+                if held is not None:
+                    if {k: v for k, v in held.items() if k != "id"} == row:
+                        continue                   # the same connection, read twice
+                    eid = _own_id(eid, by_id)
+                by_id[eid] = {"id": eid, **row}
+                versions.setdefault(key, {}).setdefault(said, []).append(eid)
+        differ = {eid for said in versions.values() if len(said) > 1
+                  for eids in said.values() for eid in eids}
+        clashes |= differ
+        if unstorable:
+            shown = "; ".join(unstorable[:5]) + (f" — and {len(unstorable) - 5:,} more"
+                                                 if len(unstorable) > 5 else "")
+            raise BootstrapFailure(
+                f"The graph holds values version history can't store as they are ({shown}). "
+                "Change or remove them in the graph, then try again.", "integrity")
         rows = [r for urn, r in nodes.items() if urn not in clashes]
-        return rows + list(edges.values()), spellings, clashes
+        return rows + [r for eid, r in by_id.items() if eid not in differ], spellings, clashes
 
     async def _known_nodes(self, graph_id: str, commit_id: str, urns) -> set:
         """Which endpoint urns already exist as imported nodes (node phase precedes the
@@ -1648,23 +1923,17 @@ class BootstrapRunner:
         return known
 
     def _nodes_to_rows(self, rows, ctx, graph_id, rules, losers) -> _Window:
-        from backend.app.providers.falkordb_provider import _node_from_props
-        from backend.app.providers.versioned_bootstrap import canonicalize_rows
         now = _now()
         win = _Window(dicts=[], scanned={}, collapsed={}, meta={},
-                      rejects={"duplicateUrns": 0, "byLabel": {}, "samples": []})
+                      rejects={"duplicateUrns": 0, "byLabel": {}, "unaccountedProperties": 0,
+                               "samples": []})
         seen: set = set()
         for fid, labels, props in rows:
-            props = _readable(dict(props or {}))
+            raw = dict(props or {})
             label = _label_of(labels)
-            node = _node_from_props(props, label)
-            if node is None or not node.urn:
+            payload = _node_payload(raw, label, rules)
+            if payload is None:
                 continue                                   # filtered by the scan; belt-and-braces
-            row = {"kind": "node", **node.model_dump(by_alias=True, exclude_none=True)}
-            canonicalize_rows([row], rules)
-            if not row.get("entityType"):
-                row["entityType"] = label or "unknown"
-            payload = _sanitize_node_properties({k: v for k, v in row.items() if k != "kind"})
             et = str(payload.get("entityType") or "unknown")
             _bump(win.scanned, et)
             if label:
@@ -1673,10 +1942,10 @@ class BootstrapRunner:
             # same internal id, urn AND label. FalkorDB re-uses a deleted node's id, so a copy
             # deleted while the job waited may have handed its id to a different node, which
             # must be copied like any other.
-            if (int(fid), str(props.get("urn")), label) in losers:
+            if (int(fid), str(raw.get("urn")), label) in losers:
                 _bump(win.collapsed, et)
                 continue
-            eid = node.urn
+            eid = str(payload["urn"])
             if eid in seen:
                 win.rejects["duplicateUrns"] += 1
                 _bump(win.rejects["byLabel"], et)
@@ -1684,6 +1953,8 @@ class BootstrapRunner:
                                                  "reason": "another item shares this identifier"})
                 continue
             seen.add(eid)
+            _count_unaccounted(win.rejects, "node", eid, _unaccounted(raw, payload, label=label))
+            payload, issues = storable(payload)
             ch = content_hash(payload)
             win.meta[eid] = (label or "", int(fid))
             win.dicts.append(dict(
@@ -1693,17 +1964,21 @@ class BootstrapRunner:
                 actor=ctx.actor, created_at=now, urn=payload.get("urn"),
                 entity_type=payload.get("entityType"), display_name=payload.get("displayName"),
                 qualified_name=payload.get("qualifiedName"),
+                issues=issues, about={"entityKind": "node", "name": payload.get("displayName"),
+                                      "entityType": et},
             ))
         return win
 
     def _edges_to_rows(self, rows, ctx, graph_id, rules, live: set) -> _Window:
-        from backend.app.providers.falkordb_provider import _edge_from_row
-        from backend.app.services.versioning.entity_serde import edge_to_payload
-        from backend.app.services.versioning.ontology import canonicalize_payload_types
         now = _now()
         win = _Window(dicts=[], scanned={}, collapsed={}, meta={},
-                      rejects={"danglingEdges": 0, "samples": []})
-        seen: set = set()
+                      rejects={"danglingEdges": 0, "unaccountedProperties": 0, "samples": []})
+        # Each id the window gives a connection, with what it says: the same connection said twice
+        # (same ends, type and content) is one; anything else under an id already given — another
+        # connection that shares it, or another version of this one — gets an id of its own, so
+        # nothing is dropped here. Versions of one connection are reconciled after the copy
+        # (``connections``), with copies that share no id at all.
+        seen: Dict[str, Tuple[str, Tuple[str, str, str]]] = {}
         for src_id, tgt_id, src_urn, tgt_urn, rel, props in rows:
             # Two COPIES of one urn joined by an edge: collapsed into one item, it would point at
             # itself — an artefact of the duplicate, not lineage. Dropped and counted. One node
@@ -1716,21 +1991,23 @@ class BootstrapRunner:
                 _add_reject_sample(win.rejects, {"kind": "edge", "reason": "endpoint item not found",
                                                  "source": src_urn, "target": tgt_urn})
                 continue
-            edge = _edge_from_row(src_urn, tgt_urn, str(rel), dict(props or {}))
-            eid = edge.id
-            if eid in seen:
-                win.dupes += 1
-                continue
-            seen.add(eid)
+            raw = dict(props or {})
             # Canonical edge payload (confidence TOP-LEVEL, properties NESTED) via the shared
-            # contract. The old hand-built shape FLATTENED user props and dropped `confidence`, so a
-            # rebuild's reseed — which reads the canonical shape — blanked both. Endpoints are the
-            # scan's urns (edge.source_urn/target_urn == src_urn/tgt_urn).
-            payload = edge_to_payload(edge)
-            canonicalize_payload_types(payload, rules)      # rewrite edgeType casing in place
-            et = str(payload.get("edgeType") or rel)
-            payload["edgeType"] = et
+            # contract, every property the relationship holds kept. Endpoints are the scan's urns.
+            eid, payload = _edge_payload(src_urn, tgt_urn, rel, raw, rules)
+            lost = _unaccounted(raw, payload, rel=str(rel))
+            payload, issues = storable(payload)
+            et = payload["edgeType"]
             ch = content_hash(payload)
+            said = (ch, (src_urn, et.upper(), tgt_urn))
+            if eid in seen:
+                if seen[eid] == said:
+                    win.dupes += 1
+                    continue
+                eid = _own_id(eid, seen)
+                win.reidentified += 1
+            seen[eid] = said
+            _count_unaccounted(win.rejects, "edge", eid, lost)
             _bump(win.scanned, et)
             win.spellings.setdefault(et, set()).add(str(rel))
             win.dicts.append(dict(
@@ -1740,8 +2017,76 @@ class BootstrapRunner:
                 actor=ctx.actor, created_at=now, source_entity_id=src_urn,
                 target_entity_id=tgt_urn, edge_type=et, confidence=payload.get("confidence"),
                 discriminator=payload.get("discriminator"),
+                issues=issues, about={"entityKind": "edge", "edgeType": et,
+                                      "source": src_urn, "target": tgt_urn},
+                # Where the source holds it, for the edge sample validation re-reads.
+                at=[int(src_id), int(tgt_id), src_urn, tgt_urn, str(rel)],
             ))
         return win
+
+    async def _verify_edge_sample(self, graph_id: str, ctx, samples, rules
+                                  ) -> Tuple[int, List[dict], int]:
+        """Re-read sampled connections from the SOURCE, every property, and compare content
+        hashes with what was stored — as :meth:`_verify_sample` does for items.
+
+        SEEK, don't scan: each end is found by its label and urn (the per-label index), then
+        checked against its internal id — the labels come from the pre-flight's own table — and
+        the relationship is matched between the two, never by walking one end's relationships. A
+        sampled connection that is no longer in the copy as it was read (a copy that folded into
+        another, a version a review merged) is not checked: ``skipped``. Returns ``(matched,
+        mismatched, skipped)``."""
+        if not samples:
+            return 0, [], 0
+        client = await self._client(ctx)
+        by_vid = {_vid("evb", ctx.commit_id, it[5]): it for it in samples}
+        async with self._session() as s:
+            stored = dict((await s.execute(select(EdgeVersionORM.id, EdgeVersionORM.content_hash)
+                                           .where(EdgeVersionORM.graph_id == graph_id,
+                                                  EdgeVersionORM.id.in_(list(by_vid))))).all())
+            # A copy the review held: its connection is now what a person decided, not this copy.
+            decided: Set[str] = set()
+            for eid, ids in (await s.execute(text(
+                    f"SELECT entity_id, detail->'ids' FROM {_t('bootstrap_review')} "
+                    "WHERE graph_id = :g AND kind = 'copies' "
+                    "AND (entity_id = ANY(:e) OR (detail->'ids') ?| CAST(:e AS text[]))"
+            ).bindparams(g=graph_id, e=[it[5] for it in samples]))).all():
+                decided.add(eid)
+                decided.update(ids or [])
+            stored = {v: h for v, h in stored.items() if by_vid[v][5] not in decided}
+            labels = dict((await s.execute(select(BootstrapNodeORM.falkor_id, BootstrapNodeORM.label)
+                                           .where(BootstrapNodeORM.graph_id == graph_id,
+                                                  BootstrapNodeORM.falkor_id.in_(
+                                                      {int(i) for it in samples for i in it[:2]}))
+                                           )).all())
+        groups: Dict[Tuple[str, str, str], List[dict]] = {}
+        for vid, (sid, tid, s_urn, t_urn, rel, _eid) in by_vid.items():
+            if vid in stored:
+                groups.setdefault((labels.get(int(sid)) or "", str(rel), labels.get(int(tid)) or ""),
+                                  []).append({"k": vid, "s": s_urn, "t": t_urn, "sid": int(sid),
+                                              "tid": int(tid)})
+        found: Dict[str, Set[str]] = {}
+        for (sl, rel, tl), items in groups.items():
+            cypher = (f"UNWIND $edges AS it MATCH {_copy('a', sl or None, 'it.s')} WHERE ID(a) = it.sid "
+                      f"MATCH {_copy('b', tl or None, 'it.t')} WHERE ID(b) = it.tid "
+                      f"WITH it, a, b MATCH (a)-[r:{_q_label(rel)}]->(b) RETURN it.k, properties(r)")
+            for chunk in _chunks(items, _PROPS_ROWS_CAP):
+                res = await _q(client, cypher, {"edges": list(chunk)},
+                               timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                for vid, props in getattr(res, "result_set", None) or []:
+                    it = by_vid[vid]
+                    _eid, payload = _edge_payload(it[2], it[3], it[4], dict(props or {}), rules)
+                    found.setdefault(vid, set()).add(content_hash(storable(payload)[0]))
+        matched, mismatched = 0, []
+        for vid, it in by_vid.items():
+            if vid not in stored:
+                continue
+            if stored[vid] in found.get(vid, set()):
+                matched += 1
+            else:
+                mismatched.append({"kind": "edge", "id": it[5], "source": it[2], "target": it[3],
+                                   "reason": "changed in the source" if vid in found
+                                   else "no longer in the source"})
+        return matched, mismatched, len(by_vid) - len(stored)
 
     async def _verify_sample(self, graph_id, commit_id, ctx, samples, rules) -> Tuple[int, List[dict]]:
         """Re-read sampled entities from the SOURCE and compare content hashes with what
@@ -1762,8 +2107,6 @@ class BootstrapRunner:
         """
         if not samples:
             return 0, []
-        from backend.app.providers.falkordb_provider import _node_from_props
-        from backend.app.providers.versioned_bootstrap import canonicalize_rows
         client = await self._client(ctx)
 
         # A job that started before the sample carried labels resumes with bare urns; those
@@ -1799,17 +2142,13 @@ class BootstrapRunner:
         by_id: Dict[int, Tuple[str, str]] = {}
         by_urn: Dict[str, str] = {}
         for nid, labels, props in rows:
-            node = _node_from_props(_readable(dict(props or {})), _label_of(labels))
-            if node is None or not node.urn:
+            payload = _node_payload(dict(props or {}), _label_of(labels), rules)
+            if payload is None:
                 continue
-            row = {"kind": "node", **node.model_dump(by_alias=True, exclude_none=True)}
-            canonicalize_rows([row], rules)
-            if not row.get("entityType"):
-                row["entityType"] = _label_of(labels) or "unknown"
-            digest = content_hash(
-                _sanitize_node_properties({k: v for k, v in row.items() if k != "kind"}))
-            by_id[int(nid)] = (node.urn, digest)
-            by_urn[node.urn] = digest
+            digest = content_hash(storable(payload)[0])
+            urn = str(payload["urn"])
+            by_id[int(nid)] = (urn, digest)
+            by_urn[urn] = digest
         async with self._session() as s:
             stored = dict((await s.execute(
                 select(NodeVersionORM.entity_id, NodeVersionORM.content_hash).where(
@@ -2033,8 +2372,19 @@ async def bootstrap_status(
                           } if policy.get("fingerprint") == duplicates.get("fingerprint")
                           else None}
         rejected = summary.get("rejected")
+        review = summary.get("review")
+        if review:
+            policy = summary.get("reviewPolicy") or {}
+            review = {**review, "decision": {
+                k: policy.get(k) for k in ("copies", "values", "fingerprint", "decidedBy",
+                                           "decidedAt")
+            } if policy.get("fingerprint") == review.get("fingerprint") else None}
         return {
             "jobId": job.id, "graphId": job.graph_id, "status": _api_status(job),
+            # What a paused job waits on: ``duplicates`` (the pre-flight) or ``review`` (the copy).
+            "awaiting": (summary.get("awaiting") or "duplicates")
+            if _api_status(job) == "needs_decision" else None,
+            "review": review or None,
             "phase": job.current_phase, "processed": int(job.processed or 0),
             "total": int(job.total or 0), "percent": int(job.progress or 0),
             "startedAt": job.started_at, "updatedAt": job.updated_at,
@@ -2047,7 +2397,8 @@ async def bootstrap_status(
             "failure": summary.get("failure") if job.status == "failed" else None,
             "duplicates": duplicates or None,
             "rejected": {k: rejected.get(k, [] if k == "samples" else 0)
-                         for k in ("duplicateUrns", "danglingEdges", "samples")}
+                         for k in ("duplicateUrns", "danglingEdges", "unaccountedProperties",
+                                   "samples")}
             if rejected else None,
             "collapsed": summary.get("collapsed"),
             "rekeyedEdges": int(summary.get("rekeyedEdges") or 0),
@@ -2077,7 +2428,7 @@ async def decide_duplicates(*, data_source_id: str, fingerprint: str, actor: str
             raise ValueError("no enablement job for this data source")
         summary = dict(job.summary or {})
         listed = (summary.get("duplicates") or {}).get("fingerprint")
-        if _api_status(job) != "needs_decision":
+        if _api_status(job) != "needs_decision" or summary.get("awaiting") == "review":
             if (summary.get("duplicatePolicy") or {}).get("fingerprint") == fingerprint:
                 return {"jobId": job.id, "already": True}
             raise BootstrapConflict(
@@ -2153,6 +2504,260 @@ async def duplicates_csv(*, data_source_id: str,
             key = (rows[-1][0], rows[-1][1])
 
     return stream()
+
+
+# ------------------------------------------------------------------------- review --
+#: What a review lists: connections held in several versions, values stored as text.
+REVIEW_KINDS = ("copies", "values")
+
+
+async def _review_job(s, data_source_id: str, workspace_id: Optional[str], *,
+                      lock: bool = False) -> JobORM:
+    job = await _latest_job(s, data_source_id, workspace_id, lock=lock)
+    if job is None or not (job.summary or {}).get("review"):
+        raise LookupError("enabling version control held nothing for review here")
+    return job
+
+
+def _clashing(versions: List[dict]) -> List[str]:
+    """The properties a connection's versions disagree on (one holds it, another doesn't, or
+    they hold different values), and ``@confidence`` when its confidence differs."""
+    payloads = [v["payload"] or {} for v in versions]
+    keys = list(dict.fromkeys(k for p in payloads for k in (p.get("properties") or {})))
+    out = [k for k in keys if len({json.dumps((p.get("properties") or {}).get(k, "\0absent"),
+                                              sort_keys=True, default=str)
+                                   for p in payloads}) > 1]
+    if len({p.get("confidence") for p in payloads}) > 1:
+        out.append(CONFIDENCE_PICK)
+    return out
+
+
+async def review_page(*, data_source_id: str, kind: str, after: Optional[str] = None,
+                      limit: int = 50, q: Optional[str] = None,
+                      workspace_id: Optional[str] = None) -> Dict[str, object]:
+    """One page of what the copy held for review, keyset-paged: for ``copies`` one item per
+    connection — its ends and type, each version (its properties, confidence, how many copies say
+    it, their ids), the properties they disagree on (``clashing``) and the person's ``choice`` —
+    and for ``values`` one per value stored as text. ``q`` narrows to the connections or items
+    whose id, ends, property or value holds it (any case). :class:`LookupError` when nothing was
+    held; :class:`ValueError` for an unknown kind."""
+    if kind not in REVIEW_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(REVIEW_KINDS)}")
+    limit = max(1, min(int(limit), 500))
+    async with db.graphver_session() as s:
+        job = await _review_job(s, data_source_id, workspace_id)
+        like = f"%{q.strip().lower()}%" if q and q.strip() else None
+        match = ("AND (lower(entity_id) LIKE :q OR lower(detail::text) LIKE :q) " if like else "")
+        if kind == "copies":
+            ids = (await s.execute(text(
+                f'SELECT DISTINCT entity_id FROM {_t("bootstrap_review")} WHERE graph_id = :g '
+                f"AND kind = 'copies' AND (CAST(:a AS text) IS NULL OR entity_id > :a) {match}"
+                "ORDER BY entity_id LIMIT :n"
+            ).bindparams(g=job.graph_id, a=after, n=limit + 1, **({"q": like} if like else {})))
+            ).scalars().all()
+            page = list(ids[:limit])
+            rows = (await s.execute(select(
+                BootstrapReviewORM.entity_id, BootstrapReviewORM.seq, BootstrapReviewORM.detail,
+                BootstrapReviewORM.choice).where(
+                BootstrapReviewORM.graph_id == job.graph_id, BootstrapReviewORM.kind == "copies",
+                BootstrapReviewORM.entity_id.in_(page)).order_by(
+                BootstrapReviewORM.entity_id, BootstrapReviewORM.seq))).all() if page else []
+            items: Dict[str, dict] = {}
+            for eid, seq, detail, choice in rows:
+                item = items.setdefault(eid, {
+                    "entityId": eid, "edgeType": detail.get("edgeType"),
+                    "source": detail.get("source"), "target": detail.get("target"),
+                    "versions": [], "choice": None})
+                payload = detail.get("payload") or {}
+                item["versions"].append({
+                    "seq": seq, "count": int(detail.get("count") or 1), "ids": detail.get("ids") or [],
+                    "confidence": payload.get("confidence"),
+                    "properties": payload.get("properties") or {}, "payload": payload})
+                if seq == 1:
+                    item["choice"] = choice
+            out = []
+            for eid in page:
+                item = items[eid]
+                item["clashing"] = _clashing(item["versions"])
+                for v in item["versions"]:
+                    v.pop("payload")
+                out.append(item)
+            return {"items": out, "next": page[-1] if len(ids) > limit else None}
+        cursor = None
+        if after:
+            eid, _, seq = after.rpartition("#")
+            cursor = (eid, int(seq)) if seq.isdigit() else None
+        rows = (await s.execute(text(
+            f'SELECT entity_id, seq, detail FROM {_t("bootstrap_review")} WHERE graph_id = :g '
+            "AND kind = 'values' AND (CAST(:a AS text) IS NULL OR (entity_id, seq) > (:a, :b)) "
+            f"{match}ORDER BY entity_id, seq LIMIT :n"
+        ).bindparams(g=job.graph_id, a=cursor[0] if cursor else None,
+                     b=cursor[1] if cursor else 0, n=limit + 1,
+                     **({"q": like} if like else {})))).all()
+        items = [_value_item(eid, seq, detail) for eid, seq, detail in rows[:limit]]
+        nxt = f"{rows[limit - 1][0]}#{rows[limit - 1][1]}" if len(rows) > limit else None
+        return {"items": items, "next": nxt}
+
+
+async def review_csv(*, data_source_id: str, kind: str,
+                     workspace_id: Optional[str] = None) -> AsyncIterator[str]:
+    """Everything held for review of ``kind``, as CSV, streamed in pages (as :func:`duplicates_csv`):
+    one row per version of a connection (``copies``) or per value stored as text (``values``).
+    :class:`LookupError` (before the first byte) when nothing was held."""
+    if kind not in REVIEW_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(REVIEW_KINDS)}")
+    async with db.graphver_session() as s:
+        await _review_job(s, data_source_id, workspace_id)
+
+    async def stream() -> AsyncIterator[str]:
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(["connection", "version", "copies", "source", "type", "target", "ids",
+                         "confidence", "properties"] if kind == "copies" else
+                        ["kind", "id", "name", "property", "problem", "stored_as"])
+        after = None
+        while True:
+            page = await review_page(data_source_id=data_source_id, kind=kind, after=after,
+                                     limit=500, workspace_id=workspace_id)
+            for it in page["items"]:
+                if kind == "copies":
+                    for v in it["versions"]:
+                        writer.writerow([_csv_text(it["entityId"]), v["seq"], v["count"],
+                                         _csv_text(it["source"] or ""), _csv_text(it["edgeType"] or ""),
+                                         _csv_text(it["target"] or ""),
+                                         _csv_text(" ".join(v["ids"])),
+                                         "" if v["confidence"] is None else v["confidence"],
+                                         _csv_text(json.dumps(v["properties"], ensure_ascii=False,
+                                                              sort_keys=True))])
+                else:
+                    name = it.get("name") or " → ".join(
+                        x for x in (it.get("source"), it.get("target")) if x)
+                    writer.writerow([it.get("entityKind") or "", _csv_text(it["entityId"]),
+                                     _csv_text(name or ""), _csv_text(it.get("property") or ""),
+                                     it.get("problem") or "", _csv_text(str(it.get("storedAs") or ""))])
+            yield out.getvalue()
+            out.seek(0)
+            out.truncate()
+            if not page["next"]:
+                return
+            after = page["next"]
+
+    return stream()
+
+
+def _check_choice(choice: dict, seqs: Set[int]) -> dict:
+    """A person's choice for one connection, refused (:class:`ValueError`) unless it names only
+    this connection's versions and leaves at least one in."""
+    if not isinstance(choice, dict):
+        raise ValueError("a choice is an object")
+    rule = choice.get("rule")
+    if rule not in REVIEW_RULES:
+        raise ValueError(f"rule must be one of {', '.join(REVIEW_RULES)}")
+    out: Dict[str, Any] = {"rule": rule}
+    if rule == "keep":
+        if not isinstance(choice.get("keep"), int) or choice["keep"] not in seqs:
+            raise ValueError("keep must name one of this connection's versions")
+        out["keep"] = choice["keep"]
+    if rule == "merge":
+        left_out = choice.get("excludeCopies") or []
+        if (not isinstance(left_out, list) or not all(isinstance(x, int) and x in seqs
+                                                       for x in left_out)):
+            raise ValueError("excludeCopies must name this connection's versions")
+        if set(left_out) >= seqs:
+            raise ValueError("a merge must keep at least one version")
+        picks = choice.get("values") or {}
+        if not isinstance(picks, dict) or not all(isinstance(k, str) and isinstance(v, int)
+                                                  and v in seqs for k, v in picks.items()):
+            raise ValueError("values must pick one of this connection's versions per property")
+        out["excludeCopies"] = sorted(set(left_out))
+        out["values"] = picks
+    left = choice.get("excludeProperties") or []
+    if not isinstance(left, list) or not all(isinstance(k, str) for k in left):
+        raise ValueError("excludeProperties must be a list of property names")
+    out["excludeProperties"] = sorted(set(left))
+    return out
+
+
+async def save_review_choice(*, data_source_id: str, entity_id: str, choice: Optional[dict],
+                             workspace_id: Optional[str] = None) -> Dict[str, object]:
+    """Save (or, with ``choice`` None, clear) a person's choice for one connection held for
+    review, while the job waits on the review. :class:`BootstrapConflict` ``not_awaiting_decision``
+    once it doesn't; :class:`LookupError` for a connection that isn't held; :class:`ValueError` for
+    a choice that names what this connection doesn't hold."""
+    async with db.graphver_session() as s:
+        job = await _review_job(s, data_source_id, workspace_id, lock=True)
+        if _api_status(job) != "needs_decision" or (job.summary or {}).get("awaiting") != "review":
+            raise BootstrapConflict("not_awaiting_decision",
+                                    "This copy is not waiting for a review any more.")
+        seqs = set((await s.execute(select(BootstrapReviewORM.seq).where(
+            BootstrapReviewORM.graph_id == job.graph_id, BootstrapReviewORM.kind == "copies",
+            BootstrapReviewORM.entity_id == entity_id))).scalars().all())
+        if not seqs:
+            raise LookupError("no connection by that id was held for review")
+        saved = None if choice is None else _check_choice(choice, seqs)
+        await s.execute(text(
+            f'UPDATE {_t("bootstrap_review")} SET choice = CAST(:c AS jsonb) WHERE graph_id = :g '
+            "AND kind = 'copies' AND entity_id = :e AND seq = 1"
+        ).bindparams(g=job.graph_id, e=entity_id, c=None if saved is None else json.dumps(saved)))
+        return {"entityId": entity_id, "choice": saved}
+
+
+async def decide_review(*, data_source_id: str, fingerprint: str, actor: str,
+                        copies: Optional[dict] = None, values: Optional[str] = None,
+                        workspace_id: Optional[str] = None) -> Dict[str, object]:
+    """Record the review of what the copy held, and queue the job to copy it as decided.
+
+    As :func:`decide_duplicates`: one locked row, bound to the list shown (``fingerprint``,
+    ``stale_decision`` otherwise), only while the job waits on the review
+    (``not_awaiting_decision``), and recording it again changes nothing. Every kind held must be
+    decided: ``copies`` — ``{rule: keep_first|merge, excludeProperties}``, the rule for every
+    connection without a choice of its own — when connections were held, and ``values`` —
+    ``as_text`` — when values were (``ValueError`` otherwise). The job then copies each held
+    connection as decided (``resolve``) and checks the copy whole."""
+    async with db.graphver_session() as s:
+        job = await _latest_job(s, data_source_id, workspace_id, lock=True)
+        if job is None:
+            raise LookupError("no enablement job for this data source")
+        summary = dict(job.summary or {})
+        review = summary.get("review") or {}
+        policy = summary.get("reviewPolicy") or {}
+        if _api_status(job) != "needs_decision" or summary.get("awaiting") != "review":
+            if review and policy.get("fingerprint") == fingerprint:
+                return {"jobId": job.id, "already": True}
+            raise BootstrapConflict("not_awaiting_decision",
+                                    "This copy is not waiting for a review any more.")
+        if fingerprint != review.get("fingerprint"):
+            raise BootstrapConflict("stale_decision",
+                                    "What the copy held changed since it was shown. Review it "
+                                    "again.", fingerprint=review.get("fingerprint"))
+        held_copies = int((review.get("copies") or {}).get("connections") or 0)
+        held_values = int((review.get("values") or {}).get("count") or 0)
+        decided: Dict[str, Any] = {}
+        if held_copies:
+            rule = (copies or {}).get("rule")
+            if rule not in ("keep_first", "merge"):
+                raise ValueError("say how to copy the connections held more than once: "
+                                 "copies.rule is keep_first or merge")
+            left = (copies or {}).get("excludeProperties") or []
+            if not isinstance(left, list) or not all(isinstance(k, str) for k in left):
+                raise ValueError("copies.excludeProperties must be a list of property names")
+            decided["copies"] = {"rule": rule, "excludeProperties": sorted(set(left))}
+        if held_values:
+            if values != "as_text":
+                raise ValueError("say how to store the values history can't hold: values is "
+                                 "as_text")
+            decided["values"] = "as_text"
+        summary["reviewPolicy"] = {**decided, "fingerprint": fingerprint, "decidedBy": actor,
+                                   "decidedAt": _now(), "connections": held_copies,
+                                   "valuesAsText": held_values}
+        summary.pop("awaiting", None)
+        summary.pop("takeovers", None)          # a person chose to go on: a fresh poison count
+        job.summary = summary
+        _advance_phase(job, "resolve")
+        job.updated_at = _now()
+        logger.info("bootstrap %s: %s decided the review (%s connection(s), %s value(s); "
+                    "fingerprint %s)", job.id, actor, held_copies, held_values, fingerprint)
+        return {"jobId": job.id, "already": False}
 
 
 async def retry_bootstrap(
@@ -2350,6 +2955,13 @@ def _explain_failed_checks(failed: List[dict]) -> str:
     makes the re-read sample disagree too) — saying "the graph changed" there would send
     the user chasing the wrong thing."""
     keys = {c["key"] for c in failed}
+    if "properties_kept" in keys:
+        return ("Some properties of the source graph were not kept by the copy, so it was not "
+                "applied: nothing is lost. This is a fault in the copy, not in your graph — "
+                "report it, with the job's report.")
+    if "review_decided" in keys:
+        return ("What the copy held for review was not all decided — the review changed while it "
+                "was applied. Start over to check it again.")
     if "one_spelling_per_type" in keys:
         return ("Some types are spelled more than one way in the graph (Table as table and TABLE, "
                 "say). Version history keeps one spelling for each type, so later changes would "
@@ -2365,7 +2977,8 @@ def _explain_failed_checks(failed: List[dict]) -> str:
     if {"no_dropped_connections", "referentially_whole"} & keys:
         return ("Some connections point at items that don't exist in the source graph, so the "
                 "copy would lose them.")
-    if {"nodes_seen", "edges_seen", "sample_matches", "source_stable"} & keys:
+    if {"nodes_seen", "edges_seen", "sample_matches", "edge_sample_matches",
+            "source_stable"} & keys:
         return ("The source graph changed while we were copying it, so the copy can't be "
                 "trusted. Retry when the graph is quiet.")
     return "The copy didn't match the source graph exactly, so it was not applied."
@@ -2421,14 +3034,15 @@ def _merge_scan_summary(summary: dict, kind: str, *, scanned: int, written: int,
     declared type (``physicalTypes``: every spelling seen, per declared type)."""
     sc = dict(summary.get("scanned") or {"nodes": 0, "edges": 0, "byLabel": {}, "byType": {}})
     wr = dict(summary.get("written") or {"nodes": 0, "edges": 0})
-    rj = dict(summary.get("rejected") or {"duplicateUrns": 0, "danglingEdges": 0, "samples": []})
+    rj = dict(summary.get("rejected") or {"duplicateUrns": 0, "danglingEdges": 0,
+                                          "unaccountedProperties": 0, "samples": []})
     cl = dict(summary.get("collapsed") or {"nodes": 0, "byLabel": {}, "selfLoops": 0})
     sc[kind] = int(sc.get(kind, 0)) + scanned
     wr[kind] = int(wr.get(kind, 0)) + written
     bucket = "byLabel" if kind == "nodes" else "byType"
     sc[bucket] = _add_tally(sc.get(bucket), tallies)
     wr[bucket] = _add_tally(wr.get(bucket), written_tallies)
-    for k in ("duplicateUrns", "danglingEdges"):
+    for k in ("duplicateUrns", "danglingEdges", "unaccountedProperties"):
         rj[k] = int(rj.get(k, 0)) + int((rejects or {}).get(k, 0))
     if (rejects or {}).get("byLabel"):
         rj["byLabel"] = _add_tally(rj.get("byLabel"), rejects["byLabel"])
@@ -2520,12 +3134,27 @@ def _tally_checks(summary: dict, pg_labels: Dict[str, int], pg_types: Dict[str, 
           f"{rejected.get('duplicateUrns', 0)} item(s) sharing an identifier")
     check("no_dropped_connections", int(rejected.get("danglingEdges", 0)) == 0,
           f"{rejected.get('danglingEdges', 0)} connection(s) with a missing endpoint")
-    # 3. What we wrote reconciles exactly with what we saw.
+    unaccounted = int(rejected.get("unaccountedProperties", 0))
+    check("properties_kept", unaccounted == 0,
+          f"{unaccounted:,} item(s) or connection(s) whose properties were not all kept"
+          if unaccounted else "every property of every item and connection kept")
+    # 3. What we wrote reconciles exactly with what we saw. A connection copied more than once is
+    #    one connection: copies that said the same folded, the ones that differed were held and
+    #    each connection put back as a person decided (``connections``, ``resolve``).
+    cn = summary.get("connections") or {}
     exp_nodes = (int(scanned.get("nodes", 0)) - int(collapsed.get("nodes", 0))
                  - int(rejected.get("duplicateUrns", 0)))
     exp_edges = (int(scanned.get("edges", 0)) - int(rejected.get("danglingEdges", 0))
                  - int(summary.get("collapsedParallelEdges", 0))
-                 - int(collapsed.get("selfLoops", 0)))
+                 - int(collapsed.get("selfLoops", 0))
+                 - int(cn.get("folded", 0)) - int(cn.get("heldCopies", 0))
+                 + int(cn.get("resolved", 0)))
+    review = summary.get("review")
+    if review:
+        decided = (summary.get("reviewPolicy") or {}).get("fingerprint") == review.get("fingerprint")
+        check("review_decided", decided and int(cn.get("resolved", 0)) == int(cn.get("held", 0)),
+              f"{int(cn.get('resolved', 0)):,} of {int(cn.get('held', 0)):,} connection(s) held for "
+              "review copied as decided" if decided else "what the copy held was not decided")
     check("nodes_written", written.get("nodes") == exp_nodes,
           f"{written.get('nodes'):,} items stored")
     check("edges_written", written.get("edges") == exp_edges,
@@ -2557,12 +3186,34 @@ def _tally_checks(summary: dict, pg_labels: Dict[str, int], pg_types: Dict[str, 
     return checks
 
 
+def _own_id(eid: str, taken) -> str:
+    """An id of its own for a connection whose id ``eid`` is taken: ``edge:<id>``, as an edge that
+    shares a node's id is re-keyed (:func:`_rekey`), once more each time that is taken too. The
+    graph's own id is what follows the prefixes — what the projector matches the relationship by
+    (``projection._graph_edge_id``)."""
+    while eid in taken:
+        eid = f"edge:{eid}"
+    return eid
+
+
+def _count_unaccounted(rejects: dict, kind: str, eid: str, lost: List[str]) -> None:
+    """Count a row whose payload lost a source property (:func:`_unaccounted`), with a sample."""
+    if lost:
+        rejects["unaccountedProperties"] = int(rejects.get("unaccountedProperties", 0)) + 1
+        _add_reject_sample(rejects, {"kind": kind, "id": eid, "properties": lost[:10],
+                                     "reason": "properties the copy did not keep"})
+
+
 def _rekey(dicts: List[dict], clash: Set[str], commit_id: str) -> int:
-    """Re-key the edge rows whose id is in ``clash`` (a node's id) to ``edge:<id>``; how many."""
+    """Re-key the edge rows whose id is in ``clash`` (a node's id) to ``edge:<id>`` — or, when the
+    window gave that to another connection already, to an id of its own (:func:`_own_id`); how
+    many."""
+    taken = {d["entity_id"] for d in dicts} | set(clash)
     n = 0
     for d in dicts:
         if d["entity_id"] in clash:
-            d["entity_id"] = f"edge:{d['entity_id']}"
+            d["entity_id"] = _own_id(d["entity_id"], taken)
+            taken.add(d["entity_id"])
             d["id"] = _vid("evb", commit_id, d["entity_id"])
             n += 1
     return n
@@ -2592,11 +3243,12 @@ def _fresh_tallies(max_id: Optional[int]) -> dict:
                    "maxNodeId": max_id},
         "scanned": {"nodes": 0, "edges": 0, "byLabel": {}, "byType": {}},
         "written": {"nodes": 0, "edges": 0, "byLabel": {}, "byType": {}},
-        "rejected": {"duplicateUrns": 0, "danglingEdges": 0, "byLabel": {}, "samples": []},
+        "rejected": {"duplicateUrns": 0, "danglingEdges": 0, "unaccountedProperties": 0,
+                     "byLabel": {}, "samples": []},
         "collapsed": {"nodes": 0, "byLabel": {}, "selfLoops": 0},
         "collapsedParallelEdges": 0,
         "rekeyedEdges": 0,
-        "sample": {"nodes": [], "nodesSeen": 0},
+        "sample": {"nodes": [], "nodesSeen": 0, "edges": [], "edgesSeen": 0},
     }
 
 
@@ -2758,6 +3410,215 @@ async def _duplicates_graph(data_source_id: str, workspace_id: Optional[str]) ->
     if job is None or not (job.summary or {}).get("duplicates"):
         raise LookupError("enabling version control found no duplicate identifiers here")
     return job.graph_id
+
+
+# ------------------------------------------------- connections held more than once --
+#: Groups (``connections``) or held connections (``resolve``) per window.
+_CONNECTIONS_PAGE = 2000
+
+
+def _prefixes(eid: str) -> int:
+    """How many times ``eid`` was re-keyed (``edge:`` prefixes, :func:`_own_id`)."""
+    n = 0
+    while eid.startswith("edge:", n * 5):
+        n += 1
+    return n
+
+
+async def _connection_groups(s, graph_id: str, commit_id: str, after: Optional[list],
+                             limit: int) -> List[tuple]:
+    """The import commit's connections copied more than once — the same source, type (case aside,
+    as edge integrity compares it) and target — after the group key ``after``, in key order:
+    ``(source, TYPE, target, [(entity id, version id, content hash, edge type), …])``, each group's
+    copies first the one with the source's own id (fewest re-keys), then by id."""
+    params = {"g": graph_id, "c": commit_id, "n": limit}
+    cond = ""
+    if after:
+        cond = "AND (source_entity_id, upper(edge_type), target_entity_id) > (:s, :t, :o) "
+        params.update(s=after[0], t=after[1], o=after[2])
+    rows = (await s.execute(text(
+        "SELECT source_entity_id, upper(edge_type), target_entity_id, array_agg(entity_id), "
+        "array_agg(id), array_agg(content_hash), array_agg(edge_type) "
+        f'FROM {_t("edge_versions")} WHERE graph_id = :g AND commit_id = :c {cond}'
+        "GROUP BY 1, 2, 3 HAVING count(*) > 1 ORDER BY 1, 2, 3 LIMIT :n"), params)).all()
+    return [(src, typ, tgt, sorted(zip(eids, vids, hashes, types),
+                                   key=lambda c: (_prefixes(c[0]), c[0])))
+            for src, typ, tgt, eids, vids, hashes, types in rows]
+
+
+def _differ(group: tuple) -> bool:
+    return len({c[2] for c in group[3]}) > 1
+
+
+async def _payloads_of(s, graph_id: str, vids: List[str]) -> Dict[str, dict]:
+    out: Dict[str, dict] = {}
+    for chunk in _chunks(vids, 5000):
+        out.update((await s.execute(select(EdgeVersionORM.id, EdgeVersionORM.payload).where(
+            EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(list(chunk))))).all())
+    return out
+
+
+def _settle(graph_id: str, groups: List[tuple], payloads: Dict[str, dict]
+            ) -> Tuple[List[dict], List[str], dict]:
+    """What a window of groups becomes: the rows to hold (``bootstrap_review``), the version rows
+    to take out of the copy, and the tally.
+
+    A group whose copies all say the same thing loses nothing: a copy read twice under one source
+    id (re-keyed ``edge:<id>`` as it landed) folds into the first; copies with ids of their own
+    stay, each the source's relationship that history deletes and updates by its id, as they
+    always have. A group whose copies differ is held whole — one row per version (what several
+    copies say alike is one version, with their count and ids) under the id of its first copy —
+    and taken out of the copy until a person decides."""
+    held: List[dict] = []
+    drop: List[str] = []
+    tally: Dict[str, Any] = {"folded": 0, "heldCopies": 0, "held": 0, "byType": {}}
+    for src, _typ, tgt, copies in groups:
+        if not _differ((src, _typ, tgt, copies)):
+            ids: Set[str] = set()
+            gone = []
+            for c in copies:
+                if _graph_edge_id(c[0]) in ids:
+                    gone.append(c)
+                ids.add(_graph_edge_id(c[0]))
+            tally["folded"] += len(gone)
+        else:
+            gone = copies
+            tally["heldCopies"] += len(copies)
+            tally["held"] += 1
+            versions: Dict[str, List[tuple]] = {}
+            for c in copies:
+                versions.setdefault(c[2], []).append(c)
+            for seq, (h, alike) in enumerate(versions.items(), start=1):
+                held.append({"graph_id": graph_id, "kind": "copies", "entity_id": copies[0][0],
+                             "seq": seq, "detail": {
+                                 "payload": payloads.get(alike[0][1]), "hash": h,
+                                 "count": len(alike), "ids": [c[0] for c in alike][:50],
+                                 "source": src, "target": tgt, "edgeType": alike[0][3]}})
+        for c in gone:
+            drop.append(c[1])
+            tally["byType"][c[3]] = tally["byType"].get(c[3], 0) - 1
+    return held, drop, tally
+
+
+def _merge_connections(summary: dict, tally: dict) -> dict:
+    """Fold a window's connection tally into the job's: ``connections`` (folded copies, held
+    copies and connections, connections resolved) and ``written`` (rows taken out, or put in)."""
+    cn = dict(summary.get("connections") or {})
+    for k in ("folded", "heldCopies", "held", "resolved"):
+        cn[k] = int(cn.get(k, 0)) + int(tally.get(k, 0))
+    summary["connections"] = cn
+    wr = dict(summary.get("written") or {"nodes": 0, "edges": 0})
+    delta = tally.get("byType") or {}
+    wr["edges"] = int(wr.get("edges", 0)) + sum(int(v) for v in delta.values())
+    wr["byType"] = {k: v for k, v in _add_tally(wr.get("byType"), delta).items() if v}
+    summary["written"] = wr
+    return summary
+
+
+_REVIEW_SAMPLE = 20
+
+
+async def _review_summary(s, graph_id: str) -> Optional[dict]:
+    """What the copy holds for review, as the job's status shows it: per kind the counts and a
+    sample, and the FINGERPRINT that names exactly this list (a decision must carry it). None
+    when nothing is held."""
+    stats = (await s.execute(text(
+        "SELECT kind, count(DISTINCT entity_id), count(*), "
+        "coalesce(sum((detail->>'count')::int), 0), md5(string_agg(entity_id || '|' || seq || '|' "
+        "|| coalesce(detail->>'hash', detail->>'property', ''), ',' ORDER BY entity_id, seq)) "
+        f'FROM {_t("bootstrap_review")} WHERE graph_id = :g GROUP BY kind'
+    ).bindparams(g=graph_id))).all()
+    if not stats:
+        return None
+    by = {k: (int(n), int(rows), int(copies), fp) for k, n, rows, copies, fp in stats}
+    problems = dict((await s.execute(text(
+        f"SELECT detail->>'problem', count(*) FROM {_t('bootstrap_review')} "
+        "WHERE graph_id = :g AND kind = 'values' GROUP BY 1").bindparams(g=graph_id))).all())
+    sample = (await s.execute(select(
+        BootstrapReviewORM.kind, BootstrapReviewORM.entity_id, BootstrapReviewORM.seq,
+        BootstrapReviewORM.detail).where(BootstrapReviewORM.graph_id == graph_id).order_by(
+        BootstrapReviewORM.kind, BootstrapReviewORM.entity_id, BootstrapReviewORM.seq
+    ).limit(4 * _REVIEW_SAMPLE))).all()
+    connections: Dict[str, dict] = {}
+    values: List[dict] = []
+    for kind, eid, seq, detail in sample:
+        if kind == "copies" and (eid in connections or len(connections) < _REVIEW_SAMPLE):
+            c = connections.setdefault(eid, {
+                "entityId": eid, "edgeType": detail.get("edgeType"),
+                "source": detail.get("source"), "target": detail.get("target"), "versions": 0,
+                "copies": 0})
+            c["versions"] += 1
+            c["copies"] += int(detail.get("count") or 1)
+        elif kind == "values" and len(values) < _REVIEW_SAMPLE:
+            values.append(_value_item(eid, seq, detail))
+    copies = by.get("copies", (0, 0, 0, ""))
+    vals = by.get("values", (0, 0, 0, ""))
+    return {
+        "fingerprint": hashlib.md5(f"{copies[3]}|{vals[3]}".encode()).hexdigest(),
+        "copies": {"connections": copies[0], "versions": copies[1], "copies": copies[2],
+                   "sample": list(connections.values())},
+        "values": {"count": vals[1], "items": vals[0], "byProblem": {k: int(v) for k, v in
+                                                                    problems.items()},
+                   "sample": values},
+    }
+
+
+def _value_item(eid: str, seq: int, detail: dict) -> dict:
+    return {"entityId": eid, "seq": seq, **{k: detail.get(k) for k in (
+        "entityKind", "name", "entityType", "edgeType", "source", "target", "property",
+        "problem", "storedAs")}}
+
+
+#: What a connection held for review may be copied as: its first version, one version chosen, or
+#: its versions merged.
+REVIEW_RULES = ("keep_first", "keep", "merge")
+#: In a merge's per-property picks, the connection's own ``confidence`` (not a property of it).
+CONFIDENCE_PICK = "@confidence"
+
+
+def _resolved(copies: List[dict], choice: Optional[dict], policy: dict) -> dict:
+    """The payload a connection held for review is copied as, by its ``choice`` (a person's for
+    this connection) over the review's ``policy`` (the rule for every other one).
+
+    * ``keep_first`` — the first version as it is; ``keep`` — the version ``choice.keep``.
+    * ``merge`` — the versions not left out (``choice.excludeCopies``), every property any of them
+      holds: where they disagree, the version ``choice.values[<property>]`` picks, else the first
+      that holds it. Its ``confidence`` likewise (:data:`CONFIDENCE_PICK`).
+
+    The properties left out — the policy's ``excludeProperties`` and the choice's — are removed
+    from whatever the rule gives."""
+    choice = choice or {}
+    by_seq = {int(c["seq"]): c["detail"]["payload"] for c in copies}
+    rule = choice.get("rule") or policy.get("rule") or "keep_first"
+    if rule == "keep" and int(choice.get("keep") or 0) in by_seq:
+        out = copy.deepcopy(by_seq[int(choice["keep"])])
+    elif rule == "merge":
+        left_out = {int(x) for x in choice.get("excludeCopies") or []}
+        merged = [q for q in sorted(by_seq) if q not in left_out] or sorted(by_seq)[:1]
+        picks = {str(k): int(v) for k, v in (choice.get("values") or {}).items()}
+        out = copy.deepcopy(by_seq[merged[0]])
+        props: Dict[str, Any] = {}
+        for q in merged:
+            for k, v in (by_seq[q].get("properties") or {}).items():
+                props.setdefault(k, v)
+        for k, q in picks.items():
+            if k != CONFIDENCE_PICK and q in merged and k in (by_seq[q].get("properties") or {}):
+                props[k] = by_seq[q]["properties"][k]
+        out["properties"] = copy.deepcopy(props)
+        conf_from = picks.get(CONFIDENCE_PICK)
+        confs = [by_seq[q].get("confidence") for q in ([conf_from] if conf_from in merged else [])
+                 + merged if by_seq[q].get("confidence") is not None]
+        out.pop("confidence", None)
+        if confs:
+            out["confidence"] = confs[0]
+    else:
+        out = copy.deepcopy(by_seq[min(by_seq)])
+    excluded = set(policy.get("excludeProperties") or []) | set(choice.get("excludeProperties") or [])
+    props = {k: v for k, v in (out.get("properties") or {}).items() if k not in excluded}
+    out.pop("properties", None)
+    if props:
+        out["properties"] = props
+    return out
 
 
 # ------------------------------------------------------------ collapse helpers --

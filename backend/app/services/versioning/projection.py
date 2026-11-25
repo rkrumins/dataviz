@@ -876,6 +876,15 @@ def _delete_edges_by_key_cypher(rel_type: str, src_label: str, tgt_label: str) -
     return f"UNWIND $batch AS item {_between(rel_type, src_label, tgt_label)} DELETE r"
 
 
+def _graph_edge_id(eid: str) -> str:
+    """The id a customer's graph knows an edge by, for its id in history: history re-keys an edge
+    whose id a node or another connection also has to ``edge:<id>`` — once more each time that is
+    taken too (``bootstrap_worker._own_id``) — and the graph keeps its own."""
+    while eid.startswith("edge:"):
+        eid = eid[len("edge:"):]
+    return eid
+
+
 def _delete_nodes_cypher(label: str) -> str:
     return f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) DETACH DELETE n"
 
@@ -5753,7 +5762,7 @@ class FalkorProjector:
             key = (spelled_type(e.get("rel")), spelled_label(e.get("slb")),
                    spelled_label(e.get("tlb")))
             del_by.setdefault(key, []).append(
-                {"eid": e["eid"], "pid": e["eid"].removeprefix("edge:"),
+                {"eid": e["eid"], "pid": _graph_edge_id(e["eid"]),
                  "src": e["src"], "tgt": e["tgt"], "rel": key[0]}
             )
         for (rel, sl, tl), items in del_by.items():

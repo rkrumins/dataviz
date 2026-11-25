@@ -133,6 +133,22 @@ class FakeGraph:
             unkeyed = "r.id IS NULL" in cypher
             return _RS([[sum(1 for si, _ti, _ty, pr, _k in self._resolved()
                              if lo <= si < hi and not (unkeyed and pr.get("id")))]])
+        if cypher.startswith("UNWIND $edges"):                        # the edge sample re-read
+            # Both ends sought by label + urn, then checked by id; the relationship matched
+            # between them by type.
+            rel = re.search(r"\[r:`((?:[^`]|``)+)`\]", cypher).group(1).replace("``", "`")
+            la, lb = self._label(cypher, "a"), self._label(cypher, "b")
+            out = []
+            for it in p.get("edges") or []:
+                for si, ti, ty, pr, _k in self._resolved():
+                    if (si, ti, ty) != (it["sid"], it["tid"], rel):
+                        continue
+                    if self._urn(si) != it["s"] or self._urn(ti) != it["t"]:
+                        continue
+                    if (la and la not in self.nodes[si][0]) or (lb and lb not in self.nodes[ti][0]):
+                        continue
+                    out.append([it["k"], dict(pr)])
+            return _RS(out)
         if cypher.startswith("UNWIND $urns"):                         # the sample re-read
             label, urns = self._label(cypher, "n"), set(p.get("urns") or [])
             return _RS([[i, lab, pr] for i, (lab, pr) in self._present()
@@ -1031,6 +1047,189 @@ async def _run_enable_race(monkeypatch) -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_concurrent_enable_returns_the_winners_job(monkeypatch):
     asyncio.run(_run_enable_race(monkeypatch))
+
+
+# --------------------------------------------------------------------------- #
+# Every property of a customer's graph, or a question — never a silent drop     #
+# --------------------------------------------------------------------------- #
+#: Ten properties of a customer's relationship, as ``properties(r)`` returns them.
+_CUSTOMER_EDGE = {
+    "my prop": "val1", "MyProp": "a", "MySpecialProp": "b", "MyLogicalProp": True,
+    "weight": 3, "score": 0.7, "naïve ü": "x", "dotted.key": "y", "tags list": ["a", "b"],
+    "since": "2024-01-01",
+}
+
+
+class ChangedEdgeGraph(FakeGraph):
+    """A graph whose relationships changed after the copy read them: the edge sample re-read sees
+    another value."""
+
+    async def query(self, cypher, params=None, timeout=None):
+        res = await super().query(cypher, params, timeout)
+        if cypher.startswith("UNWIND $edges"):
+            res.result_set = [[k, {**pr, "weight": -1}] for k, pr in res.result_set]
+        return res
+
+
+async def _run_properties() -> None:
+    from backend.app.services.versioning.bootstrap_worker import (
+        decide_review, review_csv, review_page, save_review_choice)
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = lambda: "ds_" + os.urandom(4).hex()
+
+    async def _state(gid):
+        return await svc.materialize_state(graph_id=gid, branch_id=(await _main(gid)))
+
+    # ══ P1. a customer's graph is copied whole: every property of every item and connection ══
+    d = ds()
+    fake = FakeGraph([
+        _node("urn:p1", owner="ana", entityId="ERP-1", properties="free text",
+              **{"my prop": "val1"}),
+        _node("urn:p2", displayName=7, rows=5),
+    ], [
+        _edge(0, 1, id="x1", **_CUSTOMER_EDGE),
+        _edge(1, 0, etype="OWNS", id=42, confidence="high"),
+    ])
+    res = await _enable(d)
+    out = await _drive(_runner(fake), res["job_id"])
+    assert out["status"] == "completed", out
+    st = await _state(res["graph_id"])
+    assert st["edges"]["x1"]["properties"] == _CUSTOMER_EDGE, "all ten, as the source holds them"
+    assert st["edges"]["42"]["properties"] == {"confidence": "high"}, "a text confidence is kept"
+    assert st["nodes"]["urn:p1"]["properties"] == {
+        "owner": "ana", "my prop": "val1", "__src.entityId": "ERP-1",
+        "__src.properties": "free text"}
+    assert st["nodes"]["urn:p2"]["properties"] == {"rows": 5, "__src.displayName": 7}
+    status = await bootstrap_status(data_source_id=d)
+    checks = {c["key"]: c["ok"] for c in status["report"]["checks"]}
+    assert all(checks.values()), checks
+    assert {"properties_kept", "edge_sample_matches"} <= set(checks)
+    assert status["report"]["edgeSampleChecked"] == 2 and status["review"] is None
+
+    # ══ P2. copies of one connection: the same fold, different ones wait for a review ══
+    d = ds()
+    fake = FakeGraph([_node("urn:a"), _node("urn:b"), _node("urn:c")], [
+        _edge(0, 1, etype="CALLS", at="mon", who="ana"),          # no id: urn:a|CALLS|urn:b
+        _edge(0, 1, etype="CALLS", at="tue"),                     # ...the same, said otherwise
+        _edge(0, 1, etype="CALLS", at="mon", who="ana"),          # ...the first, once more
+        _edge(0, 2, etype="CALLS", id="k1", n=1),                 # two ids, one connection,
+        _edge(0, 2, etype="CALLS", id="k2", n=1),                 # saying the same: both kept
+        _edge(1, 2, etype="CALLS", id="m1", n=1, a="x"),          # two ids, saying different
+        _edge(1, 2, etype="CALLS", id="m2", n=2, b="y"),          # things: held
+    ])
+    runner = _runner(fake)
+    res = await _enable(d)
+    gid, job_id = res["graph_id"], res["job_id"]
+    out = await _drive(runner, job_id)
+    assert out["status"] == "paused", out
+    status = await bootstrap_status(data_source_id=d)
+    assert (status["status"], status["awaiting"]) == ("needs_decision", "review")
+    review = status["review"]
+    assert review["copies"]["connections"] == 2 and review["copies"]["versions"] == 4
+    assert review["values"]["count"] == 0 and review["decision"] is None
+    assert await _counts(gid, await _commit_id(gid)) == (3, 2), \
+        "held connections are out of the copy; k1 and k2 say the same under ids of their own"
+    page = await review_page(data_source_id=d, kind="copies")
+    by = {i["entityId"]: i for i in page["items"]}
+    assert set(by) == {"m1", "urn:a|CALLS|urn:b"} and page["next"] is None
+    calls = by["urn:a|CALLS|urn:b"]
+    assert [(v["seq"], v["count"], v["properties"]) for v in calls["versions"]] == [
+        (1, 1, {"at": "mon", "who": "ana"}), (2, 1, {"at": "tue"})], \
+        "the first said again under its own id folded as it was read"
+    assert calls["clashing"] == ["at", "who"]
+    assert (await review_page(data_source_id=d, kind="copies", q="M2"))["items"][0]["entityId"] == "m1"
+    lines = "".join([c async for c in await review_csv(data_source_id=d, kind="copies")]).splitlines()
+    assert lines[0].startswith("connection,version,copies") and len(lines) == 5
+    # A choice for one connection; the rule for the other.
+    with pytest.raises(ValueError):
+        await save_review_choice(data_source_id=d, entity_id="m1",
+                                 choice={"rule": "merge", "excludeCopies": [1, 2]})
+    await save_review_choice(data_source_id=d, entity_id="m1", choice={
+        "rule": "merge", "values": {"n": 2}, "excludeProperties": ["b"]})
+    with pytest.raises(ValueError):                             # the rule must be said
+        await decide_review(data_source_id=d, fingerprint=review["fingerprint"], actor="alice")
+    assert await _conflict(decide_review(data_source_id=d, fingerprint="0" * 32, actor="alice",
+                                         copies={"rule": "merge"})) == "stale_decision"
+    assert await _conflict(decide_duplicates(data_source_id=d, fingerprint="x",
+                                             actor="alice")) == "not_awaiting_decision"
+    got = await decide_review(data_source_id=d, fingerprint=review["fingerprint"], actor="alice",
+                              copies={"rule": "keep_first", "excludeProperties": ["who"]})
+    assert got == {"jobId": job_id, "already": False}
+    assert (await decide_review(data_source_id=d, fingerprint=review["fingerprint"],
+                                actor="alice", copies={"rule": "merge"}))["already"] is True
+    assert await _conflict(save_review_choice(data_source_id=d, entity_id="m1",
+                                              choice=None)) == "not_awaiting_decision"
+    out = await _drive(runner, job_id)
+    assert out["status"] == "completed", out
+    st = await _state(gid)
+    assert st["edges"]["urn:a|CALLS|urn:b"]["properties"] == {"at": "mon"}, "first, who left out"
+    assert st["edges"]["m1"]["properties"] == {"n": 2, "a": "x"}, "merged, n picked, b left out"
+    assert sorted(st["edges"]) == ["k1", "k2", "m1", "urn:a|CALLS|urn:b"]
+    status = await bootstrap_status(data_source_id=d)
+    checks = {c["key"]: c["ok"] for c in status["report"]["checks"]}
+    assert all(checks.values()), checks
+    assert status["report"]["resolvedConnections"] == 2
+    assert status["report"]["mergedDuplicateConnections"] == 1
+    assert status["review"]["decision"]["decidedBy"] == "alice"
+    assert len((await review_page(data_source_id=d, kind="copies"))["items"]) == 2, \
+        "the review outlives the job, as the record of what was decided"
+
+    # ══ P3. values history can't hold: stored as text once a person says so ══
+    d = ds()
+    fake = FakeGraph([_node("urn:v", score=float("nan"), note="a\x00b"), _node("urn:w")],
+                     [_edge(0, 1, id="v1", hi=float("inf"))])
+    runner = _runner(fake)
+    res = await _enable(d)
+    assert (await _drive(runner, res["job_id"]))["status"] == "paused"
+    review = (await bootstrap_status(data_source_id=d))["review"]
+    assert review["values"]["count"] == 3 and review["values"]["byProblem"] == {
+        "nan": 1, "nul": 1, "infinity": 1}
+    assert review["copies"]["connections"] == 0
+    items = (await review_page(data_source_id=d, kind="values"))["items"]
+    assert sorted((i["entityId"], i["property"], i["storedAs"]) for i in items) == [
+        ("urn:v", "note", "ab"), ("urn:v", "score", "NaN"), ("v1", "hi", "Infinity")]
+    with pytest.raises(ValueError):
+        await decide_review(data_source_id=d, fingerprint=review["fingerprint"], actor="alice")
+    await decide_review(data_source_id=d, fingerprint=review["fingerprint"], actor="alice",
+                        values="as_text")
+    assert (await _drive(runner, res["job_id"]))["status"] == "completed"
+    st = await _state(res["graph_id"])
+    assert st["nodes"]["urn:v"]["properties"] == {"score": "NaN", "note": "ab"}
+    assert st["edges"]["v1"]["properties"] == {"hi": "Infinity"}
+    assert (await bootstrap_status(data_source_id=d))["report"]["valuesStoredAsText"] == 3
+
+    # ══ P4. re-check the source from the review: what it held goes, the copy starts over ══
+    d = ds()
+    fake = FakeGraph([_node("urn:a"), _node("urn:b")],
+                     [_edge(0, 1, at="mon"), _edge(0, 1, at="tue")])
+    runner = _runner(fake)
+    res = await _enable(d)
+    assert (await _drive(runner, res["job_id"]))["status"] == "paused"
+    fake.edges = fake.edges[:1]                                 # fixed in the source
+    assert (await retry_bootstrap(data_source_id=d, mode="restart"))["status"] == "pending"
+    assert (await _drive(runner, res["job_id"]))["status"] == "completed"
+    status = await bootstrap_status(data_source_id=d)
+    assert status["review"] is None and all(c["ok"] for c in status["report"]["checks"])
+    with pytest.raises(LookupError):
+        await review_page(data_source_id=d, kind="copies")
+
+    # ══ P5. a connection that changed after the copy read it fails the edge sample ══
+    d = ds()
+    fake = ChangedEdgeGraph([_node("urn:a"), _node("urn:b")], [_edge(0, 1, id="c1", weight=3)])
+    res = await _enable(d)
+    out = await _drive(_runner(fake), res["job_id"])
+    assert out["status"] == "failed" and "changed while we were copying" in out["error"], out
+    report = (await bootstrap_status(data_source_id=d))["report"]
+    assert report["edgeSampleMismatched"][0]["id"] == "c1"
+
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_bootstrap_keeps_every_property_or_asks_e2e():
+    asyncio.run(_run_properties())
 
 
 if __name__ == "__main__":

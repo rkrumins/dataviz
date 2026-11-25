@@ -910,6 +910,37 @@ class BootstrapNodeORM(VersioningBase):
     )
 
 
+class BootstrapReviewORM(VersioningBase):
+    """What an "enable version control" copy could not keep exactly as the source has it, held
+    for a person to decide before anything goes live (``bootstrap_worker``, the review pause).
+
+    ``kind``:
+
+    * ``copies`` — one row per DIFFERENT version of a connection the source holds more than once
+      (same ends, same type: version history keeps one). ``entity_id`` is the connection's id in
+      history, ``seq`` the version (1, 2, …), ``detail`` its payload, how many copies say it and
+      their ids. ``choice`` (on ``seq`` 1) is a person's choice for this connection: keep a version,
+      or merge them — some versions or properties left out, a value picked where they disagree.
+    * ``values`` — one row per value history can't hold as it is (NaN, ±Infinity, a NUL
+      character, a kind JSON doesn't have), stored as text unless a person says otherwise:
+      ``entity_id`` is the item's or connection's id, ``detail`` the property and the problem.
+
+    Kept after the job finishes, as the record of what was decided; removed with the graph."""
+
+    __tablename__ = "bootstrap_review"
+
+    graph_id = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=False)
+    seq = Column(Integer, nullable=False)
+    detail = Column(JSONB, nullable=False)
+    choice = Column(JSONB, nullable=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "kind", "entity_id", "seq", name="pk_bootstrap_review"),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Versioned data (high cardinality, append-only, HASH-partitioned on graph_id) #
 # --------------------------------------------------------------------------- #
