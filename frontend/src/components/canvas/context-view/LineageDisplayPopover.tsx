@@ -534,6 +534,11 @@ const MOTION_OPTIONS: Array<{ motion: LineageMotion; label: string; description:
     description: 'Lines move for what you hover, select or trace. The rest stay still.',
   },
   {
+    motion: 'calm',
+    label: 'Calm when many',
+    description: 'As When focused, but a fan of more than 12 lines stays still, at full colour. What you hover or select still moves.',
+  },
+  {
     motion: 'all',
     label: 'Always',
     description: 'Every line moves while 200 or fewer are drawn; past that, only focused ones.',

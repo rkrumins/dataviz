@@ -62,10 +62,11 @@ const LINEAGE_RENDER_MODES: readonly LineageRenderMode[] = ['stubs', 'click', 'a
 
 /**
  * Which lineage lines move (the chevrons marching along a line) — see
- * `lineMotion.ts`. 'focus': the lines being looked at; 'all': every line
- * while the board is sparse; 'off': none.
+ * `lineMotion.ts`. 'focus': the lines being looked at; 'calm': as focus, but a
+ * crowd of them (a trace's big fan) is held still at full colour; 'all': every
+ * line while the board is sparse; 'off': none.
  */
-export type LineageMotion = 'focus' | 'all' | 'off'
+export type LineageMotion = 'focus' | 'calm' | 'all' | 'off'
 /** How heavy lineage lines are drawn on the canvas, in a trace as elsewhere. */
 export type LineWeight = 'thin' | 'regular' | 'thick'
 
