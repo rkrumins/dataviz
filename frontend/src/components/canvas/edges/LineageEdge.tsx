@@ -10,6 +10,9 @@ import { cn } from '@/lib/utils'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
 
+import { RuleChipRow } from '../property-manager/DisplayRuleTagChips'
+import { dashArrayOf, type RuleLineLook } from '../ruleLines'
+
 interface LineageEdgeData {
   confidence?: number
   edgeType?: string
@@ -20,6 +23,8 @@ interface LineageEdgeData {
   isDimmed?: boolean
   /** A Connections search matched an edge this line draws. */
   isSearchMatch?: boolean
+  /** How the display rules that match a relationship this line draws paint it. */
+  ruleLook?: RuleLineLook
   [key: string]: unknown
 }
 
@@ -59,6 +64,12 @@ export const LineageEdge = memo(function LineageEdge({
   // Schema-driven edge visual
   const edgeVisual = useEdgeVisual(edgeType)
 
+  // A display rule's look: its colour, dash and width — set aside while the
+  // line is dimmed, traced or highlighted, which say something more pressing.
+  const ruleLook = data?.ruleLook
+  const painted = ruleLook && !isDimmed && !isTraced && !isHighlighted ? ruleLook : undefined
+  const ruleChips = ruleLook && !isDimmed ? ruleLook.chips : []
+
   // Calculate bezier path
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
@@ -70,8 +81,9 @@ export const LineageEdge = memo(function LineageEdge({
     curvature: 0.25,
   })
 
-  // Determine edge color: schema-driven first, then confidence-based fallback
+  // Determine edge color: a display rule's, then schema-driven, then confidence-based fallback
   const edgeColor = useMemo(() => {
+    if (ruleLook) return ruleLook.color
     // Use schema-driven color (includes hash-based palette fallback for unknown types)
     if (edgeType) {
       return edgeVisual.strokeColor
@@ -81,7 +93,7 @@ export const LineageEdge = memo(function LineageEdge({
     if (confidence >= 0.8) return '#6366f1' // High - Indigo
     if (confidence >= 0.5) return '#f59e0b' // Medium - Amber
     return '#ef4444' // Low - Red
-  }, [confidence, edgeType, edgeVisual.strokeColor])
+  }, [ruleLook, confidence, edgeType, edgeVisual.strokeColor])
 
   // Highlight color
   const highlightColor = '#f59e0b' // Amber for highlights
@@ -225,9 +237,13 @@ export const LineageEdge = memo(function LineageEdge({
               ? '#c084fc'
               : isHighlighted
                 ? `url(#${highlightGradientId})`
-                : `url(#${gradientId})`,
-          strokeWidth: isDimmed ? 0.75 : selected ? 2 : isTraced ? 2 : (isHighlighted && highlightMode === 'bold' ? 2.5 : 1.5),
-          strokeOpacity: isDimmed ? 0.15 : 0.85,
+                : painted ? painted.color : `url(#${gradientId})`,
+          strokeWidth: isDimmed ? 0.75
+            : painted ? painted.width + (selected ? 0.5 : 0)
+              : selected ? 2 : isTraced ? 2 : (isHighlighted && highlightMode === 'bold' ? 2.5 : 1.5),
+          strokeDasharray: painted ? dashArrayOf(painted.dash, painted.width) : undefined,
+          strokeLinecap: painted?.dash === 'dotted' ? 'round' : undefined,
+          strokeOpacity: isDimmed ? 0.15 : painted ? 1 : 0.85,
           filter: isDimmed
             ? 'grayscale(1)'
             : isTraced
@@ -272,7 +288,22 @@ export const LineageEdge = memo(function LineageEdge({
         </EdgeLabelRenderer>
       )}
 
-      {/* Edge label (shown on hover/select or when highlighted) */}
+      {/* The display rules' chips, at the middle of the line: always shown. */}
+      {ruleChips.length > 0 && (
+        <EdgeLabelRenderer>
+          <div
+            data-testid="rule-line-chips"
+            // On the canvas's own colour: the line stops at the chips rather than running through them.
+            className="absolute transform -translate-x-1/2 -translate-y-1/2 nodrag nopan rounded bg-canvas"
+            style={{ left: labelX, top: labelY, pointerEvents: 'all' }}
+          >
+            <RuleChipRow tags={ruleChips} size="xs" max={2} subject="relationship" />
+          </div>
+        </EdgeLabelRenderer>
+      )}
+
+      {/* Edge label (shown on hover/select or when highlighted) — above the
+          rules' chips when the line carries them. */}
       <EdgeLabelRenderer>
         <div
           className={cn(
@@ -282,7 +313,7 @@ export const LineageEdge = memo(function LineageEdge({
           )}
           style={{
             left: labelX,
-            top: labelY,
+            top: ruleChips.length > 0 ? labelY - 22 : labelY,
           }}
         >
           <div className={cn(

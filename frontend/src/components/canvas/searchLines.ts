@@ -18,7 +18,7 @@ export interface DrawnGraphLine {
 }
 
 export function searchLineIds(
-    matches: readonly MatchedEdge[],
+    matches: readonly Pick<MatchedEdge, 'id' | 'source' | 'target' | 'edgeType'>[],
     lines: readonly DrawnGraphLine[],
     /** The node a node is drawn as: itself, or the visible container it folds into. */
     visibleOf: (id: string) => string | null,

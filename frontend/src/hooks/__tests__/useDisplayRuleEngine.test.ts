@@ -13,12 +13,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { countRules } from '@/services/ruleCounts'
 import { useBranchStore } from '@/store/branchStore'
-import { type LineageNode, useCanvasStore } from '@/store/canvas'
+import { type LineageEdge, type LineageNode, useCanvasStore } from '@/store/canvas'
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
+import { useSchemaStore } from '@/store/schema'
 import type { DisplayRuleConfig } from '@/types/schema'
-import type { Predicate, SearchMembershipRequest } from '@/types/search'
+import type { Predicate, SearchMembershipRequest, SearchMembershipResult } from '@/types/search'
 
 import { useDisplayRuleEngine } from '../useDisplayRuleEngine'
 
@@ -53,6 +54,10 @@ function nodes(count: number, offset = 0): LineageNode[] {
     }) as unknown as LineageNode)
 }
 
+function edge(id: string, source: string, target: string, edgeType: string): LineageEdge {
+    return { id, source, target, data: { edgeType } }
+}
+
 function membership() {
     return vi.mocked((provider.current as RemoteGraphProvider).searchMembership)
 }
@@ -65,12 +70,12 @@ function asked(): SearchMembershipRequest[] {
 beforeEach(() => {
     useDisplayRuleMatchStore.getState().clear()
     useReferenceModelStore.setState({ displayRules: [], layers: [] })
-    useCanvasStore.setState({ nodes: [] })
+    useCanvasStore.setState({ nodes: [], edges: [] })
     // Every entity whose URN ends in 0 matches every rule asked about.
     membership().mockReset()
     membership().mockImplementation(async (body) => ({
         matches: Object.fromEntries(body.items.map((item) => [
-            item.id, body.urns.filter((u) => u.endsWith('0')),
+            item.id, (body.urns ?? []).filter((u) => u.endsWith('0')),
         ])),
         errors: {},
     }))
@@ -247,6 +252,58 @@ describe('useDisplayRuleEngine', () => {
         await waitFor(() => expect(countRules).toHaveBeenCalledTimes(2))
         usePropertyJobsStore.setState({ jobs: [] })
         useBranchStore.setState({ currentBranchId: null })
+    })
+
+    it('asks about the relationships a canvas draws for the rules that style them, apart from the entities', async () => {
+        const lines: Predicate = { kind: 'edges', edgeTypes: ['FEEDS'] }
+        useSchemaStore.setState({ schema: { containmentEdgeTypes: ['CONTAINS'] } as never })
+        useReferenceModelStore.setState({ displayRules: [
+            rule('pii'), rule('feeds', { target: 'relationships', predicate: lines }),
+        ] })
+        useCanvasStore.setState({
+            nodes: nodes(2),
+            edges: [
+                edge('e-1', 'urn:n0', 'urn:n1', 'FEEDS'),
+                edge('e-2', 'urn:n1', 'urn:n0', 'FEEDS'),
+                edge('c-1', 'urn:n0', 'urn:n1', 'CONTAINS'),
+                edge('e-1', 'urn:n0', 'urn:n1', 'FEEDS'),
+            ],
+        })
+        membership().mockImplementation(async (body): Promise<SearchMembershipResult> => (body.edges
+            ? { matches: {}, edgeMatches: { feeds: ['e-2'] }, errors: {} }
+            : { matches: { pii: body.urns ?? [] }, errors: {} }))
+        renderHook(() => useDisplayRuleEngine('view-1', { lines: true }))
+
+        await waitFor(() => expect(membership()).toHaveBeenCalledTimes(2))
+        const forLines = asked().find((b) => b.edges)!
+        const forEntities = asked().find((b) => !b.edges)!
+        // Each relationship once, by its id and its ends; containment is drawn as nesting.
+        expect(forLines.edges).toEqual([
+            { id: 'e-1', source: 'urn:n0', target: 'urn:n1' },
+            { id: 'e-2', source: 'urn:n1', target: 'urn:n0' },
+        ])
+        expect(forLines.urns).toBeUndefined()
+        expect(forLines.items).toEqual([
+            { id: 'feeds', predicate: { kind: 'group', op: 'and', children: [lines] } },
+        ])
+        expect(forEntities.items.map((i) => i.id)).toEqual(['pii'])
+        await waitFor(() => expect(
+            [...useDisplayRuleMatchStore.getState().matchEdgesByRule.get('feeds') ?? []],
+        ).toEqual(['e-2']))
+        // Counted beside the entity rules: the server counts each as its own kind.
+        await waitFor(() => expect(countRules).toHaveBeenCalled())
+        expect(vi.mocked(countRules).mock.calls[0][2].map((r) => r.id)).toEqual(['pii', 'feeds'])
+        useSchemaStore.setState({ schema: null })
+    })
+
+    it('never asks about relationships on a canvas that does not draw them', async () => {
+        useReferenceModelStore.setState({ displayRules: [
+            rule('feeds', { target: 'relationships', predicate: { kind: 'edges' } }),
+        ] })
+        useCanvasStore.setState({ nodes: nodes(2), edges: [edge('e-1', 'urn:n0', 'urn:n1', 'FEEDS')] })
+        renderHook(() => useDisplayRuleEngine('view-1'))
+        await new Promise((r) => setTimeout(r, 250))
+        expect(membership()).not.toHaveBeenCalled()
     })
 
     it('wipes the match store on unmount', async () => {

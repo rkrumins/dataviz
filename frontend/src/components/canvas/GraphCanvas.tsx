@@ -48,6 +48,7 @@ import { GenericNode } from './nodes/GenericNode'
 import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
 import { searchLineIds } from './searchLines'
+import { ruleLineLooks } from './ruleLines'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../panels/RelationshipDrawer'
@@ -116,6 +117,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { isSelectableNode, useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useSearchStore } from '@/store/searchStore'
+import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { drawerWidthCss } from '@/components/panels/shell/drawerWidth'
@@ -202,7 +204,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   // Select several, armed from the toolbar: a plain click adds to the selection.
   const [multiSelectArmed, setMultiSelectArmed] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  useDisplayRuleEngine(activeView?.id ?? null)
+  useDisplayRuleEngine(activeView?.id ?? null, { lines: true })
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
@@ -550,6 +552,13 @@ export function GraphCanvas({ className }: { className?: string }) {
     ? NO_SEARCH_LINES
     : searchLineIds(matchedEdges, allVisibleEdges, findVisibleAncestor, isContainmentEdge)),
   [trace.isTracing, matchedEdges, searchViewId, activeView?.id, allVisibleEdges, findVisibleAncestor, isContainmentEdge])
+
+  // The display rules that style relationships, on the lines that draw what they match.
+  const ruleMeta = useDisplayRuleMatchStore((s) => s.ruleMeta)
+  const ruleEdgeMatches = useDisplayRuleMatchStore((s) => s.matchEdgesByRule)
+  const ruleLooks = useMemo(
+    () => ruleLineLooks(ruleMeta, ruleEdgeMatches, rawEdges, allVisibleEdges, findVisibleAncestor, isContainmentEdge),
+    [ruleMeta, ruleEdgeMatches, rawEdges, allVisibleEdges, findVisibleAncestor, isContainmentEdge])
 
   // Lineage-only subset for highlight computation
   const lineageEdges = useMemo(() =>
@@ -966,10 +975,11 @@ export function GraphCanvas({ className }: { className?: string }) {
             edgeCount: (edge.data as any)?.edgeCount,
             sourceEdgeCount: (edge.data as any)?.edgeCount,
             isSearchMatch: isSearchMatch && !isHighlightActive,
+            ruleLook: ruleLooks.get(edge.id),
           },
         }
       })
-  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine, searchLines])
+  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine, searchLines, ruleLooks])
   // (trace.isTracing/trace.result kept in deps because the map step inside reads them for isTraced flagging)
 
   // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns

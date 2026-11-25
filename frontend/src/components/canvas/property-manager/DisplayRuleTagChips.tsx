@@ -12,7 +12,8 @@
  *
  * Subscribes to ``useDisplayRuleTags(urn)`` internally; renders nothing
  * when the node matches no enabled rule (the common case), so it's cheap
- * to drop into a virtualized list of hundreds of rows.
+ * to drop into a virtualized list of hundreds of rows. A relationship's line
+ * carries the same chips (``RuleChipRow``), for the rules that style it.
  */
 import { AnimatePresence, motion } from 'framer-motion'
 import { Tags } from 'lucide-react'
@@ -41,6 +42,23 @@ export function DisplayRuleTagChips({
     urn, size = 'xs', max = 3, className,
 }: DisplayRuleTagChipsProps) {
     const tags = useDisplayRuleTags(urn)
+    return <RuleChipRow tags={tags} size={size} max={max} className={className} />
+}
+
+
+/** What a row of chips is on: an entity's card, or a relationship's line. */
+type ChipSubject = 'entity' | 'relationship'
+
+/** A row of rule chips: at most ``max``, the rest behind a "+N" pill. */
+export function RuleChipRow({
+    tags, size = 'xs', max = 3, className, subject = 'entity',
+}: {
+    tags: ReadonlyArray<DisplayRuleTag>
+    size?: 'xs' | 'sm' | 'dot'
+    max?: number
+    className?: string
+    subject?: ChipSubject
+}) {
     if (tags.length === 0) return null
 
     const inline = tags.slice(0, max)
@@ -57,7 +75,7 @@ export function DisplayRuleTagChips({
                 ))}
             </AnimatePresence>
             {overflow.length > 0 && (
-                <OverflowPill count={overflow.length} all={tags} size={size} />
+                <OverflowPill count={overflow.length} all={tags} size={size} subject={subject} />
             )}
         </div>
     )
@@ -108,11 +126,12 @@ function Dot({ tag }: { tag: DisplayRuleTag }) {
 
 
 function OverflowPill({
-    count, all, size,
+    count, all, size, subject,
 }: {
     count: number
     all: ReadonlyArray<DisplayRuleTag>
     size: 'xs' | 'sm' | 'dot'
+    subject: ChipSubject
 }) {
     const [hovered, setHovered] = useState(false)
     const ref = useRef<HTMLSpanElement>(null)
@@ -161,7 +180,7 @@ function OverflowPill({
             {typeof document !== 'undefined' && createPortal(
                 <AnimatePresence>
                     {hovered && coords && (
-                        <OverflowPopover all={all} coords={coords} />
+                        <OverflowPopover all={all} coords={coords} subject={subject} />
                     )}
                 </AnimatePresence>,
                 document.body,
@@ -175,10 +194,11 @@ const POPOVER_W = 240
 
 
 function OverflowPopover({
-    all, coords,
+    all, coords, subject,
 }: {
     all: ReadonlyArray<DisplayRuleTag>
     coords: { top: number; left: number; placeAbove: boolean; anchorX: number }
+    subject: ChipSubject
 }) {
     const caretLeft = Math.max(16, Math.min(POPOVER_W - 16, coords.anchorX))
     return (
@@ -211,7 +231,7 @@ function OverflowPopover({
                     <div className="text-[13px] font-display font-semibold text-ink">
                         {all.length} display {all.length === 1 ? 'tag' : 'tags'}
                     </div>
-                    <div className="text-[10px] text-ink-muted">applied to this entity</div>
+                    <div className="text-[10px] text-ink-muted">applied to this {subject}</div>
                 </div>
             </div>
             <div

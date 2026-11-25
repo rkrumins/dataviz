@@ -191,3 +191,29 @@ describe('displayRuleMatchStore — a rule\'s look', () => {
         expect(renderHook(() => useDisplayRuleLook('a')).result.current.frameKind).toBe('solid')
     })
 })
+
+
+describe('displayRuleMatchStore — rules that style relationships', () => {
+    beforeEach(reset)
+
+    it('keeps the relationships each matches apart from the entities, and prunes them with the rule', () => {
+        const s = useDisplayRuleMatchStore.getState()
+        s.applyEdgeMembership(['lines'], ['e-1', 'e-2'], { lines: ['e-1'] })
+        s.applyEdgeMembership(['lines'], ['e-1', 'e-3'], { lines: ['e-3'] })
+        const edges = () => [...useDisplayRuleMatchStore.getState().matchEdgesByRule.get('lines') ?? []]
+        expect(edges()).toEqual(['e-3'])
+        expect(useDisplayRuleMatchStore.getState().matchUrnsByRule.has('lines')).toBe(false)
+        useDisplayRuleMatchStore.getState().retainRules([])
+        expect(useDisplayRuleMatchStore.getState().matchEdgesByRule.size).toBe(0)
+    })
+
+    it('gives an entity no chip or look from a rule that styles relationships', () => {
+        useDisplayRuleMatchStore.getState().setRuleMeta([
+            rule({ id: 'lines', target: 'relationships', style: { dash: 'dashed' } }),
+        ])
+        expect(useDisplayRuleMatchStore.getState().ruleMeta[0].target).toBe('relationships')
+        tag('lines', ['a'])          // an id an entity happens to share
+        expect(renderHook(() => useDisplayRuleTags('a')).result.current).toHaveLength(0)
+        expect(renderHook(() => useDisplayRuleLook('a')).result.current).toEqual({})
+    })
+})
