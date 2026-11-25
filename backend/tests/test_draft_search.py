@@ -132,10 +132,10 @@ class Draft:
     """The draft's side: a scripted versioning service over ``MAIN``, committed to by ``commit``
     — what each commit wrote kept by seq, so a fold can read the draft as it was."""
 
-    def __init__(self):
-        self.main = {n["urn"]: dict(n) for n in MAIN}
+    def __init__(self, main_nodes=MAIN, main_edges=MAIN_EDGES):
+        self.main = {n["urn"]: dict(n) for n in main_nodes}
         self.nodes = {u: dict(n) for u, n in self.main.items()}
-        self.edges = {e["id"]: dict(e) for e in MAIN_EDGES}
+        self.edges = {e["id"]: dict(e) for e in main_edges}
         self.seq = 0
         self.history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         # The type of each edge row a commit wrote — None for a delete, whose row names none.
@@ -975,10 +975,7 @@ class RelDraft(Draft):
     where main holds it) or removed, and serves each one's value."""
 
     def __init__(self):
-        super().__init__()
-        self.main = {n["urn"]: dict(n) for n in REL_NODES}
-        self.nodes = {u: dict(n) for u, n in self.main.items()}
-        self.edges = {e["id"]: dict(e) for e in REL_EDGES}
+        super().__init__(REL_NODES, REL_EDGES)
 
     def truth(self) -> StubDeepSearchProvider:
         return StubDeepSearchProvider(nodes=list(self.nodes.values()),
