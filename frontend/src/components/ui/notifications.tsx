@@ -130,15 +130,17 @@ export function useAppNotifications() {
   const remove = useNotificationStore(s => s.remove)
   const removeByKey = useNotificationStore(s => s.removeByKey)
 
-  /** `action` may be two: the second is offered beside the first. */
+  /** `action` may be two: the second is offered beside the first. `detail` is a quieter line under
+   *  the message. */
   const notify = useCallback((
     type: Exclude<NotificationType, 'loading'>,
     message: string,
     action?: NotificationAction | readonly NotificationAction[],
     durationMs?: number,
+    detail?: string,
   ) => {
     const [first, second] = Array.isArray(action) ? action : [action as NotificationAction | undefined]
-    return add({ type, message, action: first, durationMs, ...(second ? { secondaryAction: second } : {}) })
+    return add({ type, message, action: first, durationMs, ...(second ? { secondaryAction: second } : {}), ...(detail ? { detail } : {}) })
   }, [add])
 
   /** Show a persistent loading notification. Stays until hideLoading(key) is called. */

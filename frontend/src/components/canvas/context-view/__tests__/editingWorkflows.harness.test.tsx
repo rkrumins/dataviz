@@ -24,6 +24,7 @@ import { usePersonaStore } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { useNotificationStore } from '@/components/ui/notifications'
 import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
 import { useBuildRowsStore } from '@/components/canvas/create/buildmode/buildRowsStore'
@@ -679,9 +680,11 @@ describe('moving an entity: a data change, said as one — and the view\'s own a
     return el ? { kind: el.dataset.dropHint, text: el.textContent } : null
   }
 
-  const openMoves = async (opts: { persona?: 'business'; rootApps?: boolean } = {}) => {
+  const openMoves = async (opts: { persona?: 'business'; rootApps?: boolean; draft?: boolean; dataSourceId?: string; viewCounts?: Record<string, number> } = {}) => {
     const h = await renderCanvasWithTrace(movesEstate(), {
-      focus: 'CRM', draft: true, deferTrace: true, persona: opts.persona,
+      focus: 'CRM', draft: opts.draft ?? true, deferTrace: true, persona: opts.persona,
+      dataSourceId: opts.dataSourceId,
+      viewCounts: opts.viewCounts && { total: 0, byWorkspace: {}, byDataSource: opts.viewCounts },
       entityTypes: [
         ontologyType('domain', 'Domain', ['app'], [], 0),
         ontologyType('app', 'App', ['dataset'], ['domain'], 1),
@@ -825,7 +828,7 @@ describe('moving an entity: a data change, said as one — and the view\'s own a
     await dropOn(h, 'Quotes', cardBody('Marketing'))
     expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Quotes', parentId: 'Marketing' })])
     expect(columnOfCard('Quotes')).toBe('apps')
-    expect(notices()).toContain('Moved under Marketing. It stays in Apps, the column that holds its type.')
+    expect(notices()).toContain('Moved Quotes inside Marketing. A data change — every view that shows it, once published. It stays in Apps, the column that holds its type.')
   }, 30000)
 
   it('onto its own parent while placed elsewhere: back under it — only this view', async () => {
@@ -979,5 +982,234 @@ describe('moving an entity: a data change, said as one — and the view\'s own a
     await h.settle()
     expect(links('CRM').map((e) => e.id)).toEqual(['c:Sales>CRM'])
     expect(columnOfCard('Campaigns')).toBe('apps')
+  }, 30000)
+
+  // ── The entity menu: where this view shows it (a view change), and where it is (a data change) ──
+
+  /** Right-click an entity and open its Move to Layer. */
+  const openMoveToLayer = async (h: TraceCanvasHarness, id: string) => {
+    await act(async () => { fireEvent.contextMenu(cardBody(id)) })
+    await h.settle()
+    await act(async () => { fireEvent.click(menuItem('Move to Layer')!) })
+    await h.settle()
+  }
+  const menu = () => document.querySelector<HTMLElement>('[data-canvas-context-menu]')
+  const menuItem = (label: string) => [...(menu()?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+    .find((b) => b.querySelector('span.block')?.textContent?.trim() === label)
+  const menuLabels = () => [...(menu()?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+    .map((b) => b.querySelector('span.block')?.textContent?.trim())
+  /** Move to Layer's rows: what each does, its kind's tag, and why it can't be chosen. */
+  const choices = () => [...document.querySelectorAll<HTMLButtonElement>('[data-move-choice]')].map((b) => ({
+    label: b.querySelector('span.block')?.textContent,
+    tag: b.querySelector('[data-change-tag]')?.textContent,
+    kind: b.dataset.moveChoice,
+    off: b.disabled,
+    why: b.querySelector('[data-change-tag] + span')?.textContent ?? null,
+  }))
+  const choose = async (h: TraceCanvasHarness, label: string) => {
+    const b = [...document.querySelectorAll<HTMLButtonElement>('[data-move-choice]')].find((x) => x.querySelector('span.block')?.textContent === label)
+    if (!b) throw new Error(`no choice ${label} (there are ${choices().map((c) => c.label).join(', ')})`)
+    await act(async () => { fireEvent.click(b) })
+    await h.settle()
+  }
+  const DATA = 'Changes the data · every view'
+  const VIEW = 'Only this view'
+  const notice = (match: RegExp) => useNotificationStore.getState().notifications.find((n) => match.test(n.message))
+  const press = async (h: TraceCanvasHarness, n: ReturnType<typeof notice>, label: string) => {
+    const action = [n?.action, n?.secondaryAction].find((a) => a?.label === label)
+    if (!action) throw new Error(`the notice offers no ${label}`)
+    await act(async () => { action.onClick() })
+    await h.settle()
+  }
+
+  it('Move to Layer is guided: every column says what it changes — a mapped one offers both', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await act(async () => { fireEvent.contextMenu(cardBody('CRM')) })
+    await h.settle()
+    expect(menuItem('Move to Layer')).toHaveTextContent('Where this view shows it')
+    expect(menuItem('Move to another parent…')).toHaveTextContent('Changes the data · every view')
+    await act(async () => { fireEvent.click(menuItem('Move to Layer')!) })
+    await h.settle()
+
+    expect(screen.getByText('Where should CRM go?')).toBeInTheDocument()
+    expect(choices()).toEqual([
+      { label: 'Move inside Finance', tag: DATA, kind: 'data', off: false, why: null },
+      { label: 'Show in Finance column', tag: VIEW, kind: 'view', off: false, why: null },
+      { label: 'Show in Domains', tag: VIEW, kind: 'view', off: true, why: 'Shown here' },
+      { label: 'Show in Apps', tag: VIEW, kind: 'view', off: false, why: null },
+    ])
+    expect(menu()).toHaveTextContent('Only this view: the data doesn’t change. Changes the data: it moves in every view once published.')
+  }, 30000)
+
+  it('Move to Layer names entities as the Business view reads them', async () => {
+    const h = await openMoves({ persona: 'business' })
+    act(() => useCanvasStore.getState().updateNode('Finance', { businessLabel: 'Money', properties: { businessLabel: 'Money' } }))
+    act(() => useCanvasStore.getState().updateNode('CRM', { businessLabel: 'Customers', properties: { businessLabel: 'Customers' } }))
+    await expand(h, 'Sales')
+    await openMoveToLayer(h, 'CRM')
+    expect(screen.getByText('Where should Customers go?')).toBeInTheDocument()
+    expect(choices()[0]).toMatchObject({ label: 'Move inside Money', kind: 'data' })
+  }, 30000)
+
+  it('"Move inside Finance" is one data move — and no layout change', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await openMoveToLayer(h, 'CRM')
+    await choose(h, 'Move inside Finance')
+    expect(staged().map((c) => c.type)).toEqual(['move_entity'])
+    expect(moves()[0].after).toMatchObject({ childId: 'CRM', parentId: 'Finance' })
+    expect(columnOfCard('CRM')).toBe('fin')
+  }, 30000)
+
+  it('"Show in Finance column" is only a view change — the data is untouched', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await openMoveToLayer(h, 'CRM')
+    await choose(h, 'Show in Finance column')
+    expect(staged().map((c) => c.type)).toEqual(['move_to_layer'])
+    expect(links('CRM').map((e) => e.id)).toEqual(['c:Sales>CRM'])
+    expect(columnOfCard('CRM')).toBe('fin')
+  }, 30000)
+
+  it('a data choice the canvas refuses is offered disabled, saying why', async () => {
+    const h = await openMoves()
+    act(() => useFeaturesStore.setState((s) => ({ values: { ...s.values, editModeEnabled: false } }) as never))
+    await h.settle()
+    await expand(h, 'Sales')
+    await openMoveToLayer(h, 'CRM')
+    expect(choices()[0]).toEqual({ label: 'Move inside Finance', tag: DATA, kind: 'data', off: true, why: 'Editing is turned off' })
+    expect(choices()[1]).toMatchObject({ label: 'Show in Finance column', off: false })
+  }, 30000)
+
+  it('one already inside the column\'s entity is told so', async () => {
+    const h = await openMoves()
+    await openMoveToLayer(h, 'Billing')
+    expect(choices().slice(0, 2)).toEqual([
+      { label: 'Move inside Finance', tag: DATA, kind: 'data', off: true, why: 'Already inside Finance' },
+      { label: 'Show in Finance column', tag: VIEW, kind: 'view', off: true, why: 'Shown here' },
+    ])
+  }, 30000)
+
+  it('Move to another parent…: a guided dialog that stages one move', async () => {
+    const h = await openMoves()
+    await act(async () => { fireEvent.contextMenu(cardBody('Billing')) })
+    await h.settle()
+    await act(async () => { fireEvent.click(menuItem('Move to another parent…')!) })
+    await h.settle()
+    const dialog = screen.getByRole('dialog', { name: 'Move Billing to another parent' })
+    expect(dialog).toHaveTextContent('This changes the data: Billing and everything inside it move under the parent you pick — in every view that shows it, once published. Its lineage stays as it is.')
+    expect(dialog).toHaveTextContent('Now inside Finance')
+    expect(within(dialog).getByText('Changes the data').closest('[data-change-tag]')).toHaveTextContent(DATA)
+    const options = within(dialog).getByRole('listbox', { name: 'Possible parents' })
+    await act(async () => { fireEvent.mouseDown(within(options).getByRole('option', { name: /Sales/ })) })
+    await h.settle()
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Billing', parentId: 'Sales' })])
+    expect(staged()).toHaveLength(1)
+    expect(screen.queryByRole('dialog', { name: 'Move Billing to another parent' })).toBeNull()
+  }, 30000)
+
+  it('Move to another parent…: to the top level, where its type may stand alone', async () => {
+    const h = await openMoves({ rootApps: true })
+    await act(async () => { fireEvent.contextMenu(cardBody('Billing')) })
+    await h.settle()
+    await act(async () => { fireEvent.click(menuItem('Move to another parent…')!) })
+    await h.settle()
+    const dialog = screen.getByRole('dialog', { name: 'Move Billing to another parent' })
+    await act(async () => { fireEvent.mouseDown(within(dialog).getByRole('option', { name: /On its own, at the top/ })) })
+    await h.settle()
+    expect(moves().map((c) => c.after)).toEqual([expect.objectContaining({ childId: 'Billing', parentId: null })])
+  }, 30000)
+
+  // Nor during a trace: traceMenu.harness.test.tsx.
+  it('Move to another parent… is not offered outside a draft', async () => {
+    const h = await openMoves({ draft: false })
+    await act(async () => { fireEvent.contextMenu(cardBody('Billing')) })
+    await h.settle()
+    expect(menuLabels()).toContain('View details')
+    expect(menuLabels()).not.toContain('Move to another parent…')
+  }, 30000)
+
+  it('a data move\'s notice says so, with Undo and Review & Save — Undo takes back that move alone', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await expand(h, 'Marketing')
+    await dragOver(h, 'CRM', cardBody('Marketing'))
+    await dropOn(h, 'CRM', cardBody('Marketing'))
+    const moved = notice(/^Moved CRM inside Marketing\./)!
+    expect(moved.message).toBe('Moved CRM inside Marketing. A data change — every view that shows it, once published.')
+    expect([moved.action?.label, moved.secondaryAction?.label]).toEqual(['Undo', 'Review & Save'])
+
+    // A later layout edit: Campaigns shown in the Apps column.
+    await dragOver(h, 'Campaigns', headerOf('apps'))
+    await dropOn(h, 'Campaigns', headerOf('apps'))
+    await press(h, moved, 'Undo')
+    expect(moves()).toHaveLength(0)
+    expect(links('CRM').map((e) => e.id)).toEqual(['c:Sales>CRM'])
+    expect(staged().map((c) => c.type)).toEqual(['assign_layer'])
+    expect(columnOfCard('Campaigns')).toBe('apps')
+  }, 30000)
+
+  it('a view move\'s notice says only this view changed, with Undo — Undo takes back that one alone', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await openMoveToLayer(h, 'CRM')
+    await choose(h, 'Show in Apps')
+    const shown = notice(/^CRM now shows in Apps\./)!
+    expect(shown.message).toBe('CRM now shows in Apps. Only this view — the data is unchanged.')
+    expect(shown.action?.label).toBe('Undo')
+
+    // The header drop says it too — and a later layout edit survives the first one's Undo.
+    await expand(h, 'Marketing')
+    await dragOver(h, 'Campaigns', headerOf('apps'))
+    await dropOn(h, 'Campaigns', headerOf('apps'))
+    expect(notice(/^Campaigns now shows in Apps\. Only this view — the data is unchanged\.$/)?.action?.label).toBe('Undo')
+    await press(h, shown, 'Undo')
+    expect(staged().map((c) => c.targetId)).toEqual(['Campaigns'])
+    expect(columnOfCard('CRM')).toBe('domains')
+    expect(columnOfCard('Campaigns')).toBe('apps')
+    expect(moves()).toHaveLength(0)
+  }, 30000)
+
+  it('a view move that takes along what was placed inside it says so', async () => {
+    const h = await openMoves()
+    // Quotes is placed in Apps by hand; Sales, its parent, moves to Apps — Quotes follows it.
+    await openMoveToLayer(h, 'Sales')
+    await choose(h, 'Show in Apps')
+    expect(notices()).toContain('Sales now shows in Apps. Only this view — the data is unchanged. 1 placed inside it now follows it.')
+  }, 30000)
+
+  it('Review & Save says how many changes are to the data and how many only to this view', async () => {
+    const h = await openMoves()
+    await expand(h, 'Sales')
+    await dragOver(h, 'CRM', cardBody('Marketing'))
+    await dropOn(h, 'CRM', cardBody('Marketing'))
+    await dragOver(h, 'Quotes', headerOf('domains'))
+    await dropOn(h, 'Quotes', headerOf('domains'))
+    act(() => useStagedChangesStore.getState().openReviewPanel())
+    await h.settle()
+    const review = screen.getByRole('dialog', { name: /Review & Save Changes/ })
+    expect(review).toHaveTextContent('You’re making 1 data change (every view) and 1 view change (only this view). Nothing is saved until you choose below.')
+    // Each run of changes says which kind it is.
+    expect([...review.querySelectorAll('[data-change-tag]')].map((t) => t.textContent)).toEqual([DATA, VIEW])
+  }, 30000)
+
+  it('names the other views on the data source a data move reaches — counted from those the reader can see', async () => {
+    useWorkspacesStore.setState({ workspaces: [{ id: 'harness-ws', name: 'Harness', dataSources: [{ id: 'ds-retail', label: 'Retail data pipeline' }] }] } as never)
+    const h = await openMoves({ dataSourceId: 'ds-retail', viewCounts: { 'ds-retail': 4 } })
+    await expand(h, 'Sales')
+    await dragOver(h, 'CRM', cardBody('Marketing'))
+    await dropOn(h, 'CRM', cardBody('Marketing'))
+    const moved = notice(/^Moved CRM inside Marketing\./)!
+    expect(moved.message).toBe('Moved CRM inside Marketing. A data change — this view now, and 3 other views on Retail data pipeline once published.')
+    expect(moved.detail).toBe('Counted from the views you can see — others’ private views follow too. Data source: ds-retail')
+
+    await act(async () => { fireEvent.contextMenu(cardBody('Billing')) })
+    await h.settle()
+    expect(menuItem('Move to another parent…')).toHaveTextContent('Changes the data · this view and 3 others on Retail data pipeline')
+    await act(async () => { fireEvent.click(menuItem('Move to another parent…')!) })
+    await h.settle()
+    expect(screen.getByRole('dialog', { name: 'Move Billing to another parent' }))
+      .toHaveTextContent('Retail data pipeline has 3 other views. Each one that shows Billing will show it under the new parent once published.')
   }, 30000)
 })

@@ -33,10 +33,13 @@ import {
 import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter, registerMoveHost } from '@/store/canvasLayoutBridge'
-import { useReparentNode } from './useReparentNode'
+import { MOVE_NOTICE_MS, discardAction, useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useWorkspaceViewCounts } from '@/features/ontology/hooks/useWorkspaceViewCounts'
+import { columnChoices, dataTagText, moveFooter, viewNotice, type DataReach } from './changeKind'
+import { MoveParentDialog } from './MoveParentDialog'
 import { usePreferencesStore } from '@/store/preferences'
-import { usePersonaMode } from '@/store/persona'
+import { usePersonaMode, usePersonaStore } from '@/store/persona'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
@@ -121,7 +124,7 @@ import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import {
   childTypesLookup, resolveCreationScope, SCOPE_CHOICE_LIMIT, type CreationScope, type ScopeNode,
 } from '../create/resolveCreationScope'
-import { resolveEntityName } from '@/lib/entityDisplayName'
+import { resolveEntityName, type EntityNameFields } from '@/lib/entityDisplayName'
 import { BuildPanel, type ContractRowLayer } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, buildTypeLayerMapFromContract, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
@@ -142,7 +145,7 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
-import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction, type MoveChoices } from '../CanvasContextMenu'
 import { compareSelectionAction, menuSelection } from '../selectionMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette, type CommandItem } from '../CommandPalette'
@@ -451,6 +454,10 @@ function explicitDescendants(
   }
   return out
 }
+
+/** An entity by the name the reader sees it by, at the moment it is said. */
+const shownName = (data: EntityNameFields | null | undefined, fallback: string) =>
+  resolveEntityName(data, usePersonaStore.getState().mode, fallback)
 
 /** The rendered-tree context used to resolve custom-order reordering. */
 interface ReorderTreeContext {
@@ -1164,6 +1171,16 @@ export function ContextViewCanvas({
   const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId, activeView?.id ?? null)
   const exportDataSourceName = useWorkspacesStore(s => s.workspaces
     .find(w => w.id === scopeWsId)?.dataSources?.find(d => d.id === dataSourceId)?.label)
+  // Who a data change made here reaches: the other views on this data source — those the reader can
+  // see (the count says no more than it knows), following once the draft is published.
+  const viewCounts = useWorkspaceViewCounts().counts
+  const sourceViews = dataSourceId ? viewCounts.byDataSource?.[dataSourceId] ?? 0 : 0
+  const dataReach: DataReach = {
+    otherViews: Math.max(0, sourceViews - 1),
+    source: exportDataSourceName,
+    sourceId: dataSourceId ?? undefined,
+    inDraft: isDraft,
+  }
   const isBlankModel = resolveQ.data?.kind === 'blank'
   const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
 
@@ -1561,6 +1578,8 @@ export function ContextViewCanvas({
       } catch { /* malformed keys — fall back to the unkeyed alpha tail */ }
     }
     const after = assignmentOps.assignEntities(base, [entityId], layerId, { clearDescendants, orderKey })
+    // What this drop changed — and only that comes back on discard (an edit made since stays).
+    const touched = assignmentOps.changedAssignments(before, after)
     persistReferenceLayout(after)
     // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
     // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
@@ -1570,7 +1589,7 @@ export function ContextViewCanvas({
     useReferenceModelStore.getState().removeEntityAssignment(entityId)
 
     // Surface it in Review & Save as a VIEW-LAYOUT change: no graph op, undoable via discard/reapply.
-    useStagedChangesStore.getState().stageOrReplace(
+    const id = useStagedChangesStore.getState().stageOrReplace(
       (c) => c.type === 'assign_layer' && c.targetId === entityId,
       {
         type: 'assign_layer',
@@ -1579,10 +1598,16 @@ export function ContextViewCanvas({
         before: { layerId: prevLayerId, layerName: prevLayer?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
-        discard: () => persistReferenceLayout(before),
-        reapply: () => persistReferenceLayout(after),
+        discard: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), before, touched)),
+        reapply: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), after, touched)),
       },
     )
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`${shownName(entity?.data, entityName)} now shows in ${targetLayer?.name ?? 'that layer'}.`, clearDescendants.length),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
   }, [currentLayout, persistReferenceLayout, traceWriteLocked])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
@@ -2334,9 +2359,9 @@ export function ContextViewCanvas({
   // A move made below the canvas (a row's drop, an anchored column's, the drawer's picker) asks
   // through the move host: the same gates as the menus, what this view draws, and to open the new
   // parent once moved. Registered once; it answers for the latest render through this ref.
-  const moveStateRef = useRef({ isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap })
+  const moveStateRef = useRef({ isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap, dataReach })
   useEffect(() => {
-    moveStateRef.current = { isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap }
+    moveStateRef.current = { isDraft, editModeEnabled, draftWritable, serverPlaced, promotedAnchors, sortedLayers, parentMap, dataReach }
   })
   useEffect(() => registerMoveHost({
     blocked: () => {
@@ -2373,6 +2398,7 @@ export function ContextViewCanvas({
         return next.size === prev.size ? prev : next
       })
     },
+    reach: () => moveStateRef.current.dataReach,
   }), [traceWriteLocked])
 
   // The orphans panel's "where": the column an entity is drawn in, else where this view would put
@@ -3670,11 +3696,12 @@ export function ContextViewCanvas({
     const prevLayerId = before.assignments[entity.urn]?.layerId
     const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
     const after = assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants })
+    const touched = assignmentOps.changedAssignments(before, after)
     persistReferenceLayout(after)
     // Clear any stale store instanceAssignment so the canonical move renders immediately (see handleAssignToLayer).
     useReferenceModelStore.getState().removeEntityAssignment(entity.urn)
 
-    useStagedChangesStore.getState().stageOrReplace(
+    const id = useStagedChangesStore.getState().stageOrReplace(
       (c) => (c.type === 'move_to_layer' || c.type === 'assign_layer') && c.targetId === nodeId,
       {
         type: 'move_to_layer',
@@ -3683,13 +3710,19 @@ export function ContextViewCanvas({
         before: { layerId: prevLayerId, layerName: before.layers.find(l => l.id === prevLayerId)?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entity.name}' → ${targetLayer?.name ?? layerId}`,
-        discard: () => persistReferenceLayout(before),
-        reapply: () => persistReferenceLayout(after),
+        discard: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), before, touched)),
+        reapply: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), after, touched)),
       },
     )
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`${shownName(nodeMap.get(nodeId)?.data, entity.name)} now shows in ${targetLayer?.name ?? layerId}.`, clearDescendants.length),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
 
     interactions.closeContextMenu()
-  }, [displayMap, parentMap, currentLayout, persistReferenceLayout, interactions])
+  }, [displayMap, nodeMap, parentMap, currentLayout, persistReferenceLayout, interactions])
 
   // Stage a view-layout change so it (a) shows in Review & Save under "View layout", (b) is undoable via
   // the shared Undo/Redo (undo runs `discard` → persistReferenceLayout(before)), while staying DECOUPLED
@@ -3935,10 +3968,11 @@ export function ContextViewCanvas({
     const key = (entity?.data?.urn as string) ?? entityId
     const name = (entity?.data?.label as string) ?? key
     const after = assignmentOps.assignEntities(before, [key], layerId, { logicalNodeId: groupId })
+    const touched = assignmentOps.changedAssignments(before, after)
     persistReferenceLayout(after)
     revealGroup(after.layers, layerId, groupId)
     useReferenceModelStore.getState().removeEntityAssignment(key)
-    useStagedChangesStore.getState().stageOrReplace(
+    const id = useStagedChangesStore.getState().stageOrReplace(
       (c) => (c.type === 'assign_layer' || c.type === 'move_to_layer') && c.targetId === key,
       {
         type: 'assign_layer',
@@ -3947,10 +3981,16 @@ export function ContextViewCanvas({
         before: { layerId: before.assignments[key]?.layerId },
         after: { layerId, logicalNodeId: groupId, entityName: name },
         summary: `Place '${name}' in group “${groupName}” (${layerNameOf(before, layerId)})`,
-        discard: () => persistReferenceLayout(before),
-        reapply: () => persistReferenceLayout(after),
+        discard: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), before, touched)),
+        reapply: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), after, touched)),
       },
     )
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`${shownName(entity?.data, name)} now shows in the group “${groupName}” in ${layerNameOf(before, layerId)}.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
   }, [currentLayout, persistReferenceLayout, traceWriteLocked, layerNameOf, revealGroup])
 
   // Authored column width — part of the view definition (ships to every
@@ -4853,7 +4893,7 @@ export function ContextViewCanvas({
     await revealSearchHit(urn, [])
   }, [provider, handleAssignToLayer, revealSearchHit])
 
-  const { returnToParent } = useReparentNode()
+  const { returnToParent, reparent, verdict } = useReparentNode()
   // A placed entity's path → its parent in the data, opened and scrolled to (the reveal walk expands
   // each ancestor on the way, exactly as for a search hit).
   const revealPlacementParent = useCallback((placement: PlacementInfo) => {
@@ -5043,6 +5083,32 @@ export function ContextViewCanvas({
     }
     return out
   }, [sortedLayers, anchorIssueByLayer, nodeMap, urnToIdMap, creationChildTypes, personaMode])
+
+  // Move to Layer, guided: each column, with what choosing it changes for the entity right-clicked
+  // — a column mapped to an entity offers a move inside it (the data) beside showing it there (the
+  // view). The mapped entity is the one the column's header resolves (loaded, not missing, not
+  // another column's), by the name the reader sees.
+  const moveChoices = (nodeId: string): MoveChoices | null => {
+    const entity = displayMap.get(nodeId)
+    if (!entity || entity.isLogical) return null
+    return {
+      name: resolveEntityName(nodeMap.get(nodeId)?.data, personaMode, entity.name),
+      reach: dataReach,
+      footer: moveFooter(dataReach),
+      choices: columnChoices(sortedLayers, {
+        entityId: nodeId,
+        shownIn: nodeLayerMap.get(nodeId),
+        anchorOf: (layer) => {
+          if (!layer.anchorUrn || anchorIssueByLayer.has(layer.id)) return undefined
+          const n = nodeMap.get(layer.anchorUrn) ?? nodeMap.get(urnToIdMap.get(layer.anchorUrn) ?? '')
+          return n ? { id: n.id, name: resolveEntityName(n.data, personaMode, n.id) } : undefined
+        },
+        verdict: (parentId) => verdict(nodeId, parentId),
+      }),
+    }
+  }
+  // Move to another parent… — the dialog's entity (null when closed).
+  const [moveParentFor, setMoveParentFor] = useState<string | null>(null)
 
   // Floating loading notifications — keep the full set so every long-running operation
   // is explicitly announced. Wording is centralised here.
@@ -8180,7 +8246,7 @@ export function ContextViewCanvas({
              and confirming a batch of staged edits before they hit the backend. */}
         {/* Steps through changed entities on the canvas, when something starts it. */}
         <ChangeNavigator reveal={revealOnCanvas} />
-        <StagedChangesPanel describe={describeStagedChange}
+        <StagedChangesPanel describe={describeStagedChange} reach={dataReach}
           wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={activeView?.id ?? null}
           onReveal={(id) => {
             useCanvasStore.getState().openNodeDrawer(id)
@@ -9133,8 +9199,13 @@ export function ContextViewCanvas({
           ? addInsideNameByLayer.get(contextTarget.layerId) : undefined}
         onSelectAll={interactions.selectAll}
         selectLayer={canvasMenuSelectLayer}
-        layers={sortedLayers}
+        moveChoices={sortedLayers.length > 0 ? moveChoices : undefined}
         onMoveToLayer={layerEditsAllowed ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
+        onMoveInside={(nodeId, parentId) => reparent(nodeId, parentId)}
+        // A data edit: offered where the canvas takes them (as a drop's move is), for an entity.
+        onMoveToParent={canvasWritable && !serverPlaced && contextTarget?.type === 'node' && !contextTarget.id.startsWith('logical:')
+          ? setMoveParentFor : undefined}
+        moveToParentHint={dataTagText(dataReach)}
         customActions={nodeCustomActions}
         queryActions={queryMenuActions}
         narrowActions={narrowMenuActions}
@@ -9182,6 +9253,9 @@ export function ContextViewCanvas({
           onCancel={edgeConnect.cancel}
         />
       )}
+
+      {/* Move to another parent… — what a move changes, said before a parent is picked. */}
+      <MoveParentDialog nodeId={moveParentFor} reach={dataReach} onClose={() => setMoveParentFor(null)} />
 
       {/* Duplicate… — what comes with the copy, counted before anything is staged. */}
       {duplicateFor && canvasWritable && (

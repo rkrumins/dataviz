@@ -19,6 +19,8 @@
  *             `create` a draft whose columns each add differently: Finance (a
  *                      column mapped to the Finance domain), Domains (several
  *                      top-level domains) and Apps (a type that needs a domain)
+ *   views     with `create`: the view's data source has this many views the reader can see
+ *             (so a data move names the others it reaches)
  *   theme     `dark` for the dark palette
  *   persona   `business` (default `technical`)
  *   latency   ms each child page waits (default 0; `scale` defaults to 120)
@@ -53,6 +55,7 @@ import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { usePersonaStore } from '../store/persona'
 import { usePreferencesStore } from '../store/preferences'
 import { useSchemaStore } from '../store/schema'
+import { useWorkspacesStore } from '../store/workspaces'
 import { useSearchStore, type CanvasFilterMode } from '../store/searchStore'
 import type { GraphDataProvider, GraphNode } from '../providers/GraphDataProvider'
 import type { MembershipResult } from '../types/membership'
@@ -64,6 +67,8 @@ const persona = params.get('persona') === 'business' ? 'business' : 'technical'
 const CONTAINERS = Number(params.get('containers') ?? (fixture === 'scale' ? 500 : 12))
 const CHILDREN = Number(params.get('children') ?? (fixture === 'scale' ? 200 : 8))
 const LATENCY = Number(params.get('latency') ?? (fixture === 'scale' ? 120 : 0))
+// `views`: the view has a data source, with this many views on it the reader can see.
+const SOURCE = params.has('views') ? 'harness-ds' : null
 const BATCH = params.get('batch') !== '0'
 
 MotionGlobalConfig.skipAnimations = true
@@ -275,9 +280,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     id: 'harness-view',
     config: { layout: { type: 'reference', referenceLayout: { layers: LAYERS, assignments: ASSIGNMENTS } }, content: { entityScope: 'curated' } },
   }
-  const body = url.includes('/api/v1/views/')
-    ? (url.includes('/library') ? { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true } : view)
-    : {}
+  const counts = { total: 0, byWorkspace: {}, byDataSource: SOURCE ? { [SOURCE]: Number(params.get('views')) } : {} }
+  const body = url.includes('/api/v1/views/counts')
+    ? counts
+    : url.includes('/api/v1/views/')
+      ? (url.includes('/library') ? { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true } : view)
+      : {}
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 }) as typeof globalThis.fetch
 
@@ -287,7 +295,7 @@ usePreferencesStore.setState({ canvasDensity: 'comfortable' } as never)
 useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewMembershipEnabled: true, ...(CREATE ? { editModeEnabled: true, versioningEnabled: true } : {}) } } as never)
 // `create` edits: a draft is open.
 useBranchStore.setState((CREATE
-  ? { workspaceId: 'harness-ws', dataSourceId: null, viewId: 'harness-view', currentBranchId: 'harness-branch' }
+  ? { workspaceId: 'harness-ws', dataSourceId: SOURCE, viewId: 'harness-view', currentBranchId: 'harness-branch' }
   : { workspaceId: null, dataSourceId: null, viewId: null, currentBranchId: null }) as never)
 useSchemaStore.setState({
   activeViewId: 'harness-view',
@@ -297,13 +305,16 @@ useSchemaStore.setState({
     containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
     rootEntityTypes: CREATE ? ['domain'] : [], defaultViewId: 'harness-view',
     views: [{
-      id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
+      id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws', ...(SOURCE ? { dataSourceId: SOURCE } : {}),
       content: { visibleEntityTypes: [], visibleRelationshipTypes: [], defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated' },
       layout: { type: 'reference', referenceLayout: { layers: LAYERS, assignments: ASSIGNMENTS } },
       filters: {}, entityOverrides: {}, isDefault: true,
     }],
   },
 } as never)
+if (SOURCE) {
+  useWorkspacesStore.setState({ workspaces: [{ id: 'harness-ws', name: 'Harness', dataSources: [{ id: SOURCE, label: 'Retail data pipeline' }] }] } as never)
+}
 const store = useCanvasStore.getState()
 store.setGraph(ROOTS.map((n) => toCanvasNode(n)), [] as LineageEdge[])
 store.setHydrationPhase('complete')

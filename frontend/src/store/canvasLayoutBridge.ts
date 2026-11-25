@@ -8,6 +8,7 @@
  * the drawer's "Choose a new parent…") asks of the canvas it is made on.
  */
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import type { DataReach } from '@/components/canvas/context-view/changeKind'
 
 export interface LayoutWriter {
   current: () => NormalizedReferenceLayout
@@ -41,6 +42,8 @@ export interface MoveHost {
   isDrawn: (id: string) => boolean
   /** A move was staged: open its new parent (and the way to it) so the entity stays in sight. */
   moved: (childId: string, parentId: string | null) => void
+  /** Who a data change made here reaches: the other views on this view's data source. */
+  reach?: () => DataReach
 }
 
 let host: MoveHost | null = null

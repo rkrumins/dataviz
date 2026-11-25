@@ -216,6 +216,23 @@ export function restoreAssignment(
   return { ...layout, assignments }
 }
 
+/** The entities whose own entry `after` holds differently from `before` — what one layout change
+ *  touched (an operation leaves every entry it does not touch as it was). */
+export function changedAssignments(before: NormalizedReferenceLayout, after: NormalizedReferenceLayout): string[] {
+  const urns = new Set([...Object.keys(before.assignments), ...Object.keys(after.assignments)])
+  return [...urns].filter((urn) => before.assignments[urn] !== after.assignments[urn])
+}
+
+/** `layout` with each of `urns`' entries as `from` holds it — and everything else as it is: one
+ *  change taken back (or put back) alone, every layout edit made since kept. */
+export function restoreAssignments(
+  layout: NormalizedReferenceLayout,
+  from: NormalizedReferenceLayout,
+  urns: readonly string[],
+): NormalizedReferenceLayout {
+  return urns.reduce((at, urn) => restoreAssignment(at, urn, from.assignments[urn] ?? null), layout)
+}
+
 /**
  * Temp urn prefix minted by the create paths (useStageEntityCreation / stageBuildRows mint
  * `urn:staged:<type>:<id>`). A temp urn is never a durable, backend-issued urn.

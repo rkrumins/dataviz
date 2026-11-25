@@ -41,8 +41,11 @@ import type { MoveAfter } from '@/store/stagedOverlay'
 import type { LayerAssignmentEntry } from '@/types/schema'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { assignEntities, restoreAssignment, unassignEntities } from './assignmentMutations'
-import { useAppNotifications } from '@/components/ui/notifications'
+import { useAppNotifications, type NotificationAction } from '@/components/ui/notifications'
 import { generateId } from '@/lib/utils'
+import { resolveEntityName } from '@/lib/entityDisplayName'
+import { usePersonaStore } from '@/store/persona'
+import { NO_REACH, dataNoticeTail, reachNote, viewNotice } from './changeKind'
 import { containmentIndexOf, nodeIndexOf } from '@/lib/storeIndex'
 import {
   useEntityTypes,
@@ -159,6 +162,22 @@ function placeMoved(childKey: string, childType: string, toTop: boolean, drawnIn
 const columnName = (layerId: string | undefined) =>
   layerId ? layoutWriter()?.current().layers.find((l) => l.id === layerId)?.name : undefined
 
+/** An entity by the name the reader sees it by. */
+const nameOf = (id: string, fallback = id) =>
+  resolveEntityName(nodeIndexOf(useCanvasStore.getState().nodes).get(id)?.data, usePersonaStore.getState().mode, fallback)
+
+/** A move's notice lives long enough to reach its Undo. */
+export const MOVE_NOTICE_MS = 8000
+
+/** Undo for a notice: discard the change it made — that one, by id, if it is still staged. */
+export const discardAction = (changeId: string): NotificationAction => ({
+  label: 'Undo',
+  onClick: () => {
+    const s = useStagedChangesStore.getState()
+    if (s.changes.some((c) => c.id === changeId)) s.discard(changeId)
+  },
+})
+
 export function useReparentNode() {
   const { notify } = useAppNotifications()
   const entityTypes = useEntityTypes()
@@ -223,7 +242,7 @@ export function useReparentNode() {
       }
       show()
       const to = parentKey ? `'${parentLabel}'` : 'the top level'
-      useStagedChangesStore.getState().stageOrReplace(
+      const id = useStagedChangesStore.getState().stageOrReplace(
         (c) => c.type === 'move_entity' && (c.after as MoveAfter).childId === childKey,
         {
           type: 'move_entity',
@@ -250,7 +269,7 @@ export function useReparentNode() {
           reapply: show,
         },
       )
-      return keptIn
+      return { keptIn, id }
     },
     [isContainment, containmentEdgeTypes],
   )
@@ -258,9 +277,11 @@ export function useReparentNode() {
   // A node created in this draft: its staged create says where it goes — point it at the new parent
   // (none: the top level) and swap its pending link, so the save makes exactly one parent link. One
   // undoable step: Undo draws it under its old parent, with its old placement, again. Returns the
-  // column it stays in by hand, if any; false when there is no create to point (nothing changed).
+  // column it stays in by hand, if any, and an undo of just this step (for its notice); false when
+  // there is no create to point (nothing changed).
   const restageCreate = useCallback(
-    (childKey: string, parentKey: string | null, parentLabel: string | undefined, containmentType: string | null): string | undefined | false => {
+    (childKey: string, parentKey: string | null, parentLabel: string | undefined, containmentType: string | null):
+      { keptIn: string | undefined; undo: () => void } | false => {
       const staged = useStagedChangesStore.getState()
       const prev = staged.changes.find((c) => c.type === 'create_entity' && (c.targetUrn ?? c.targetId) === childKey)
       if (!prev) return false
@@ -289,15 +310,24 @@ export function useReparentNode() {
         ? { ...was, parentUrn: parentKey!, containmentEdgeType: containmentType!, parentLabel }
         : { ...was, parentUrn: undefined, containmentEdgeType: undefined, parentLabel: undefined }
       forth()
-      staged.replace({ ...prev, reapply: back }, {
+      const before = { ...prev, reapply: back }
+      const next = {
         ...prev,
         after,
         summary: nested
           ? `Create ${was.entityType}: '${was.displayName}' · ${containmentType}${parentLabel ? ` ${parentLabel}` : ''}`
           : `Create ${was.entityType}: '${was.displayName}'`,
         reapply: forth,
-      })
-      return keptIn
+      }
+      staged.replace(before, next)
+      // Just this step, as Undo would take it back — and only while the create is as it left it.
+      const undo = () => {
+        const s = useStagedChangesStore.getState()
+        if (s.changes.find((c) => c.id === next.id) !== next) return
+        back()
+        s.replace(next, before)
+      }
+      return { keptIn, undo }
     },
     [isContainment],
   )
@@ -310,16 +340,26 @@ export function useReparentNode() {
     const { nodes } = useCanvasStore.getState()
     const node = nodes.find((n) => n.id === entityId || (n.data?.urn as string) === entityId)
     const key = node?.id ?? entityId
-    const name = (node?.data?.label as string) || 'This entity'
+    const name = resolveEntityName(node?.data, usePersonaStore.getState().mode, 'This entity')
     const staged = useStagedChangesStore.getState()
-    const done = () => notify('success', `'${name}' is back under ${parentLabel ? `'${parentLabel}'` : 'its parent'}.`)
+    const done = (undo: NotificationAction) => notify('success',
+      viewNotice(`${name} is back under ${parentLabel ?? 'its parent'}.`), [undo], MOVE_NOTICE_MS)
     const prior = staged.changes.find(
       (c) => (c.type === 'assign_layer' || c.type === 'move_to_layer') && c.targetId === key,
     )
     if (prior) {
       staged.discard(prior.id)
       useReferenceModelStore.getState().removeEntityAssignment(key)
-      done()
+      // Undo stages the placement again, as it was.
+      done({
+        label: 'Undo',
+        onClick: () => {
+          const s = useStagedChangesStore.getState()
+          if (s.changes.some((c) => c.id === prior.id)) return
+          prior.reapply?.()
+          s.replace(null, prior)
+        },
+      })
       return true
     }
     const w = layoutWriter()
@@ -328,7 +368,7 @@ export function useReparentNode() {
     const after = unassignEntities(before, [key])
     w.persist(after)
     useReferenceModelStore.getState().removeEntityAssignment(key)
-    staged.stage({
+    const id = staged.stage({
       type: 'assign_layer',
       targetId: key,
       targetUrn: (node?.data?.urn as string) ?? key,
@@ -338,7 +378,7 @@ export function useReparentNode() {
       discard: () => layoutWriter()?.persist(before),
       reapply: () => layoutWriter()?.persist(after),
     })
-    done()
+    done(discardAction(id))
     return true
   }, [notify])
 
@@ -431,19 +471,32 @@ export function useReparentNode() {
     const index = nodeIndexOf(nodes)
     const child = index.get(childKey)
     const parentLabel = parentKey ? ((index.get(parentKey)?.data?.label as string) || parentKey) : undefined
-    const keptIn = child?.data?.isPending === 'create'
-      ? restageCreate(childKey, parentKey, parentLabel, v.edgeType)
-      : restageContainment(childKey, parentKey, parentLabel ?? '', v.edgeType)
-    if (keptIn === false) {
-      notify('info', `'${(child?.data?.label as string) || 'This entity'}' is new — save it first, then you can move it.`,
-        { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
-      return false
+    const reviewAndSave = { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() }
+    const name = nameOf(childKey, 'This entity')
+    const parentName = parentKey ? nameOf(parentKey) : undefined
+    const stays = (layerId: string | undefined) => {
+      const column = columnName(layerId)
+      return column ? ` It stays in ${column}, the column that holds its type.` : ''
     }
+    if (child?.data?.isPending === 'create') {
+      const pointed = restageCreate(childKey, parentKey, parentLabel, v.edgeType)
+      if (pointed === false) {
+        notify('info', `'${(child?.data?.label as string) || 'This entity'}' is new — save it first, then you can move it.`, reviewAndSave)
+        return false
+      }
+      moveHost()?.moved(childKey, parentKey)
+      notify('success', `${name} will be created ${parentName ? `inside ${parentName}` : 'at the top level'}.${stays(pointed.keptIn)}`,
+        [{ label: 'Undo', onClick: pointed.undo }], MOVE_NOTICE_MS)
+      return true
+    }
+    const { keptIn, id } = restageContainment(childKey, parentKey, parentLabel ?? '', v.edgeType)
     moveHost()?.moved(childKey, parentKey)
+    const reach = moveHost()?.reach?.() ?? NO_REACH
     const column = columnName(keptIn)
-    notify('success', parentKey
-      ? `Moved under ${parentLabel}.${column ? ` It stays in ${column}, the column that holds its type.` : ''}`
-      : `Moved to the top level${column ? `, shown in ${column}` : ''}.`)
+    const done = parentName
+      ? `Moved ${name} inside ${parentName}. ${dataNoticeTail(reach)}${stays(keptIn)}`
+      : `Moved ${name} to the top level${column ? `, shown in ${column}` : ''}. ${dataNoticeTail(reach)}`
+    notify('success', done, [discardAction(id), reviewAndSave], MOVE_NOTICE_MS, reachNote(reach, usePersonaStore.getState().mode))
     return true
   }, [notify, restageCreate, restageContainment])
 

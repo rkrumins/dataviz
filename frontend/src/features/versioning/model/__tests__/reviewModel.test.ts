@@ -79,7 +79,9 @@ describe('buildReviewGroups', () => {
       ['layout', 'a summary', 'modified', 1],
     ])
     expect(groups[0].typeId).toBe('table')
-    expect(describeScope(groups)).toBe('2 entities, 1 relationship and 1 layout change')
+    expect(describeScope(groups)).toBe('3 data changes (every view) and 1 view change (only this view)')
+    expect(describeScope(groups.slice(0, 1), 'this view and 3 others on Retail')).toBe('1 data change (this view and 3 others on Retail)')
+    expect(describeScope(groups.slice(3))).toBe('1 view change (only this view)')
   })
 
   it('suggests a publish title from the first change', () => {

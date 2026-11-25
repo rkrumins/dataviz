@@ -36,7 +36,7 @@ import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
 import { setDraggedEntity, draggedEntity } from './entityDrag'
-import { DropHint } from './DropHint'
+import { ChangeKindTag, DropHint } from './DropHint'
 import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
 import { LineEndTag } from './LineEndTag'
 import type { LineEnd } from './lineEnd'
@@ -1384,39 +1384,46 @@ function GroupRowControls({ groupId, name, actions, hint = true }: {
     // A choice is where the group goes: a layer, and a group in it (none = the layer's top level).
     const dest = (layerId: string, parent: string | null) => JSON.stringify([layerId, parent])
     return (
-      <select
-        autoFocus
-        defaultValue=""
-        aria-label={mode === 'move' ? `Move group ${name} into` : `Move everything in ${name} into`}
-        onClick={stop}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setMode('idle') }}
-        onBlur={() => setMode('idle')}
-        onChange={(e) => {
-          const v = e.target.value
-          if (mode === 'move' && v) {
-            const [layerId, parent] = JSON.parse(v) as [string, string | null]
-            actions.move(groupId, parent, layerId)
-          } else if (v) actions.moveContents(groupId, v)
-          setMode('idle')
-        }}
-        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
-      >
-        <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
-        {mode === 'move' ? (
-          <>
-            <optgroup label={`In ${actions.layerName}`}>
-              <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
-              {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
-            </optgroup>
-            {actions.otherLayers.map((l) => (
-              <optgroup key={l.layerId} label={`To ${l.layerName}`}>
-                <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
-                {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+      <span className="mt-1 flex flex-col gap-1" onClick={stop}>
+        <select
+          autoFocus
+          defaultValue=""
+          aria-label={mode === 'move' ? `Move group ${name} into` : `Move everything in ${name} into`}
+          onClick={stop}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setMode('idle') }}
+          onBlur={() => setMode('idle')}
+          onChange={(e) => {
+            const v = e.target.value
+            if (mode === 'move' && v) {
+              const [layerId, parent] = JSON.parse(v) as [string, string | null]
+              actions.move(groupId, parent, layerId)
+            } else if (v) actions.moveContents(groupId, v)
+            setMode('idle')
+          }}
+          className="w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
+        >
+          <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
+          {mode === 'move' ? (
+            <>
+              <optgroup label={`In ${actions.layerName}`}>
+                <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
+                {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
               </optgroup>
-            ))}
-          </>
-        ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
-      </select>
+              {actions.otherLayers.map((l) => (
+                <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                  <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
+                  {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+                </optgroup>
+              ))}
+            </>
+          ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
+        </select>
+        {/* A group is this view's own arranging: moving one (or what is in it) leaves the data be. */}
+        <span className="flex items-center gap-1.5 min-w-0">
+          <ChangeKindTag kind="view" />
+          <span className="text-[10.5px] text-ink-muted truncate">Groups organise this view — the data doesn’t change.</span>
+        </span>
+      </span>
     )
   }
   if (mode === 'confirm') {

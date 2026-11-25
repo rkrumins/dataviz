@@ -16,6 +16,9 @@ import { cn } from '@/lib/utils'
 import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
 import { placeMenu } from './menuPlacement'
 import { usePersonaMode } from '@/store/persona'
+import { ChangeKindTag } from './context-view/DropHint'
+import { COLUMN_KIND_ICON } from './context-view/columnKind'
+import type { ColumnChoice, DataReach } from './context-view/changeKind'
 
 // ============================================
 // Types
@@ -66,6 +69,17 @@ export interface LayerMenuModel {
     /** Select everything the layer shows (layerSelection.ts) — in both views, and
      *  during a trace too: selecting writes nothing. */
     selectAll?: { count: number; onSelect: () => void }
+}
+
+/** Move to Layer, guided: where the entity could go, and what each choice changes. */
+export interface MoveChoices {
+    /** The entity, by the name the reader sees. */
+    name: string
+    choices: ColumnChoice[]
+    /** Who a data choice reaches. */
+    reach: DataReach
+    /** The two kinds, side by side (changeKind.ts `moveFooter`). */
+    footer: string
 }
 
 export interface ContextMenuAction {
@@ -130,9 +144,16 @@ export interface CanvasContextMenuProps {
     /** Questions about the node right-clicked, answered by the search
      *  panel — shown together after its read affordances. */
     queryActions?: ContextMenuAction[]
-    /** Layer options for moving nodes */
-    layers?: Array<{ id: string; name: string; color: string }>
+    /** Move to Layer's choices for an entity — none where it can't be moved between columns. */
+    moveChoices?: (nodeId: string) => MoveChoices | null
+    /** A view choice: show the entity in this column. */
     onMoveToLayer?: (nodeId: string, layerId: string) => void
+    /** A data choice: move the entity inside the one a column is mapped to. */
+    onMoveInside?: (nodeId: string, parentId: string) => void
+    /** Move to another parent… — a data change, chosen in a dialog. */
+    onMoveToParent?: (nodeId: string) => void
+    /** What it changes, under its label. */
+    moveToParentHint?: string
     /** The right-clicked layer's menu (target type `layer`). */
     layerMenu?: LayerMenuModel | null
     /** Narrow the canvas to the right-clicked entity (or the selection it is
@@ -189,8 +210,11 @@ export function CanvasContextMenu({
     onSelectAll,
     customActions = [],
     queryActions = [],
-    layers = [],
+    moveChoices,
     onMoveToLayer,
+    onMoveInside,
+    onMoveToParent,
+    moveToParentHint,
     layerMenu = null,
     narrowActions = [],
     viewOnly = false,
@@ -253,6 +277,12 @@ export function CanvasContextMenu({
     // The Business view's entity menu reads and walks; copying an identifier
     // and narrowing the canvas are the Technical view's.
     const technical = usePersonaMode() === 'technical'
+
+    // What Move to Layer would offer the entity right-clicked — asked once per opening.
+    const guide = React.useMemo(
+        () => (isOpen && target?.type === 'node' && onMoveToLayer && moveChoices ? moveChoices(target.id) : null),
+        [isOpen, target, onMoveToLayer, moveChoices],
+    )
 
     /** "Select all in <Layer> (N)" — offered with nothing to select too, saying why. */
     const selectAllIn = useCallback((name: string, count: number, onSelect: () => void): ContextMenuAction => ({
@@ -413,15 +443,27 @@ export function CanvasContextMenu({
                 })
             }
 
-            if (layers.length > 0 && onMoveToLayer) {
+            // Where this view shows it (a view change) — then where it is in the data (a data change).
+            if (guide && guide.choices.length > 0) {
                 result.push({
                     id: 'move-to-layer',
                     label: 'Move to Layer',
                     icon: 'Layers',
-                    dividerAfter: true,
+                    hint: 'Where this view shows it',
                     onClick: () => setSubmenu('layer')
                 })
             }
+            if (onMoveToParent) {
+                result.push({
+                    id: 'move-to-parent',
+                    label: 'Move to another parent…',
+                    icon: 'FolderInput',
+                    hint: moveToParentHint,
+                    onClick: () => { onMoveToParent(target.id); onClose() }
+                })
+            }
+            const last = result[result.length - 1]
+            if (last && (last.id === 'move-to-layer' || last.id === 'move-to-parent')) result[result.length - 1] = { ...last, dividerAfter: true }
 
             if (onDeleteNode) {
                 result.push({
@@ -610,7 +652,7 @@ export function CanvasContextMenu({
         return result
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, createNodeInside, onPaste,
-        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical,
+        onSelectAll, customActions, queryActions, guide, onMoveToParent, moveToParentHint, layerMenu, onClose, narrowActions.length, technical,
         viewOnly, trace, selectLayer, selectAllIn, expandActions])
 
     // Get icon component
@@ -719,6 +761,7 @@ export function CanvasContextMenu({
                         <div className="flex-none px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
                             <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
                                 {showNarrowSubmenu && target.type === 'node' ? 'Narrow to this — how far?' :
+                                    showLayerSubmenu && target.type === 'node' ? 'Move to Layer' :
                                     target.type === 'node' ? 'Node Actions' :
                                     target.type === 'edge' ? 'Edge Actions' : 'Canvas Actions'}
                             </span>
@@ -765,8 +808,10 @@ export function CanvasContextMenu({
                                 </React.Fragment>
                             ))}
                         </div>
-                    ) : showLayerSubmenu && target.type === 'node' ? (
-                        <div className="py-1">
+                    ) : showLayerSubmenu && target.type === 'node' && guide ? (
+                        // Guided: each column, with what choosing it changes — the view (a column to
+                        // show it in) or the data (inside the entity a column is mapped to).
+                        <div className="py-1 w-[300px] max-w-[calc(100vw-24px)]" role="menu" aria-label={`Where should ${guide.name} go?`}>
                             <button
                                 onClick={() => setSubmenu(null)}
                                 className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
@@ -775,22 +820,42 @@ export function CanvasContextMenu({
                                 Back
                             </button>
                             <div className="border-t border-glass-border my-1" />
-                            {layers.map(layer => (
-                                <button
-                                    key={layer.id}
-                                    onClick={() => {
-                                        onMoveToLayer?.(target.id, layer.id)
-                                        onClose()
-                                    }}
-                                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent-lineage/10 hover:text-accent-lineage transition-colors"
-                                >
-                                    <div
-                                        className="w-3 h-3 rounded-full border border-white/20"
-                                        style={{ backgroundColor: layer.color }}
-                                    />
-                                    {layer.name}
-                                </button>
-                            ))}
+                            <p className="px-3 pt-1 pb-1.5 text-[13px] font-semibold text-ink truncate">Where should {guide.name} go?</p>
+                            {guide.choices.map((choice) => {
+                                const KindIcon = COLUMN_KIND_ICON[choice.column]
+                                const off = !!choice.hint
+                                return (
+                                    <button
+                                        key={`${choice.layerId}:${choice.change}`}
+                                        role="menuitem"
+                                        disabled={off}
+                                        data-move-choice={choice.change}
+                                        onClick={() => {
+                                            if (choice.change === 'data' && choice.parentId) onMoveInside?.(target.id, choice.parentId)
+                                            else onMoveToLayer?.(target.id, choice.layerId)
+                                            onClose()
+                                        }}
+                                        className={cn(
+                                            "w-full flex items-start gap-2.5 px-3 py-1.5 text-left text-sm transition-colors",
+                                            off ? "cursor-not-allowed" : "text-ink hover:bg-accent-lineage/10",
+                                        )}
+                                    >
+                                        <span className={cn("mt-0.5 flex-none flex items-center gap-1", off && "opacity-50")} aria-hidden>
+                                            <span className="w-2.5 h-2.5 rounded-full border border-white/20" style={{ backgroundColor: choice.color }} />
+                                            <KindIcon className="w-3.5 h-3.5 text-ink-muted" />
+                                        </span>
+                                        <span className="min-w-0 flex-1">
+                                            <span className={cn("block truncate", off ? "text-ink-muted" : "text-ink")}>{choice.label}</span>
+                                            <span className="mt-1 flex items-center gap-1.5 min-w-0">
+                                                <ChangeKindTag kind={choice.change} reach={guide.reach} className={cn("min-w-0", off && "opacity-60")} />
+                                                {/* Kept readable on a disabled choice: it is the reason. */}
+                                                {choice.hint && <span className="text-[11px] text-ink-muted truncate">{choice.hint}</span>}
+                                            </span>
+                                        </span>
+                                    </button>
+                                )
+                            })}
+                            <p className="px-3 pt-2 pb-1 mt-1 border-t border-glass-border text-[11px] leading-snug text-ink-muted">{guide.footer}</p>
                         </div>
                     ) : (
                         <div className="py-1">

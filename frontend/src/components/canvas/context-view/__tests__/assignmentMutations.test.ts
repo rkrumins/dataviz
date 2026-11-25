@@ -10,6 +10,8 @@ import {
   keyForInsertion,
   keysForInsertion,
   ensureSiblingOrderKeys,
+  changedAssignments,
+  restoreAssignments,
 } from '../assignmentMutations'
 import { setLayerNodeSortMode } from '../layerMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
@@ -63,6 +65,27 @@ describe('assignmentMutations — assignEntities', () => {
     const snapshot = JSON.stringify(before)
     assignEntities(before, ['urn:a'], 'l1', { clearDescendants: ['urn:x'] })
     expect(JSON.stringify(before)).toBe(snapshot)
+  })
+})
+
+describe('assignmentMutations — one change taken back, and put back, alone', () => {
+  it('finds exactly the entries a change made, and restores only those — a later edit stays', () => {
+    const at = (layerId: string) => ({ layerId, inheritsChildren: true })
+    const before = layout({ 'urn:a': at('l1'), 'urn:kid': at('l1'), 'urn:b': at('l1') })
+    const after = assignEntities(before, ['urn:a'], 'l2', { clearDescendants: ['urn:kid'] })
+    expect(changedAssignments(before, after).sort()).toEqual(['urn:a', 'urn:kid'])
+
+    // A later edit to another entity.
+    const later = assignEntities(after, ['urn:b'], 'l2')
+    const undone = restoreAssignments(later, before, changedAssignments(before, after))
+    expect(undone.assignments['urn:a']).toEqual(at('l1'))
+    expect(undone.assignments['urn:kid']).toEqual(at('l1'))
+    expect(undone.assignments['urn:b'].layerId).toBe('l2')
+
+    const redone = restoreAssignments(undone, after, changedAssignments(before, after))
+    expect(redone.assignments['urn:a'].layerId).toBe('l2')
+    expect(redone.assignments['urn:kid']).toBeUndefined()
+    expect(redone.assignments['urn:b'].layerId).toBe('l2')
   })
 })
 

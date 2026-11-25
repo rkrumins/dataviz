@@ -44,6 +44,7 @@ describe('the menu during a trace', () => {
     await cardMenu(h, 'tableau')
     expect(menuLabels()).toContain('View & Edit')
     expect(menuLabels()).toContain('Delete')
+    expect(menuLabels()).toContain('Move to another parent…')
     h.pressEscape()
     await h.settle()
 
@@ -51,7 +52,7 @@ describe('the menu during a trace', () => {
     await cardMenu(h, 'orders')
     expect(menuLabels().slice(0, 2)).toEqual(['Trace from here', 'Add to this trace'])
     expect(menuLabels()).toContain('View details')
-    for (const write of ['View & Edit', 'Delete', 'Duplicate…', 'Add Child Entity', 'Connect To…', 'Link to…', 'Move to Layer']) {
+    for (const write of ['View & Edit', 'Delete', 'Duplicate…', 'Add Child Entity', 'Connect To…', 'Link to…', 'Move to Layer', 'Move to another parent…']) {
       expect(menuLabels()).not.toContain(write)
     }
     expect(menu()).toHaveTextContent('Editing is paused while tracing')

@@ -51,6 +51,19 @@ const resetStaged = () => useStagedChangesStore.setState({ changes: [], redoStac
 const staged = () => useStagedChangesStore.getState().changes
 const moves = () => staged().filter((c) => c.type === 'move_entity')
 const parentLinks = (child: string) => useCanvasStore.getState().edges.filter((e) => e.target === child)
+type Action = { label: string; onClick: () => void }
+/** The last notice, as said: its type, words, the actions it offers and its quieter line. */
+const lastNotice = () => {
+  const [type, message, action, , detail] = notify.mock.calls.at(-1) as [string, string, Action | Action[] | undefined, number?, string?]
+  const actions = action ? (Array.isArray(action) ? action : [action]) : []
+  return { type, message, actions: actions.map((a) => a.label), detail }
+}
+const lastAction = (label: string) => {
+  const action = notify.mock.calls.at(-1)?.[2] as Action | Action[] | undefined
+  const found = (Array.isArray(action) ? action : action ? [action] : []).find((a) => a.label === label)
+  if (!found) throw new Error(`the last notice offers no ${label}`)
+  return found.onClick
+}
 
 describe('useReparentNode', () => {
   beforeEach(() => {
@@ -74,7 +87,7 @@ describe('useReparentNode', () => {
     const m = moves()[0].after as any
     expect([m.childId, m.parentId, m.edgeType]).toEqual(['D', 'S', 'CONTAINS'])
     expect(parentLinks('D').map((e) => [e.source, e.data?.isPending])).toEqual([['S', 'create']])
-    expect(notify).toHaveBeenCalledWith('success', expect.any(String))
+    expect(lastNotice()).toMatchObject({ type: 'success', message: 'Moved D inside S. A data change — every view that shows it, once published.' })
   })
 
   it('moves a node whose current parent link the canvas never loaded — the server resolves it', () => {
@@ -95,7 +108,7 @@ describe('useReparentNode', () => {
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S')
     expect(moves()).toHaveLength(1)
-    expect(notify).toHaveBeenCalledWith('success', expect.any(String))
+    expect(lastNotice().type).toBe('success')
   })
 
   it('blocks an ontology-illegal nesting with a notification', () => {
@@ -196,16 +209,29 @@ describe('useReparentNode — returning a PLACED entity to its parent (view only
     expect(layout.assignments.D).toEqual({ layerId: 'L3' })        // undo restores the placement
   })
 
-  it('a placement made in this session is simply cancelled', () => {
+  it('says it is a view change, with an Undo that puts the placement back', () => {
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S')
+    expect(lastNotice()).toMatchObject({ type: 'success', message: 'D is back under S. Only this view — the data is unchanged.', actions: ['Undo'] })
+    lastAction('Undo')()
+    expect(staged()).toHaveLength(0)
+    expect(layout.assignments.D).toEqual({ layerId: 'L3' })
+  })
+
+  it('a placement made in this session is simply cancelled — and Undo puts it back', () => {
     const before = layout
     useStagedChangesStore.getState().stage({
       type: 'assign_layer', targetId: 'D', after: { layerId: 'L3' }, summary: 'place',
       discard: () => { layout = { ...before, assignments: {} } },
+      reapply: () => { layout = before },
     })
     const { result } = renderHook(() => useReparentNode())
     expect(result.current.returnToParent('D', 'S')).toBe(true)
     expect(staged()).toHaveLength(0)
     expect(layout.assignments.D).toBeUndefined()
+    lastAction('Undo')()
+    expect(staged().map((c) => c.summary)).toEqual(['place'])
+    expect(layout.assignments.D).toEqual({ layerId: 'L3' })
   })
 
   it('does nothing for an entity that is not placed', () => {
@@ -246,7 +272,42 @@ describe('useReparentNode — where a moved entity is shown, and what moves with
     const { result } = renderHook(() => useReparentNode())
     result.current.reparent('D', 'S2')
     expect(layout.assignments.D).toEqual({ layerId: 'datasets', inheritsChildren: true })
-    expect(notify).toHaveBeenCalledWith('success', 'Moved under S2. It stays in Datasets, the column that holds its type.')
+    expect(lastNotice()).toEqual({
+      type: 'success',
+      message: 'Moved D inside S2. A data change — every view that shows it, once published. It stays in Datasets, the column that holds its type.',
+      actions: ['Undo', 'Review & Save'],
+      detail: undefined,
+    })
+  })
+
+  it('its notice\'s Undo takes back that move alone — a layout edit made since stays', () => {
+    layout.assignments.D = { layerId: 'other', inheritsChildren: true }
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    const undo = lastAction('Undo')
+    layout = { ...layout, assignments: { ...layout.assignments, S2: { layerId: 'systems', inheritsChildren: true } } }
+    undo()
+    expect(moves()).toHaveLength(0)
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['S1-D'])
+    expect(layout.assignments.D).toEqual({ layerId: 'other', inheritsChildren: true })
+    expect(layout.assignments.S2).toEqual({ layerId: 'systems', inheritsChildren: true })
+    undo()   // already gone: nothing more happens
+    expect(staged()).toHaveLength(0)
+  })
+
+  it('says how many other views on its data source follow — counted from those the reader can see', async () => {
+    const { registerMoveHost } = await import('@/store/canvasLayoutBridge')
+    const off = registerMoveHost({
+      blocked: () => null, columnOf: () => undefined, isDrawn: () => true, moved: () => {},
+      reach: () => ({ otherViews: 3, source: 'Retail data pipeline', sourceId: 'ds-retail', inDraft: true }),
+    })
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    off()
+    expect(lastNotice()).toMatchObject({
+      message: 'Moved D inside S2. A data change — this view now, and 3 other views on Retail data pipeline once published.',
+      detail: 'Counted from the views you can see — others’ private views follow too. Data source: ds-retail',
+    })
   })
 
   it('clears any other placement, so the entity follows its new parent', () => {
@@ -311,7 +372,7 @@ describe('useReparentNode — where a moved entity is shown, and what moves with
     expect(parentLinks('S9')).toHaveLength(0)
     expect(count('S1')).toBe(0)
     expect(layout.assignments.S9).toMatchObject({ layerId: 'systems' })
-    expect(notify).toHaveBeenCalledWith('success', 'Moved to the top level, shown in Systems.')
+    expect(lastNotice().message).toBe('Moved S9 to the top level, shown in Systems. A data change — every view that shows it, once published.')
     useStagedChangesStore.getState().discard(moves()[0].id)
     expect(parentLinks('S9').map((e) => e.id)).toEqual(['S1-S9'])
     expect(layout.assignments.S9).toBeUndefined()
@@ -370,6 +431,23 @@ describe('useReparentNode — an entity created in this draft', () => {
     expect(creates()[0].after).toMatchObject({ parentUrn: 'S2', containmentEdgeType: 'CONTAINS', parentLabel: 'S2' })
     expect(creates()[0].summary).toBe("Create dataset: 'New' · CONTAINS S2")
     expect(parentLinks(temp).map((e) => [e.id, e.source, e.data?.isPending])).toEqual([[`contains-S2-${temp}`, 'S2', 'create']])
+    expect(lastNotice()).toMatchObject({ type: 'success', message: 'New will be created inside S2.', actions: ['Undo'] })
+  })
+
+  it('its notice\'s Undo points it back — and leaves it alone once it has changed again', () => {
+    setCanvas([node('S1', 'system'), node('S2', 'system'), node('S3', 'system')])
+    const { result } = both()
+    const temp = result.current.create.stageEntity({ entityType: 'dataset', displayName: 'New', parentUrn: 'S1', containmentEdgeType: 'CONTAINS' })
+    result.current.move.reparent(temp, 'S2')
+    lastAction('Undo')()
+    expect(creates()[0].after).toMatchObject({ parentUrn: 'S1' })
+    expect(parentLinks(temp).map((e) => e.source)).toEqual(['S1'])
+
+    result.current.move.reparent(temp, 'S2')
+    const undo = lastAction('Undo')
+    result.current.move.reparent(temp, 'S3')
+    undo()
+    expect(creates()[0].after).toMatchObject({ parentUrn: 'S3' })
   })
 
   it('Undo points it back under its first parent; discarding it still removes it', () => {
