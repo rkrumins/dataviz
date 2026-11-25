@@ -97,6 +97,18 @@ describe('buildHierarchyLevels', () => {
         expect(levels[0].types.map(t => t.id)).toEqual(['a'])
     })
 
+    it("reads roots and containment in any case, under the ontology's own spelling", () => {
+        // `To`, `to` and `TO` are one ontology type: a root list or a canContain
+        // spelled otherwise than the type itself still names it.
+        const types: HierarchyPreviewEntityType[] = [
+            { id: 'Domain', name: 'Domain', hierarchy: { level: 1, canContain: ['system'] } },
+            { id: 'System', name: 'System', hierarchy: { level: 0, canContain: [] } },
+        ]
+        const levels = buildHierarchyLevels(types, [], ['domain'], [])
+
+        expect(levels.map(l => l.types.map(t => t.id))).toEqual([['Domain'], ['System']])
+    })
+
     it('returns nothing for an empty ontology', () => {
         expect(buildHierarchyLevels([], [], [], [])).toEqual([])
     })
