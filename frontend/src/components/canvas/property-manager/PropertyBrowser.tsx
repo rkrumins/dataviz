@@ -142,6 +142,7 @@ export function PropertyBrowser({
         const keys = new Set<string>()
         for (const t of jobs) {
             if (t.job?.status === 'failed' || t.job?.status === 'cancelled') continue
+            if (t.entityKind === 'edge') continue           // the catalog lists entities' properties
             const k = t.op.kind === 'rename' || t.op.kind === 'copy' ? t.op.to : t.op.kind === 'remove' ? undefined : t.op.key
             if (k && !knownKeys.has(k)) keys.add(k)
         }
@@ -151,6 +152,7 @@ export function PropertyBrowser({
     const stagedValueByKey = useMemo(() => {
         const m = new Map<string, string>()
         for (const t of jobs) {
+            if (t.entityKind === 'edge') continue
             if ((t.op.kind === 'set' || t.op.kind === 'fillEmpty') && t.op.value !== undefined && !m.has(t.op.key)) {
                 m.set(t.op.key, String(t.op.value))
             }
