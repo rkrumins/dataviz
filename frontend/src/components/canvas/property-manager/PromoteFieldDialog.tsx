@@ -325,7 +325,7 @@ function PromoteDialog({ subject, onClose }: { subject: Subject; onClose: () => 
                         {subject.of === 'relationship' && (t.declared ?? t.type) !== t.label && (
                           <code className="text-[10.5px] font-mono text-ink-muted">{t.declared ?? t.type}</code>
                         )}
-                        <span className="text-[11px] text-ink-muted tabular-nums">{t.count.toLocaleString()} carry it</span>
+                        <span className="text-[11px] text-ink-muted tabular-nums">{t.count.toLocaleString()} {t.count === 1 ? 'carries' : 'carry'} it</span>
                         {t.builtIn ? <span className="text-[11px] text-ink-muted">· built in — it takes no fields</span>
                           : t.already ? <span className="text-[11px] text-ink-muted">· a field already</span>
                             : !t.declared && <span className="text-[11px] text-ink-muted">· not a type of this semantic layer</span>}
@@ -341,7 +341,7 @@ function PromoteDialog({ subject, onClose }: { subject: Subject; onClose: () => 
                     <span className="text-[12px] text-ink">
                       Required
                       <span className="block text-[11px] text-ink-muted">
-                        {subject.count.toLocaleString()} {subject.of === 'relationship' ? 'relationships hold' : 'hold'} it now. A draft that adds {subject.of === 'relationship' ? 'a relationship' : 'one'} of these types without it, or empties it, can’t be published — existing ones are judged only when they change.
+                        {subject.count.toLocaleString()} {subject.of === 'entity' ? 'hold' : subject.count === 1 ? 'relationship holds' : 'relationships hold'} it now. A draft that adds {subject.of === 'relationship' ? 'a relationship' : 'one'} of these types without it, or empties it, can’t be published — existing ones are judged only when they change.
                       </span>
                     </span>
                   </label>
