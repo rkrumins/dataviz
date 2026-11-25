@@ -323,10 +323,6 @@ interface PreferencesState {
   changeListLayout: ChangeListLayout | null
   setChangeListLayout: (layout: ChangeListLayout) => void
 
-  /** The Business view's sync card: whether its "Show technical details" (the stores and
-   *  revisions behind the plain lanes) is open. Closed by default; the choice is remembered. */
-  syncTechnicalDetailsOpen: boolean
-  setSyncTechnicalDetailsOpen: (open: boolean) => void
 
   /** Whether a data, search or view export says where each entity sits: its parent and path, the
    *  five informational columns (`lib/ancestryColumns`). Off, so a file reads as it always has to
@@ -647,8 +643,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       changeListLayout: null,
       setChangeListLayout: (changeListLayout) => set({ changeListLayout }),
 
-      syncTechnicalDetailsOpen: false,
-      setSyncTechnicalDetailsOpen: (syncTechnicalDetailsOpen) => set({ syncTechnicalDetailsOpen }),
 
       exportWithPath: false,
       setExportWithPath: (exportWithPath) => set({ exportWithPath }),

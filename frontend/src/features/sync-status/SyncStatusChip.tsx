@@ -11,22 +11,18 @@
  * update itself (`UpdateProgress`).
  *
  * The Business view opens a card too, in plain words: what kind of graph it is, the version saved
- * with its commit, the version on screen and the summaries. The Technical lanes, store names and
- * all, sit behind "Show technical details", which stays as the reader left it.
+ * with its commit, the version on screen and the summaries. The store names and revisions are the
+ * Technical view's: the header's Business/Technical switch is the way to them, not a card of its own.
  */
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import * as Popover from '@radix-ui/react-popover'
-import { motion } from 'framer-motion'
 import { ArrowRight, Check, Copy, GitCommitHorizontal, Radar, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { MOTION } from '@/lib/motion'
 import { timeAgo } from '@/lib/timeAgo'
-import { Disclosure } from '@/components/ui/Disclosure'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePermission } from '@/store/auth'
 import { usePersonaMode } from '@/store/persona'
-import { usePreferencesStore } from '@/store/preferences'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import type { GraphUpdateProgress } from '@/services/versioningApiService'
 import { UpdateProgress } from '@/features/versioning/components/UpdateProgress'
@@ -216,8 +212,7 @@ function Lanes({ lanes, update, plain, label }: {
 /**
  * The Business view's pill and card. The pill keeps its plain words (Up to date, Updating, May be
  * out of date); the card says what kind of graph this is, the version saved with its commit, what
- * views show and the summaries — no store names. The Technical lanes are one click further, behind
- * a toggle that stays as the reader left it.
+ * views show and the summaries — no store names: those are the Technical view's.
  */
 function BusinessSyncChip({ verdict, q, update, canManage, onOpenHealth, className }: {
   verdict: SyncVerdict
@@ -228,15 +223,6 @@ function BusinessSyncChip({ verdict, q, update, canManage, onOpenHealth, classNa
   className?: string
 }) {
   const [open, setOpen] = useState(false)
-  const showTechnical = usePreferencesStore((s) => s.syncTechnicalDetailsOpen)
-  const setShowTechnical = usePreferencesStore((s) => s.setSyncTechnicalDetailsOpen)
-  // Opened, the details start below the card's fold: bring them up rather than leave the reader
-  // wondering whether the click did anything.
-  const technicalRef = useRef<HTMLDivElement>(null)
-  const toggleTechnical = (next: boolean) => {
-    setShowTechnical(next)
-    if (next) requestAnimationFrame(() => technicalRef.current?.scrollIntoView({ block: 'start' }))
-  }
   const t = TONE[verdict.tone]
   const howFar = update ? describeProgress(update) : null
   // An earlier version on screen while the newer one is written is said as such, with which and
@@ -327,22 +313,6 @@ function BusinessSyncChip({ verdict, q, update, canManage, onOpenHealth, classNa
             )}
 
             <Lanes lanes={verdict.plain.lanes} update={update} plain label="How up to date this view is" />
-
-            {verdict.lanes.length > 0 && (
-              <div ref={technicalRef} className="border-t border-glass-border">
-                <Disclosure
-                  open={showTechnical}
-                  onOpenChange={toggleTechnical}
-                  buttonClassName="px-4 py-2.5 text-[11.5px] font-medium text-ink-secondary hover:text-ink hover:bg-canvas-overlay transition-colors"
-                  summary={showTechnical ? 'Hide technical details' : 'Show technical details'}
-                >
-                  <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={MOTION.fadeIn}>
-                    <p className="px-4 pt-1 text-[11px] leading-snug text-ink-muted">{verdict.kindExplainer}</p>
-                    <Lanes lanes={verdict.lanes} update={update} label="Where this view's data comes from" />
-                  </motion.div>
-                </Disclosure>
-              </div>
-            )}
           </div>
 
           <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-2.5 border-t border-glass-border">
@@ -389,8 +359,8 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
   const update = q.data?.versioned?.progress ?? null
   const howFar = update ? describeProgress(update) : null
 
-  // The Business view keeps the verdict in words a reader acts on; its card keeps the store names
-  // and revisions behind a toggle.
+  // The Business view keeps the verdict in words a reader acts on; the store names and revisions
+  // are this view's, reached by the header's Business/Technical switch.
   if (!technical) {
     return <BusinessSyncChip verdict={verdict} q={q} update={update} canManage={canManage}
       onOpenHealth={() => openPanel('health')} className={className} />
