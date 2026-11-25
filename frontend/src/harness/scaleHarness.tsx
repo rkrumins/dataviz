@@ -82,13 +82,24 @@ try {
 const TYPES = ['Table', 'Column', 'Dataset', 'Dashboard', 'Pipeline']
 /** The bulk-editing fixtures — each in a draft (`br1` of graph `g1`) of the view `v1`, so each
  *  offers its edits as the app does there. */
-const BULK = ['multi-entity', 'cleanup-merge', 'multi-relationship', 'jobs-panel'].includes(fixture)
+const BULK = ['multi-entity', 'cleanup-merge', 'multi-relationship', 'jobs-panel', 'relationship', 'cleanup-edges'].includes(fixture)
+/** `fixture=relationship`: one relationship's drawer, `state` saved, new (drawn in the draft, not
+ *  saved yet) or deleted (deleted in the draft and saved: a ghost on the canvas). */
+const REL_STATE = (params.get('state') ?? 'saved') as 'saved' | 'new' | 'deleted'
+const field = (id: string, name: string, type: string, required = false, displayOrder = 0) =>
+  ({ id, name, type, required, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder })
+/** Its type's fields, which the drawer types its properties by. */
+const FEEDS_TYPE = {
+  id: 'FEEDS', name: 'Feeds', sourceTypes: [], targetTypes: [], bidirectional: false, showLabel: false, isLineage: true,
+  visual: { strokeColor: '#6366f1', strokeWidth: 2, strokeStyle: 'solid', animated: false, animationSpeed: 'normal', arrowType: 'arrow', curveType: 'bezier' },
+  fields: [field('schedule', 'Schedule', 'string', true, 0), field('sla_hours', 'SLA hours', 'number', false, 1), field('verified', 'Verified', 'boolean', false, 2)],
+}
 if (BULK) {
   useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: true, editModeEnabled: true } } as never)
   useSchemaStore.setState({
     activeViewId: 'v1',
     schema: {
-      id: 'ws1', name: 'Harness', version: '1', relationshipTypes: [], defaultViewId: 'v1',
+      id: 'ws1', name: 'Harness', version: '1', relationshipTypes: fixture === 'relationship' ? [FEEDS_TYPE] : [], defaultViewId: 'v1',
       containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['FEEDS'],
       entityTypes: TYPES.map((t) => ({
         id: t, name: t, pluralName: `${t}s`, fields: [], hierarchy: {}, behavior: {},
@@ -108,6 +119,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const third = Math.floor(N / 3)
   if (BULK && url.includes('/versioning/resolve')) return json({ graphId: 'g1', mainBranchId: 'main', mainHeadCommitSeq: 1 })
   if (BULK && url.includes('/graphs/g1/edges/read')) return json(edgesRead(JSON.parse(String(init?.body)).refs))
+  if (fixture === 'relationship') {
+    const answer = relationshipAnswer(url, init)
+    if (answer) return answer
+  }
+  if (fixture === 'cleanup-edges' && url.includes('/property-jobs/preview/values')) return json(SCHEDULE_VALUES)
   if (url.includes('/diff/summary')) {
     return json({
       origin: { branchId: 'br1' }, counts: { added: third, modified: third, removed: N - 2 * third },
@@ -352,6 +368,74 @@ function edgesRead(refs: Array<{ id: string; source: string; target: string; edg
     deleted: [], missing: [],
   }
 }
+/** One relationship, Orders → Revenue, in the state `REL_STATE` says. */
+function seedRelationship() {
+  const nodes = [['urn:orders', 'Orders', 'Table'], ['urn:revenue', 'Revenue', 'Dataset']].map(([id, label, type]) =>
+    ({ id, type: 'generic', position: { x: 0, y: 0 }, data: { urn: id, label, type } }))
+  const id = REL_STATE === 'new' ? 'tmp_rel' : 'rel_orders_revenue'
+  const edges = [{ id, source: 'urn:orders', target: 'urn:revenue', data: { edgeType: 'FEEDS', ...(REL_STATE === 'deleted' ? { isGhost: true } : {}) } }]
+  useCanvasStore.setState({ nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set([id]) } as never)
+  if (REL_STATE === 'new') {
+    useStagedChangesStore.getState().stage({ type: 'create_edge', targetId: id,
+      after: { edgeType: 'FEEDS', source: 'urn:orders', target: 'urn:revenue', properties: { schedule: 'daily', 'my prop': 'val1' } }, summary: 'Draw Orders feeds Revenue' })
+  }
+  useCanvasStore.getState().openEdgeDrawer({ kind: 'relationship', id, source: 'urn:orders', target: 'urn:revenue', edgeType: 'FEEDS' },
+    REL_STATE === 'new' ? { edit: true } : undefined)
+}
+/** The relationship's history, summary and watching, as the server answers them. */
+function relationshipAnswer(url: string, init?: RequestInit): Response | null {
+  const rid = SAVED_RELATIONSHIP.id
+  if (url.includes(`/entities/${rid}/summary`)) {
+    const deleted = REL_STATE === 'deleted'
+    return json({
+      entityId: rid, kind: 'edge', exists: true, version: 'v3', inherited: false,
+      created: { at: '2026-09-02T09:14:00Z', actor: 'usr_ana', op: 'create', commitId: 'c11', inDraft: false },
+      updated: deleted ? { at: '2026-11-24T16:40:00Z', actor: 'usr_bo', op: 'delete', commitId: 'c92', inDraft: true }
+        : { at: '2026-11-20T11:05:00Z', actor: 'usr_bo', op: 'update', commitId: 'c88', inDraft: false },
+      revisions: { published: 3, draft: deleted ? 1 : 0 }, changedOnMainSinceBranch: false, baseCommitSeq: 88,
+      value: deleted ? { kind: 'edge', version: null, deleted: true }
+        : { kind: 'edge', version: 'v3', edge: SAVED_RELATIONSHIP },
+      userNames: { usr_ana: 'Ana Ruiz', usr_bo: 'Bo Chen' },
+    })
+  }
+  if (url.includes(`/entities/${rid}/history`)) {
+    const rev = (seq: number, op: string, at: string, actor: string, message: string, changes: unknown[], draft = false) => ({
+      id: `r${seq}`, commit_id: `c${seq}`, commit_seq: seq, branch_id: draft ? 'br1' : 'main', op, content_hash: `h${seq}`,
+      actor, created_at: at, commit_message: message, changes, on_draft: draft, after_branch_point: false })
+    return json({
+      entityId: rid, kind: 'edge', hasMore: false, userNames: { usr_ana: 'Ana Ruiz', usr_bo: 'Bo Chen' },
+      versions: [
+        ...(REL_STATE === 'deleted' ? [rev(92, 'delete', '2026-11-24T16:40:00Z', 'usr_bo', 'Retire the old revenue feed', [], true)] : []),
+        rev(88, 'update', '2026-11-20T11:05:00Z', 'usr_bo', 'Move the revenue feed to hourly', [
+          { path: ['properties', 'schedule'], kind: 'changed', before: 'daily', after: 'hourly' },
+          { path: ['properties', 'sla_hours'], kind: 'added', before: null, after: 4 }]),
+        rev(40, 'update', '2026-10-01T08:30:00Z', 'usr_ana', 'Mark verified', [
+          { path: ['properties', 'verified'], kind: 'added', before: null, after: true }]),
+        rev(11, 'create', '2026-09-02T09:14:00Z', 'usr_ana', 'Enable version control', []),
+      ],
+    })
+  }
+  if (url.includes(`/diff/entries/${rid}`) || url.includes('/diff/entries/tmp_rel')) return json({ detail: 'not changed in this draft' }, 404)
+  if (url.endsWith('/graphs/g1/watch')) {
+    return json({ graph: false, entities: [], edges: init?.method === 'PUT' ? [{ id: rid, since: '2026-11-25T10:00:00Z' }] : [], entitiesMax: 200 })
+  }
+  return null
+}
+
+/** `cleanup-edges`: the values `schedule` holds on the relationships a clean-up reaches — read
+ *  from the first 400 of them (`POST …/property-jobs/preview/values`). */
+const SCHEDULE_VALUES = (() => {
+  const values = [['daily', 'String', 182], ['Daily', 'String', 41], ['DAILY ', 'String', 9], ['hourly', 'String', 96],
+    ['Hourly', 'String', 22], ['weekly', 'String', 38], ['every day', 'String', 12]].map(([value, kind, count]) => ({ value, kind, count }))
+  const held = values.reduce((n, v) => n + (v.count as number), 0)
+  return { read: 400, truncated: true, property: { key: 'schedule', count: held, distinct: values.length, distinctExact: true, values,
+    byEntityType: { FEEDS: held }, kinds: { String: held }, residual: 0 } }
+})()
+
+/** What the data source holds of it. */
+const SAVED_RELATIONSHIP = { id: 'rel_orders_revenue', sourceUrn: 'urn:orders', targetUrn: 'urn:revenue', edgeType: 'FEEDS', confidence: 0.92,
+  properties: { schedule: 'hourly', sla_hours: 4, verified: true, 'my prop': 'val1', owner: 'finance-data' } }
+
 function seedRelationships() {
   const nodes = Array.from({ length: ENDS }, (_, i) => ({
     id: `urn:n${i}`, type: 'generic', position: { x: 0, y: 0 },
@@ -437,6 +521,7 @@ const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProv
 Object.assign(provider, {
   fetch: async (path: string, opts?: { body?: string }) => {
     if (path === '/search/catalog') return catalogAnswer(JSON.parse(opts?.body ?? '{}'))
+    if (path === '/edges/query' || path === '/edges/between') return [SAVED_RELATIONSHIP]
     throw new Error(`${path} is not in the harness`)
   },
 })
@@ -688,6 +773,11 @@ function Harness() {
     }
     if (fixture === 'multi-entity') seedEntities()
     if (fixture === 'multi-relationship') seedRelationships()
+    if (fixture === 'relationship') seedRelationship()
+    if (fixture === 'cleanup-edges') {
+      openTimed(() => usePropertyJobsStore.getState().requestOp({ kind: 'mapValues', key: 'schedule',
+        target: { kind: 'relationships', ids: Array.from({ length: 640 }, (_, i) => `rel${i}`) } }), () => document.querySelector('[role=dialog]'))
+    }
     if (fixture === 'cleanup-merge') openTimed(() => usePropertyJobsStore.getState().requestOp({ kind: 'mapValues', key: 'team' }), mergeShown)
     if (fixture === 'jobs-panel') seedJobs()
     void drive()
@@ -710,10 +800,10 @@ function Harness() {
         <div className="fixed inset-0 flex bg-canvas">
           <div className="flex-1 min-w-0" style={DOTS} />
           {fixture === 'multi-entity' && <EntityDrawer canEdit />}
-          {fixture === 'multi-relationship' && <RelationshipDrawer canEdit />}
+          {(fixture === 'multi-relationship' || fixture === 'relationship') && <RelationshipDrawer canEdit />}
           {fixture === 'jobs-panel' && <JobsRail />}
         </div>
-        {fixture === 'cleanup-merge' && <PropertyOpHost viewId="v1" graphWrite={GRAPH_WRITE} knownEntityTypes={TYPES} />}
+        {(fixture === 'cleanup-merge' || fixture === 'cleanup-edges') && <PropertyOpHost viewId="v1" graphWrite={GRAPH_WRITE} knownEntityTypes={TYPES} />}
         <NotificationStack />
       </ProviderOverride>
     )
