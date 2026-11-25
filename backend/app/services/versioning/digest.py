@@ -2,23 +2,26 @@
 
 Read when someone opens a graph (``GET …/graphs/{id}/digest``, :func:`read`), never on a read's
 path: ``main``'s versions after their seen marker, newest first and capped, each with what it
-recorded of itself (``commits.stats``); the reviews that wait on them; and the entities they watch
-that changed. Every query is bounded and indexed: the versions a LIMIT on ``uq_commits_branch_seq``;
-the watched entities ``ix_nv_urn``, then one ``ix_nv_entity_hist`` probe each; the reviews the live
-ones asking them or a team of theirs (``ix_rr_graph``), from the review records, each decided as the
-review inbox's ``needs_review`` decides it (``review_state.waits_on``).
+recorded of itself (``commits.stats``); the reviews that wait on them; and the entities and
+relationships they watch that changed. Every query is bounded and indexed: the versions a LIMIT on
+``uq_commits_branch_seq``; the watched entities ``ix_nv_urn``, then one ``ix_nv_entity_hist`` probe
+each; the watched relationships (by id: a relationship has no urn) one ``ix_ev_entity_hist`` probe
+each, and their ends one ``ix_nv_entity_hist`` probe each, for the names a reader knows them by;
+the reviews the live ones asking them or a team of theirs (``ix_rr_graph``), from the review
+records, each decided as the review inbox's ``needs_review`` decides it (``review_state.waits_on``).
 
 Telling the people who watch a graph is the versioning worker's (:func:`tell_pending`, every
 ``TELL_POLL_SECS``), never a commit's: a publish, an undo or a restore commits and answers, whoever
 watches. A pass finds each watched graph whose published line moved past its marker
 (``graph_watch_told``) and tells, in one round, of every version a person published since (a
 draft's, a review's or a fork's publish, an undo, a restore): each person watching the graph, or an
-entity those versions changed, who may still read it — at most one unread notification per graph
-each, as one still unread already points at the digest, which lists everything since they last
-looked — and never anyone of only what they published themselves. A round tells its watchers by
-user id, ``TELL_BATCH`` at a time, each batch committed with the marker: a restart carries on where
-it stopped, nobody is told twice, and two workers never tell one graph at once (``SKIP LOCKED``).
-Their access is decided for each batch at once (``permission_service.resolve_many``).
+entity or a relationship those versions changed, who may still read it — at most one unread
+notification per graph each, as one still unread already points at the digest, which lists
+everything since they last looked — and never anyone of only what they published themselves. A
+relationship is told of in plain words: its type and its ends, by name. A round tells its watchers
+by user id, ``TELL_BATCH`` at a time, each batch committed with the marker: a restart carries on
+where it stopped, nobody is told twice, and two workers never tell one graph at once (``SKIP
+LOCKED``). Their access is decided for each batch at once (``permission_service.resolve_many``).
 
 A commit does one thing more, once it has landed (``main_activity.note`` → :func:`note`): an author
 who had seen everything before their own version has seen it too, so their marker moves to it.
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from bisect import bisect_right
 from collections import Counter
@@ -39,7 +43,8 @@ from sqlalchemy import Text, and_, column, func, or_, select, true, values
 
 from . import db, review_state
 from .change_index import stat_changes
-from .models import BranchORM, CommitORM, GraphORM, MergeRequestORM, NodeVersionORM, ReviewRequestORM
+from .models import (BranchORM, CommitORM, EdgeVersionORM, GraphORM, MergeRequestORM,
+                     NodeVersionORM, ReviewRequestORM)
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +96,12 @@ async def _main_id(s, graph_id: str) -> str:
 
 
 async def read(svc, *, graph_id: str, after: Optional[int], cutoff: datetime, actor: str,
-               urns: Sequence[str], limit: Optional[int] = None) -> Dict[str, Any]:
+               urns: Sequence[str], edges: Sequence[str] = (),
+               limit: Optional[int] = None) -> Dict[str, Any]:
     """What ``actor`` hasn't seen of ``graph_id``'s published line: its versions after ``after``
     (their marker), or — with none, or one past the head (of an earlier graph of the data source) —
-    those published since ``cutoff``. ``urns``: the entities they watch in it.
+    those published since ``cutoff``. ``urns``: the entities they watch in it; ``edges``: the
+    relationships, by id.
 
     ``{head: {seq, commitId}, after, versions: [row], truncated, total, reviews, reviewsMore,
     watched}``; ``after`` None means the ``cutoff`` window. ``total``: how many versions the window
@@ -130,6 +137,9 @@ async def read(svc, *, graph_id: str, after: Optional[int], cutoff: datetime, ac
                 CommitORM.commit_seq == head))
         lo = after if after is not None else (rows[-1].commit_seq - 1 if rows else head)
         watched = await _watched_changes(s, graph_id, main_id, urns, lo, head) if urns else []
+        if edges:
+            watched += await _watched_edge_changes(s, graph_id, main_id, edges, lo, head)
+            watched.sort(key=lambda w: -w["seq"])             # most recent first, as each is
         reviews, more = await _reviews_waiting(svc, s, graph_id, actor)
     total = head - after if after is not None else (None if truncated else len(rows))
     return {
@@ -160,15 +170,17 @@ async def _entities_named(s, graph_id: str, urns: Sequence[str]) -> Dict[str, st
     return out
 
 
-def _one_each(graph_id: str, ids: Sequence[str], *where, newest: bool = True):
+def _one_each(graph_id: str, ids: Sequence[str], *where, newest: bool = True, edges: bool = False):
     """Each of ``ids``' last (``newest``) or first version meeting ``where``: one probe of
     ``ix_nv_entity_hist`` each (``LATERAL … LIMIT 1``), however long its history or however many
-    entities the window's versions changed."""
+    entities the window's versions changed. ``edges``: of relationships (``ix_ev_entity_hist``),
+    with their type and ends in place of a name."""
+    t = EdgeVersionORM if edges else NodeVersionORM
+    shown = (t.edge_type, t.source_entity_id, t.target_entity_id) if edges else (t.display_name,)
     e = values(column("id", Text), name="e").data([(i,) for i in ids])
-    v = (select(NodeVersionORM.entity_id, NodeVersionORM.commit_seq, NodeVersionORM.op,
-                NodeVersionORM.display_name, NodeVersionORM.created_at)
-         .where(NodeVersionORM.graph_id == graph_id, NodeVersionORM.entity_id == e.c.id, *where)
-         .order_by(NodeVersionORM.commit_seq.desc() if newest else NodeVersionORM.commit_seq)
+    v = (select(t.entity_id, t.commit_seq, t.op, t.created_at, *shown)
+         .where(t.graph_id == graph_id, t.entity_id == e.c.id, *where)
+         .order_by(t.commit_seq.desc() if newest else t.commit_seq)
          .limit(1).lateral("v"))
     return select(v).select_from(e.join(v, true()))
 
@@ -202,14 +214,73 @@ async def _watched_changes(s, graph_id: str, main_id: str, urns: Sequence[str], 
             names[r.entity_id] = r.display_name
     out = []
     for eid, r in last.items():
-        change = ("removed" if r.op == "delete" else "added" if first[eid].op == "create"
-                  else "changed")
-        out.append({"urn": by_entity[eid], "entityId": eid, "name": names.get(eid),
-                    "change": change, "seq": r.commit_seq, "at": r.created_at})
+        out.append({"kind": "node", "urn": by_entity[eid], "entityId": eid, "name": names.get(eid),
+                    "change": _change(first[eid], r), "seq": r.commit_seq, "at": r.created_at})
     # One row per urn: an urn a later entity took again names the one that changed last.
     seen: Set[str] = set()
     ordered = sorted(out, key=lambda w: (-w["seq"], w["urn"]))
     return [w for w in ordered if not (w["urn"] in seen or seen.add(w["urn"]))]
+
+
+def _change(first: Any, last: Any) -> str:
+    """What the window did to one entity or relationship, from its first and last version in it."""
+    return "removed" if last.op == "delete" else "added" if first.op == "create" else "changed"
+
+
+async def _watched_edge_changes(s, graph_id: str, main_id: str, edge_ids: Sequence[str], lo: int,
+                                hi: int) -> List[Dict[str, Any]]:
+    """The watched relationships (``edge_ids``: a relationship has no urn) that ``main`` changed
+    after ``lo`` up to ``hi``, as a reader knows them: ``{kind: "edge", entityId, edgeType, source,
+    target, change, seq, at}``, ``source`` / ``target`` its ends ``{entityId, name}``, by the names
+    they had at ``hi`` (None: never named); ``change`` as an entity's; most recent first. A removed
+    one is described as it was: its removal records no type and no ends."""
+    if hi <= lo or not edge_ids:
+        return []
+    # ``main`` as an expression no index can serve, as for the entities (:func:`_watched_changes`).
+    window = (func.coalesce(EdgeVersionORM.branch_id, "") == main_id,
+              EdgeVersionORM.commit_seq > lo, EdgeVersionORM.commit_seq <= hi)
+    last = {r.entity_id: r for r in (await s.execute(
+        _one_each(graph_id, sorted(set(edge_ids)), *window, edges=True))).all()}
+    if not last:
+        return []
+    first = {r.entity_id: r for r in (await s.execute(
+        _one_each(graph_id, sorted(last), *window, newest=False, edges=True))).all()}
+    removed = sorted(eid for eid, r in last.items() if r.op == "delete")
+    was = await _last_on_main(s, graph_id, main_id, removed, hi, EdgeVersionORM.op != "delete",
+                              edges=True)
+    shape = {eid: was.get(eid, r) for eid, r in last.items()}
+    ends = sorted({end for r in shape.values() for end in (r.source_entity_id, r.target_entity_id)})
+    names = {eid: r.display_name for eid, r in (await _last_on_main(
+        s, graph_id, main_id, ends, hi, NodeVersionORM.display_name.is_not(None))).items()}
+
+    def end(entity_id: str) -> Dict[str, Optional[str]]:
+        return {"entityId": entity_id, "name": names.get(entity_id)}
+
+    out = [{"kind": "edge", "entityId": eid, "edgeType": shape[eid].edge_type,
+            "source": end(shape[eid].source_entity_id), "target": end(shape[eid].target_entity_id),
+            "change": _change(first[eid], r), "seq": r.commit_seq, "at": r.created_at}
+           for eid, r in last.items()]
+    return sorted(out, key=lambda w: (-w["seq"], w["entityId"]))
+
+
+async def _last_on_main(s, graph_id: str, main_id: str, ids: Sequence[str], hi: int, *where,
+                        edges: bool = False) -> Dict[str, Any]:
+    """Each of ``ids``' last version on ``main`` up to ``hi`` meeting ``where`` (:func:`_one_each`):
+    an end's name, a removed relationship as it was. A fork copies no rows, so what it holds none
+    of is read from its parent, as it was when it was forked."""
+    t = EdgeVersionORM if edges else NodeVersionORM
+    out: Dict[str, Any] = {}
+    while ids:
+        out.update({r.entity_id: r for r in (await s.execute(_one_each(
+            graph_id, ids, func.coalesce(t.branch_id, "") == main_id, t.commit_seq <= hi, *where,
+            edges=edges))).all()})
+        ids = [i for i in ids if i not in out]
+        graph = await s.get(GraphORM, graph_id) if ids else None
+        if graph is None or not graph.fork_parent_graph_id:
+            break
+        graph_id, hi = graph.fork_parent_graph_id, graph.fork_base_commit_seq or 0
+        main_id = await _main_id(s, graph_id)
+    return out
 
 
 async def _reviews_waiting(svc, s, graph_id: str, actor: str) -> Tuple[List[Dict[str, Any]], bool]:
@@ -385,10 +456,10 @@ async def _tell_graph(g: _Watched, deadline: float) -> Tuple[int, bool]:
 
     told = 0
     people: Optional[List[str]] = None
-    watching: Dict[str, Tuple[bool, Set[str]]] = {}
+    watching: Dict[str, Tuple[bool, Set[Tuple[str, str]]]] = {}
     label = ""
     found: Optional[_Round] = None
-    changed: Optional[Dict[str, Optional[str]]] = None
+    changed: Optional[Dict[Tuple[str, str], str]] = None
     while True:
         async with get_async_session() as s:
             mark = await graph_watch_repo.claim(s, g.data_source_id)
@@ -420,8 +491,8 @@ async def _tell_graph(g: _Watched, deadline: float) -> Tuple[int, bool]:
                 await s.commit()
                 return told, True
             if changed is None:
-                urns = sorted({u for _whole, urns in watching.values() for u in urns})
-                changed = await _changed_between(g.graph_id, found.runs, urns) if urns else {}
+                watched = sorted({w for _whole, ws in watching.values() for w in ws})
+                changed = await _changed_between(g.graph_id, found.runs, watched) if watched else {}
             told += await _tell_batch(s, g, label, found, batch, watching, changed)
             mark.round_through = batch[-1]
             mark.updated_at = datetime.now(timezone.utc)
@@ -464,22 +535,30 @@ async def _round(graph_id: str, lo: int, hi: int) -> _Round:
 
 
 async def _changed_between(graph_id: str, runs: Sequence[Tuple[int, int]],
-                           urns: Sequence[str]) -> Dict[str, Optional[str]]:
-    """The watched ``urns`` the versions in ``runs`` changed → each one's name, as last named."""
-    out: Dict[str, Optional[str]] = {}
+                           watched: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str], str]:
+    """What of ``watched`` (``(kind, urn)``, a relationship by its id) the versions in ``runs``
+    changed → each in the words a watcher is told it by: an entity by its name, as last named
+    (:func:`_entity`), a relationship by its type and ends (:func:`_relationship`)."""
+    out: Dict[Tuple[str, str], str] = {}
+    urns = [u for kind, u in watched if kind != "edge"]
+    edges = [e for kind, e in watched if kind == "edge"]
     async with db.graphver_session() as s:
         main_id = await _main_id(s, graph_id)
         for lo, hi in runs:
             for i in range(0, len(urns), _AT_ONCE):
                 for w in await _watched_changes(s, graph_id, main_id, urns[i:i + _AT_ONCE],
                                                 lo, hi):
-                    out[w["urn"]] = w["name"]
+                    out[("node", w["urn"])] = _entity(w["name"] or w["urn"])
+            for i in range(0, len(edges), _AT_ONCE):
+                for w in await _watched_edge_changes(s, graph_id, main_id, edges[i:i + _AT_ONCE],
+                                                     lo, hi):
+                    out[("edge", w["entityId"])] = _relationship(w)
     return out
 
 
 async def _tell_batch(s, g: _Watched, label: str, found: _Round, batch: Sequence[str],
-                      watching: Mapping[str, Tuple[bool, Set[str]]],
-                      changed: Mapping[str, Optional[str]]) -> int:
+                      watching: Mapping[str, Tuple[bool, Set[Tuple[str, str]]]],
+                      changed: Mapping[Tuple[str, str], str]) -> int:
     """Tell those of ``batch`` with something to be told who may still read the graph, in ``s``'s
     transaction: at most one unread notification per graph each (``dedupe_unread``)."""
     from backend.app.db.repositories import notification_repo
@@ -489,8 +568,8 @@ async def _tell_batch(s, g: _Watched, label: str, found: _Round, batch: Sequence
     for user_id in batch:
         if found.authors == {user_id}:
             continue                                  # told only of what they published themselves
-        whole, urns = watching[user_id]
-        names = sorted({changed[u] or u for u in urns if u in changed})
+        whole, watched = watching[user_id]
+        names = sorted({changed[w] for w in watched if w in changed})
         if whole or names:
             wanted[user_id] = names
     if not wanted:
@@ -514,9 +593,27 @@ async def _tell_batch(s, g: _Watched, label: str, found: _Round, batch: Sequence
     return n
 
 
+def _entity(name: str) -> str:
+    """An entity as a watcher is told of it: “Orders”."""
+    return f"“{name}”"
+
+
+def _relationship(w: Mapping[str, Any]) -> str:
+    """A relationship as a watcher is told of it, in plain words — its type and its ends, by name
+    (an end never named, by its id): the “depends on” relationship from “Orders” to “Customers”."""
+    def end(e: Mapping[str, Any]) -> str:
+        return _entity(e["name"] or e["entityId"])
+
+    # Its type in words, as the app shows one: DEPENDS_ON, partOf → “depends on”, “part of”.
+    words = re.sub(r"[_-]+", " ", re.sub(r"([a-z])([A-Z])", r"\1 \2", w["edgeType"] or "")).lower()
+    typed = f"“{words}” " if words else ""
+    return f"the {typed}relationship from {end(w['source'])} to {end(w['target'])}"
+
+
 def _listed(names: Sequence[str], shown: int = 3) -> str:
-    """"A", "A and B", "A, B and C", "A, B, C and 2 more"."""
-    named = [f"“{n}”" for n in names[:shown]]
+    """"A", "A and B", "A, B and C", "A, B, C and 2 more" — each as :func:`_entity` or
+    :func:`_relationship` says it."""
+    named = list(names[:shown])
     rest = len(names) - len(named)
     if rest:
         named.append(f"{rest} more")
@@ -526,8 +623,9 @@ def _listed(names: Sequence[str], shown: int = 3) -> str:
 def _copy(commit: Any, label: str, names: Sequence[str], *, whole: bool,
           versions: int = 1) -> Tuple[str, str]:
     """The notification's title and body: the graph's news for someone watching it (naming the
-    entities they also watch that it changed), else what it changed of the entities they watch.
-    ``versions``: how many a round tells of, ``commit`` the latest of them."""
+    entities and relationships they also watch that it changed), else what it changed of those
+    they watch. ``names``: each as :func:`_entity` or :func:`_relationship` says it. ``versions``:
+    how many a round tells of, ``commit`` the latest of them."""
     kind = commit.kind
     if whole:
         title = (f"{versions:,} new versions of “{label}”" if versions > 1 else
@@ -535,7 +633,7 @@ def _copy(commit: Any, label: str, names: Sequence[str], *, whole: bool,
                   "restore": f"“{label}” was restored to an earlier version"}.get(
                      kind, f"New version of “{label}”"))
     elif len(names) == 1:
-        title = f"“{names[0]}” changed in “{label}”"
+        title = f"{names[0][:1].upper()}{names[0][1:]} changed in “{label}”"
     else:
         title = f"{len(names)} things you watch changed in “{label}”"
     said = f"Version #{commit.commit_seq}"

@@ -1,11 +1,13 @@
 /**
- * Watch toggles: the graph, from the view's page header, and one entity, from its panel. Watching
- * means your Inbox tells you when a version is published that changes what you watch — one
- * notification a publish, never for your own.
+ * Watch toggles: the graph, from the view's page header, and one entity or relationship, from its
+ * panel. Watching means your Inbox tells you when a version is published that changes what you
+ * watch — one notification a publish, never for your own. A relationship has no urn, so it is
+ * watched by its id.
  *
- * Toggle buttons: the accessible name stays "Watch this graph" / "Watch this entity" and
- * `aria-pressed` carries the state; the visible word says it ("Watch" / "Watching"). Both share
- * one query per graph (`useGraphWatch`), so a change in one shows in the other.
+ * Toggle buttons: the accessible name stays "Watch this graph" / "Watch this entity" / "Watch this
+ * relationship" and `aria-pressed` carries the state; the visible word says it ("Watch" /
+ * "Watching"). All share one query per graph (`useGraphWatch`), so a change in one shows in the
+ * others.
  */
 import { Eye, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -16,12 +18,15 @@ import { useFeature } from '@/store/features'
 import { useGraphWatch, useSetWatch } from '../hooks/useDigest'
 import { useResolveGraph } from '../hooks/useVersioning'
 
-function useToggle(wsId: string, graphId: string | null, urn?: string) {
+/** Watching the graph (`what` empty), an entity by its urn, or a relationship by its id. */
+function useToggle(wsId: string, graphId: string | null, what: { urn?: string; edgeId?: string } = {}) {
+  const { urn, edgeId } = what
   const q = useGraphWatch(wsId, graphId)
   const set = useSetWatch(wsId, graphId ?? '')
   const { notify } = useAppNotifications()
-  const on = urn ? !!q.data?.entities.some((e) => e.urn === urn) : !!q.data?.graph
-  const toggle = () => set.mutate({ on: !on, urn }, {
+  const on = edgeId ? !!q.data?.edges.some((e) => e.id === edgeId)
+    : urn ? !!q.data?.entities.some((e) => e.urn === urn) : !!q.data?.graph
+  const toggle = () => set.mutate({ on: !on, urn, edgeId }, {
     onError: (e) => notify('error', `Couldn’t change what you watch: ${(e as Error).message}`),
   })
   return { on, ready: q.isSuccess, failed: q.isError, busy: set.isPending, toggle }
@@ -77,7 +82,23 @@ export function EntityWatchButton({ wsId, graphId, urn, name }: {
   urn: string
   name: string
 }) {
-  const watch = useToggle(wsId, graphId, urn)
+  return <WatchToggle watch={useToggle(wsId, graphId, { urn })} name={name} what="this entity" />
+}
+
+/** "Watch" among a relationship's quick actions, by its id: tells you when a publish changes it.
+ *  `name` says it by its ends ("Orders → Revenue"). */
+export function RelationshipWatchButton({ wsId, graphId, edgeId, name }: {
+  wsId: string
+  graphId: string
+  edgeId: string
+  name: string
+}) {
+  return <WatchToggle watch={useToggle(wsId, graphId, { edgeId })} name={name} what="this relationship" />
+}
+
+/** The toggle an entity's and a relationship's quick actions share: `name` in its tip, `what` in
+ *  its accessible name ("Watch this entity"). */
+function WatchToggle({ watch, name, what }: { watch: ReturnType<typeof useToggle>; name: string; what: string }) {
   return (
     <HoverTip
       className="inline-flex"
@@ -94,7 +115,7 @@ export function EntityWatchButton({ wsId, graphId, urn, name }: {
         disabled={!watch.ready}
         onClick={watch.toggle}
         aria-pressed={watch.on}
-        aria-label="Watch this entity"
+        aria-label={`Watch ${what}`}
         className={cn(watch.on && 'text-accent-lineage border-accent-lineage/30')}
       >
         {watch.on ? 'Watching' : 'Watch'}

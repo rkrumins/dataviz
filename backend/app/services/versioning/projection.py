@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import itertools
 import json
 import logging
 import os
@@ -68,6 +69,7 @@ from backend.common.derived_artifacts import is_derived_label
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
     projector_writing_key,
+    _EDGE_ENVELOPE_KEYS,
     _RESERVED_NODE_KEYS,
     _admit_native_keys,
     _compute_searchable_text,
@@ -78,7 +80,9 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
     _text_properties,
     _native_property_budget,
     _sanitize_label,
+    _split_edge_properties,
     _split_user_properties,
+    platform_property_names,
     reserve_platform_property_names,
 )
 
@@ -379,12 +383,16 @@ _HUB_PAGE = 10000
 class _PassStats:
     """What one pass's statements took, for its log line and its result's ``stats``."""
 
-    __slots__ = ("statements", "rows", "max_ms", "shrinks", "min_width")
+    __slots__ = ("statements", "rows", "max_ms", "shrinks", "min_width", "names", "demoted")
 
     def __init__(self) -> None:
         self.statements = self.rows = self.shrinks = 0
         self.max_ms = 0.0
         self.min_width: Optional[int] = None
+        # The graph's property names as the pass's last write found them
+        # (``_property_names_reading``): ``projection_state.property_names`` once it publishes.
+        self.names: Optional[Dict[str, object]] = None
+        self.demoted: Dict[str, Set[str]] = {"nodes": set(), "edges": set()}   # across the pass
 
     def note(self, size: int, elapsed_s: float) -> None:
         self.statements += 1
@@ -782,8 +790,14 @@ def _node_fingerprint(label: str, chash: str, ontology_level: Optional[int]) -> 
     return fingerprint("n", label, chash, ontology_level)
 
 
+#: What the projector writes for an edge, as its fingerprint records it: 2 — each user property the
+#: graph's property-name budget admits natively, the rest in the ``r.properties`` bag (1 kept them
+#: all in the bag). Moving it rewrites every edge once, at the next reconcile, into this form.
+_EDGE_SHAPE = 2
+
+
 def _edge_fingerprint(rel_type: str, chash: str) -> int:
-    return fingerprint("e", rel_type, chash)
+    return fingerprint("e", rel_type, chash, _EDGE_SHAPE)
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
@@ -809,14 +823,19 @@ def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str, *,
     was also a node's is ``edge:<id>`` in history (``bootstrap_worker._rekey``) and still ``<id>``
     there, and nothing may rename it under whatever else keys on it."""
     rid = "coalesce(r.id, item.eid)" if keep_id else "item.eid"
+    # An edge's properties as a node's are: those the budget admits natively (``item.nativeProps``,
+    # where every search operator reaches them), the rest in the bag; ``item.gone`` (nulls) removes
+    # a native one the edge no longer holds (``_mark_removed_edge_properties``).
     # How many items landed: one whose endpoint is not there matches nothing, silently.
     return (
         f"UNWIND $batch AS item "
         f"MATCH (a:{src_label} {{urn: item.src}}) "
         f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
         f"MERGE (a)-[r:{rel_type}]->(b) "
+        f"SET r += item.gone "
         f"SET r.id = {rid}, r.confidence = item.conf, r.properties = item.props, "
         f"r.gvHash = item.gvHash "
+        f"SET r += item.nativeProps "
         f"RETURN count(DISTINCT item.eid)"
     )
 
@@ -876,6 +895,15 @@ def _delete_edges_by_key_cypher(rel_type: str, src_label: str, tgt_label: str) -
     return f"UNWIND $batch AS item {_between(rel_type, src_label, tgt_label)} DELETE r"
 
 
+def _graph_edge_id(eid: str) -> str:
+    """The id a customer's graph knows an edge by, for its id in history: history re-keys an edge
+    whose id a node or another connection also has to ``edge:<id>`` — once more each time that is
+    taken too (``bootstrap_worker._own_id``) — and the graph keeps its own."""
+    while eid.startswith("edge:"):
+        eid = eid[len("edge:"):]
+    return eid
+
+
 def _delete_nodes_cypher(label: str) -> str:
     return f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) DETACH DELETE n"
 
@@ -883,9 +911,11 @@ def _delete_nodes_cypher(label: str) -> str:
 def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     # Anchored + typed: found between its two ends (``_between``), never by walking one end's
     # relationships, which a container holds hundreds of thousands of. ``item.pid`` is the id a
-    # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``).
+    # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``). Compared
+    # as text: history holds every id as text, and a customer's relationship keeps its own id,
+    # which another tool may have written as a number.
     return (f"UNWIND $batch AS item {_between(rel_type, src_label, tgt_label)} "
-            f"WHERE r.id IN [item.eid, item.pid] DELETE r")
+            f"WHERE toString(r.id) IN [item.eid, item.pid] DELETE r")
 
 
 # Heal-path sweep: match the deleted node by (label, committed urn) — the
@@ -959,13 +989,40 @@ def _node_item(entity_id: str, urn: str, payload: dict,
     }
 
 
-def _edge_item(entity_id: str, src_urn: str, tgt_urn: str, payload: dict) -> dict:
+def _record_property_names(names: Set[str], budget: int, demoted: List[str],
+                           node_keys: Set[str], edge_keys: Set[str]) -> None:
+    """Note on the pass (``_PASS_STATS``) the graph's property names as this write leaves them:
+    how many are registered of the ceiling, how many the platform keeps for itself, the budget
+    the platform's writes stop at, and the keys it stored as values instead — by whether items or
+    relationships carry them. ``projection_state.property_names`` once the pass publishes."""
+    stats = _PASS_STATS.get()
+    if stats is None:
+        return
+    # Function scope, as the provider imports it: the materializer imports the provider.
+    from backend.app.providers.falkordb_materialize import _ATTRIBUTE_NAME_LIMIT
+    platform = platform_property_names()
+    stats.demoted["nodes"].update(k for k in demoted if k in node_keys)
+    stats.demoted["edges"].update(k for k in demoted if k in edge_keys)
+    stats.names = {
+        "registered": len(names), "platform": len(names & platform) if platform else None,
+        "budget": budget, "ceiling": _ATTRIBUTE_NAME_LIMIT, "at": _now(),
+        "demoted": {"nodes": sorted(stats.demoted["nodes"])[:50],
+                    "edges": sorted(stats.demoted["edges"])[:50],
+                    "count": len(stats.demoted["nodes"] | stats.demoted["edges"])},
+    }
+
+
+def _edge_item(entity_id: str, src_urn: str, tgt_urn: str, payload: dict,
+               native_keys: Optional[Set[str]] = None) -> dict:
+    native, bag = _split_edge_properties(payload.get("properties"), native_keys)
     return {
         "src": src_urn,
         "tgt": tgt_urn,
         "eid": entity_id,
         "conf": payload.get("confidence"),
-        "props": json.dumps(payload.get("properties") or {}),
+        "props": bag,
+        "nativeProps": native,
+        "gone": {},
     }
 
 
@@ -1755,6 +1812,10 @@ class FalkorProjector:
             values.update(failed_attempts=attempts + 1, next_retry_at=_retry_at(attempts + 1))
         if window_rows is not None:
             values["window_rows"] = window_rows
+        stats = _PASS_STATS.get()
+        if stats is not None and stats.names is not None:
+            # True whether or not the pass published: the names it registered stay registered.
+            values["property_names"] = stats.names
         async with self._session() as s:
             row = (await s.execute(
                 update(ProjectionStateORM)
@@ -2031,7 +2092,7 @@ class FalkorProjector:
                         s, graph, main_id, from_seq, changes)
                     if not owned:
                         prior = await self._properties_before(s, graph, main_id, from_seq,
-                                                              changes[0])
+                                                              changes[0], changes[1])
 
             # Ontology entity-type→level map so projected nodes carry n.level (parity with
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
@@ -3833,10 +3894,10 @@ class FalkorProjector:
                                 .execution_options(synchronize_session=False))
 
     async def _properties_before(self, s, graph, main_id, seq: int,
-                                 node_upserts) -> Dict[str, Set[str]]:
-        """Each upserted node's property names as of ``seq``: on a customer's key, the only
-        properties a pass may strip from it."""
-        ids = [eid for eid, _urn, _p in node_upserts]
+                                 node_upserts, edge_upserts=()) -> Dict[str, Set[str]]:
+        """Each upserted node's and relationship's property names as of ``seq``: on a customer's
+        key, the only properties a pass may strip from it."""
+        ids = [up[0] for up in (*node_upserts, *edge_upserts)]
         vals = await self._svc._values_at(s, graph.id, main_id, ids, seq) if ids else {}
         return {eid: set(((p or {}).get("properties") or {})) for eid, p in vals.items()}
 
@@ -5490,7 +5551,7 @@ class FalkorProjector:
                                                                      changes)
                     structural = structural or moved
                     prior = None if owned else await self._properties_before(
-                        s, graph, main_id, from_seq, changes[0])
+                        s, graph, main_id, from_seq, changes[0], changes[1])
                     await self._rekey_in_place(client, rekeys)
                     await self._relabel_in_place(client, retypes, levels=level_map)
                     dropped += await self._apply(client, *changes, level_map=level_map,
@@ -5535,9 +5596,11 @@ class FalkorProjector:
             *(e.get(k) for e in edge_deletes if isinstance(e, dict) for k in ("slb", "tlb"))])
         # Which user property keys this pass writes natively — the same
         # budget the provider's own writers apply, so a versioned graph and
-        # a direct-load graph spend their attribute ids the same way.
+        # a direct-load graph spend their attribute ids the same way. Items and
+        # relationships draw on one budget: FalkorDB numbers a graph's property
+        # names in one map, whichever holds them, and never frees one.
         native_keys: Optional[Set[str]] = None
-        if node_upserts:
+        if node_upserts or edge_upserts:
             registered = await _registered_property_names(client)
             registered |= await reserve_platform_property_names(
                 lambda cypher, params: _q(client, cypher, params=params),
@@ -5545,18 +5608,24 @@ class FalkorProjector:
                 registered,
             )
             budget = _native_property_budget()
+            node_keys = await self._native_key_counts(node_upserts, at=2)
+            edge_keys = await self._native_key_counts(edge_upserts, at=3, edges=True)
+            # One key a dict, as many times as it is carried — lazily: a window of millions of
+            # relationships never holds a dict per property in memory.
             native_keys, demoted = _admit_native_keys(
-                await self._native_key_counts(node_upserts),
-                registered=registered,
-                budget=budget, reserve=_NAME_FALLBACK_KEYS,
+                ({k: True} for k in itertools.chain(node_keys.elements(), edge_keys.elements())),
+                registered=registered, budget=budget, reserve=_NAME_FALLBACK_KEYS,
             )
+            _record_property_names(registered | native_keys, budget, demoted,
+                                   set(node_keys), set(edge_keys))
             if demoted:
                 logger.warning(
-                    "projection: %d property key(s) stored as values in "
-                    "propertiesRaw rather than as node properties — shown in "
-                    "the Properties panel, not reachable by search predicates. "
-                    "The graph holds %d of the %d native property names "
-                    "FALKORDB_NATIVE_PROPERTY_BUDGET allows. Most common first: %s",
+                    "projection: %d property key(s) stored as values (an item's "
+                    "propertiesRaw, a relationship's r.properties) rather than as "
+                    "native properties — shown in Properties, reachable by search "
+                    "only as set / equal. The graph holds %d of the %d native "
+                    "property names FALKORDB_NATIVE_PROPERTY_BUDGET allows. Most "
+                    "common first: %s",
                     len(demoted), len(native_keys), budget, demoted[:5],
                 )
         by_label: Dict[str, list] = {}
@@ -5599,10 +5668,12 @@ class FalkorProjector:
             for batch in _batches(ups, self._batch):
                 chunk = []
                 for eid, su, tu, p, _slb, _tlb in await self._loaded(batch, 3):
-                    item = _edge_item(eid, su, tu, p)
+                    item = _edge_item(eid, su, tu, p, native_keys)
                     item["gvHash"] = _edge_fingerprint(rel, content_hash(p))
                     item["rel"] = rel                    # for its quarantine key; the cypher has it
                     chunk.append(item)
+                if not known_empty:
+                    await self._mark_removed_edge_properties(client, rel, sl, tl, chunk, prior)
                 chunk = await self._hold_waiting_edges(client, cypher, chunk, sl, tl)
                 await self._laddered(client, "edge_merge", cypher, chunk,
                                      on_result=count_landed, progress=progress)
@@ -5673,25 +5744,32 @@ class FalkorProjector:
             if name:
                 _URN_INDEXED.add((provider_id, name, lbl))
 
-    async def _native_key_counts(self, node_upserts) -> Iterable[dict]:
-        """What ``_admit_native_keys`` counts over ``node_upserts`` — each property key once per
-        node whose value for it could be stored natively — with a pending payload read a batch at a
-        time and let go, so the admission sees every node without holding every payload."""
+    async def _native_key_counts(self, upserts, *, at: int, edges: bool = False) -> Counter:
+        """What ``_admit_native_keys`` counts over ``upserts`` (the payload in slot ``at``) — each
+        property key once per item or relationship whose value for it could be stored natively —
+        with a pending payload read a batch at a time and let go, so the admission sees every one
+        without holding every payload: one count per key, whatever the window's size. A relationship's envelope names (``id``, ``confidence``,
+        ``properties``, ``gvHash``) are never native: its bag keeps them."""
         counts: Counter = Counter()
         pending = []
-        for _eid, _urn, p in node_upserts:
+
+        def count(p) -> None:
+            counts.update(k for k, v in ((p or {}).get("properties") or {}).items()
+                          if v is not None and _is_native_value(v)
+                          and not (edges and k in _EDGE_ENVELOPE_KEYS))
+
+        for up in upserts:
+            p = up[at]
             if isinstance(p, _Pending):
                 pending.append(p.ref)
             else:
-                counts.update(k for k, v in (p.get("properties") or {}).items()
-                              if v is not None and _is_native_value(v))
+                count(p)
         for refs in _batches(pending, self._batch):
             async with self._session() as s:
                 payload_of = await self._svc._payloads_by_version(s, refs)
             for p in payload_of.values():
-                counts.update(k for k, v in ((p or {}).get("properties") or {}).items()
-                              if v is not None and _is_native_value(v))
-        return ({k: True} for k in counts.elements())
+                count(p)
+        return counts
 
     async def _loaded(self, batch: list, at: int) -> list:
         """``batch``'s upserts with each pending payload (slot ``at``) read, in one statement."""
@@ -5742,6 +5820,40 @@ class FalkorProjector:
                 stale &= prior.get(item["entityId"], set())
             item["gone"] = {k: None for k in stale}
 
+    async def _mark_removed_edge_properties(self, client, rel: str, sl: str, tl: str, chunk: list,
+                                            prior: Optional[Dict[str, Set[str]]] = None) -> None:
+        """Give each edge item a ``gone`` map of the native properties its relationship holds but
+        the committed payload doesn't hold natively — as :meth:`_mark_removed_properties` does for
+        a node: ``r += nativeProps`` only adds, so a property removed from an edge (or one its
+        value moved into the bag) would otherwise stay on the relationship, and in its Properties
+        and search. The envelope is never removed. With ``prior`` (a customer's key), only a
+        property the edge's payload had before is removed: what something else wrote stays."""
+        for item in chunk:
+            item["gone"] = {}
+        held: Dict[Tuple[str, str], Set[str]] = {}
+
+        def collect(_part, res) -> None:
+            for src, tgt, ks in (getattr(res, "result_set", None) or []):
+                held.setdefault((str(src), str(tgt)), set()).update(ks or [])
+
+        async def unread(_item, exc) -> bool:
+            logger.warning("projection: could not read the properties of a %s relationship (%s); "
+                           "any it lost stay on it until it is written again", rel, exc)
+            return True
+
+        await self._laddered(client, "edge_keys",
+                             f"UNWIND $batch AS it {_between(rel, sl, tl, item='it')} "
+                             "RETURN it.src, it.tgt, keys(r)",
+                             [{"src": i["src"], "tgt": i["tgt"]} for i in chunk],
+                             timeout_ms=_READ_TIMEOUT_MS, read_only=True, on_result=collect,
+                             at_floor=unread)
+        for item in chunk:
+            stale = (held.get((str(item["src"]), str(item["tgt"])), set()) - _EDGE_ENVELOPE_KEYS
+                     - set(item["nativeProps"] or {}))
+            if prior is not None:
+                stale &= prior.get(item["eid"], set())
+            item["gone"] = {k: None for k in stale}
+
     async def _run_edge_deletes(self, client, edge_deletes, progress=None) -> None:
         """Typed + endpoint-anchored deletes, each ``{eid, src, tgt, rel, slb, tlb}``: both ends
         seek their label's urn index, so no delete scans the graph's relationships (shared by
@@ -5751,7 +5863,7 @@ class FalkorProjector:
             key = (spelled_type(e.get("rel")), spelled_label(e.get("slb")),
                    spelled_label(e.get("tlb")))
             del_by.setdefault(key, []).append(
-                {"eid": e["eid"], "pid": e["eid"].removeprefix("edge:"),
+                {"eid": e["eid"], "pid": _graph_edge_id(e["eid"]),
                  "src": e["src"], "tgt": e["tgt"], "rel": key[0]}
             )
         for (rel, sl, tl), items in del_by.items():

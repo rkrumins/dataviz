@@ -1286,6 +1286,55 @@ async def test_the_customer_key_migration_round_trips(store, caplog):
             await trans.rollback()
 
 
+# ── projection_state.property_names: how many property names a graph uses
+#    (20261203_1000_gv_ps_prop_names) ──
+_PS_PROP_NAMES = _VERSIONS / "20261203_1000_gv_ps_prop_names.py"
+
+
+def test_the_property_names_column_is_declared_and_migrated():
+    assert models.ProjectionStateORM.__table__.c.property_names.nullable
+    migration = _migration(_PS_PROP_NAMES)
+    assert migration.revision == _PS_PROP_NAMES.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261202_1000_bootstrap_review"
+    assert "ensure_ps_property_names_column" in _PS_PROP_NAMES.read_text()
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_property_names_column(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f"ALTER TABLE {_PS} DROP COLUMN property_names"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "property_names" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_property_names_migration_round_trips(store):
+    migration = _migration(_PS_PROP_NAMES)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "property_names" not in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "property_names" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
 # ── branches.visibility: a draft is public or private (20261029_1000_gv_branch_vis) ──
 _BRANCH_VIS = _VERSIONS / "20261029_1000_gv_branch_vis.py"
 _BRANCHES = f'"{models._SCHEMA}"."branches"'

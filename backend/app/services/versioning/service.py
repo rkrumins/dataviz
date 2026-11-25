@@ -6225,6 +6225,8 @@ class GraphVersioningService:
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
                 # What a customer's key holds that history doesn't, kept and flagged.
                 "external_drift": ps.external_drift if ps else None,
+                # Its property names as its last update left them (``projection_state``).
+                "property_names": ps.property_names if ps else None,
                 # Entities a pass could not write on their own, held so the rest published.
                 "quarantine": quarantine,
                 # Residency (doc 17): the class a system admin set, whether the key is in

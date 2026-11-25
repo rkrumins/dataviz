@@ -729,6 +729,21 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   graph and lets the copy carry on: **202** with the job, **200** when the same decision was
   already recorded, **409 `stale_decision`** when the list changed since it was shown,
   **409 `not_awaiting_decision`** when the job isn't paused.
+  After the copy, a connection held more than once with different properties, or a value JSON
+  can't hold (NaN, ±Infinity, NUL), pauses the job again before anything goes live: `awaiting`
+  reads `review`, with `review` (`{fingerprint, copies: {connections, versions, copies, sample},
+  values: {count, byProblem, sample}, decision}`). `GET /bootstrap/review?dataSourceId=…&kind=
+  copies|values&after&limit(50, max 500)&q` (`_READ`) pages it — each connection with its versions
+  side by side, the properties they disagree on (`clashing`) and a person's `choice` — or with
+  `format=csv` the whole list; **404** when nothing was held, kept after the job ends.
+  `PUT /bootstrap/review/choice?dataSourceId=…` `{entityId, choice}` (`_MANAGE`) saves one
+  connection's choice — `{rule: keep_first|keep|merge, keep, excludeCopies, values:{property:
+  version}, excludeProperties}`, null clears it — while the job waits (**409
+  `not_awaiting_decision`** after, **422** for a choice naming what it doesn't hold).
+  `POST /bootstrap/review/decision?dataSourceId=…` `{fingerprint, copies: {rule: keep_first|merge,
+  excludeProperties}, values: "as_text"}` (`_MANAGE` + **Version control**) decides it — every kind
+  held must be (**422** otherwise) — and the copy carries on: **202**, **200** when already
+  recorded, **409 `stale_decision`** / **`not_awaiting_decision`** as for duplicates.
   `POST /bootstrap/retry?dataSourceId=…&mode=resume|restart` (**202**) and
   `POST /bootstrap/abandon?dataSourceId=…` drive recovery. The worker reads the source in bounded
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —

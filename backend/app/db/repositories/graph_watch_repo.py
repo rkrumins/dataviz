@@ -1,6 +1,7 @@
 """Repository: ``graph_seen``, ``graph_watches`` and ``graph_watch_told`` — how far each person has
-looked at each versioned graph, what in it they watch (``endpoints/graph_digest.py``), and how far
-each watched graph's watchers have been told (``digest.tell_pending``).
+looked at each versioned graph, what in it they watch (``endpoints/graph_digest.py``): the graph,
+entities by urn and relationships by id (``kind`` ``node`` / ``edge``), and how far each watched
+graph's watchers have been told (``digest.tell_pending``).
 
 Every function of ``graph_seen`` and ``graph_watches`` but :func:`watchers` acts on one person's
 rows, named by the caller from the signed-in user, never from the request: nobody reads or moves
@@ -16,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import GraphSeenORM, GraphWatchORM, GraphWatchToldORM
 
-#: The entities one person may watch in one graph: the digest and the telling read them all.
+#: The entities and relationships one person may watch in one graph: the digest and the telling
+#: read them all.
 ENTITIES_MAX = 200
 
 
@@ -70,8 +72,8 @@ async def advance_if_caught_up(session: AsyncSession, user_id: str, data_source_
 
 
 async def watches(session: AsyncSession, user_id: str, data_source_id: str) -> List[GraphWatchORM]:
-    """What this person watches in this graph: the graph itself (``entity_urn`` None) and the
-    entities, oldest first."""
+    """What this person watches in this graph: the graph itself (``entity_urn`` None), the
+    entities and the relationships, oldest first."""
     return list((await session.execute(
         select(GraphWatchORM)
         .where(GraphWatchORM.user_id == user_id, GraphWatchORM.data_source_id == data_source_id)
@@ -88,36 +90,41 @@ async def entity_count(session: AsyncSession, user_id: str, data_source_id: str)
 
 
 async def watch(session: AsyncSession, user_id: str, data_source_id: str,
-                entity_urn: Optional[str]) -> None:
-    """Watch the graph (``entity_urn`` None) or one entity in it. Watching twice is watching once."""
+                entity_urn: Optional[str], *, kind: str = "node") -> None:
+    """Watch the graph (``entity_urn`` None), one entity in it (``kind`` ``node``, by its urn) or
+    one relationship (``edge``, by its id). Watching twice is watching once."""
     stmt = _insert(session)(GraphWatchORM).values(   # ``id``: the column's own default
-        user_id=user_id, data_source_id=data_source_id, entity_urn=entity_urn, created_at=_now())
+        user_id=user_id, data_source_id=data_source_id, entity_urn=entity_urn, entity_kind=kind,
+        created_at=_now())
     await session.execute(stmt.on_conflict_do_nothing())
 
 
 async def unwatch(session: AsyncSession, user_id: str, data_source_id: str,
-                  entity_urn: Optional[str]) -> bool:
-    """Stop watching the graph (``entity_urn`` None) or one entity in it. False: it wasn't watched."""
+                  entity_urn: Optional[str], *, kind: str = "node") -> bool:
+    """Stop watching the graph (``entity_urn`` None), one entity in it or one relationship
+    (``kind``, as :func:`watch`). False: it wasn't watched."""
     which = (GraphWatchORM.entity_urn.is_(None) if entity_urn is None
-             else GraphWatchORM.entity_urn == entity_urn)
+             else (GraphWatchORM.entity_urn == entity_urn) & (GraphWatchORM.entity_kind == kind))
     result = await session.execute(delete(GraphWatchORM).where(
         GraphWatchORM.user_id == user_id, GraphWatchORM.data_source_id == data_source_id, which))
     return bool(result.rowcount)
 
 
-async def watchers(session: AsyncSession, data_source_id: str) -> Dict[str, Tuple[bool, Set[str]]]:
-    """Everyone watching this graph or an entity in it, all of them (``ix_graph_watches_ds``):
-    user → (whether they watch the whole graph, the urns of the entities they watch in it)."""
-    out: Dict[str, Tuple[bool, Set[str]]] = {}
-    for user_id, urn in (await session.execute(
-            select(GraphWatchORM.user_id, GraphWatchORM.entity_urn)
+async def watchers(session: AsyncSession, data_source_id: str
+                   ) -> Dict[str, Tuple[bool, Set[Tuple[str, str]]]]:
+    """Everyone watching this graph or something in it, all of them (``ix_graph_watches_ds``):
+    user → (whether they watch the whole graph, what they watch in it: ``(kind, urn)``, a
+    relationship's id in place of a urn)."""
+    out: Dict[str, Tuple[bool, Set[Tuple[str, str]]]] = {}
+    for user_id, urn, kind in (await session.execute(
+            select(GraphWatchORM.user_id, GraphWatchORM.entity_urn, GraphWatchORM.entity_kind)
             .where(GraphWatchORM.data_source_id == data_source_id))).all():
-        whole, urns = out.get(user_id, (False, set()))
+        whole, watched = out.get(user_id, (False, set()))
         if urn is None:
             whole = True
         else:
-            urns.add(urn)
-        out[user_id] = (whole, urns)
+            watched.add((kind, urn))
+        out[user_id] = (whole, watched)
     return out
 
 

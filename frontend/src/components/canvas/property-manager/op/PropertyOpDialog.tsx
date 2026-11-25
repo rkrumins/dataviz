@@ -4,7 +4,8 @@
  * (which entities) → **Review** (counted exactly, with anything that would stop it, and an optional
  * reason kept with it), then applied to the draft by a job on the server: every entity the target
  * reaches, however many — not only the ones loaded on the canvas. Relationships the same way: named
- * ones, or every one a Connections search matches (an edge target, `isEdgeTarget`).
+ * ones, or every one a Connections search matches (an edge target, `isEdgeTarget`) — a clean-up of
+ * them previewing the values read from those it reaches (`useRelationshipValues`).
  *
  * It is applied only once Review's count is final. A removal, a rename or an overwrite of many
  * entities (or across the whole data source) asks for the property's name to be typed first — of
@@ -40,11 +41,12 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
 import { jobEnded, useDraftPropertyJobs, usePropertyJobsStore, type OpRequest } from '@/store/propertyJobsStore'
 import {
-  EDGE_RESERVED_KEYS, applyLabel, impactOf, isCleanup, isEdgeTarget, jobOp, needsTypedConfirm, needsValue, opProblem, predicateOf,
+  EDGE_RESERVED_KEYS, applyLabel, impactOf, isCleanup, isEdgeTarget, jobOp, nameProblem, needsTypedConfirm, needsValue, opProblem, predicateOf,
   propertyJobLabel, reviewCounts, scopeFixedToView, scopedTargetLabel, sentence, targetOf, tooManyIds, type OpDraft, type ScopeMode, type TargetPreset,
 } from './opModel'
 import { SECONDARY_EDGE } from './styles'
 import { useReviewCounts } from './useReviewCounts'
+import { useRelationshipValues } from './useRelationshipValues'
 import { entityTypesOf } from './fillRequired'
 import { WhatStep } from './WhatStep'
 import { WhereStep, type LayerOption } from './WhereStep'
@@ -128,6 +130,9 @@ export function PropertyOpDialog({
   const target = targetOf(preset, viewId, scopeMode)
   const predicate = predicateOf(preset)
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
+  // A clean-up of relationships previews the values read from those it reaches: no catalog counts them.
+  const relationshipValues = useRelationshipValues(graphWrite, edges && cleanup && step === 0 && !nameProblem(key, true) ? target : null, key)
+  const edgeWhatProperties = useMemo(() => withRead(edgeProperties, relationshipValues.property), [edgeProperties, relationshipValues.property])
   const whatProblem = opProblem(op, edges)
   const whereProblem = !target
     ? (tooManyIds(preset) ? (edges ? 'Pick fewer relationships' : 'Choose fewer, or another target')
@@ -186,8 +191,9 @@ export function PropertyOpDialog({
       target: counts.counts.get('target')?.count, haveKey: counts.counts.get('haveKey')?.count, haveTo: counts.counts.get('haveTo')?.count,
       match: counts.counts.get('match')?.count,
     } : null
-  // A convert's bound, from how the view's entities store the property (the target is in the view).
-  const kinds = effectiveScope === 'view' ? properties.find((p) => p.key === op.key.trim())?.kinds : null
+  // A convert's bound, from how the view's entities store the property (the target is in the view) —
+  // never theirs for relationships, which the view's catalog doesn't count.
+  const kinds = effectiveScope === 'view' && !edges ? properties.find((p) => p.key === op.key.trim())?.kinds : null
   const impact = tally && tally.target !== undefined ? impactOf(op, tally, kinds) : null
   // Counted to the end (or, where nothing can count it, never to be); `exact` when it is also the
   // draft's own count, not Published's or a floor.
@@ -375,7 +381,7 @@ export function PropertyOpDialog({
               <AnimatePresence mode="popLayout" initial={false} custom={dir}>
                 <StepPane key={step} step={step} dir={dir}>
                   {step === 0 && (edges
-                    ? <WhatStep op={op} onChange={setOp} properties={edgeProperties} viewId={viewId} edges />
+                    ? <WhatStep op={op} onChange={setOp} properties={edgeWhatProperties} viewId={viewId} edges relationshipValues={relationshipValues} />
                     : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId}
                       entityTypes={entityTypesOf(preset) ?? knownEntityTypes} keySeeded={keySeeded} />)}
                   {step === 1 && (
@@ -475,6 +481,13 @@ function edgePropertiesOf(keysByEdgeType: Record<string, string[]>): SearchCatal
     .map(([key, count]): SearchCatalogProperty => ({
       key, count, distinct: 0, distinctExact: false, values: [], byEntityType: {}, kinds: {}, residual: 0,
     }))
+}
+
+/** The relationships' keys, with the property as those read for a clean-up hold it in its place. */
+function withRead(properties: SearchCatalogProperty[], read: SearchCatalogProperty | null): SearchCatalogProperty[] {
+  if (!read) return properties
+  const at = properties.findIndex((p) => p.key === read.key)
+  return at < 0 ? [...properties, read] : properties.map((p, i) => (i === at ? read : p))
 }
 
 /** Whether a change gives entities `key`: set or filled, or renamed or copied onto it. */

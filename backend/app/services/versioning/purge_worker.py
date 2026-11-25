@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 PURGE_JOB_TYPE = "purge"
 
 PHASES = ("count", "edges", "nodes", "heads", "merkle", "working", "commits", "preflight", "keys",
-          "falkor", "meta", "finalize")
+          "review", "falkor", "meta", "finalize")
 
 # The bulk tables, in delete order, with the PK column list that makes each window an Index Scan
 # rather than a Seq Scan over dead tuples. Order matters only for readability — there are no FKs
@@ -81,17 +81,20 @@ _BULK: Tuple[Tuple[str, str], ...] = (
     ("bootstrap_nodes", "graph_id, falkor_id"),
     # The values of the properties imports match nodes by: one row per node per such property.
     ("entity_keys", "graph_id, key_name, key_value, entity_id"),
+    # What an enablement held for a decision (connections held more than once, values stored as
+    # text), kept after it as the record of what was decided.
+    ("bootstrap_review", "graph_id, kind, entity_id, seq"),
 )
 _PHASE_TABLE = {
     "edges": _BULK[0], "nodes": _BULK[1], "heads": _BULK[2],
     "merkle": _BULK[3], "working": _BULK[4], "commits": _BULK[5], "preflight": _BULK[6],
-    "keys": _BULK[7],
+    "keys": _BULK[7], "review": _BULK[8],
 }
 
 # Progress floors, so the bar moves through the phases instead of sitting at 0 then jumping.
 _PHASE_FLOOR = {"count": 0, "edges": 1, "nodes": 25, "heads": 50, "merkle": 70,
-                "working": 80, "commits": 82, "preflight": 90, "keys": 91, "falkor": 92, "meta": 95,
-                "finalize": 99}
+                "working": 80, "commits": 82, "preflight": 90, "keys": 91, "review": 91,
+                "falkor": 92, "meta": 95, "finalize": 99}
 
 
 class PurgeRefused(Exception):

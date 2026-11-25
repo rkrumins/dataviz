@@ -49,6 +49,16 @@ function versionOf(before: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
+/** What a relationship is created with besides its type and ends: the properties it was given
+ *  before it was saved (the drawer), or held when it was reversed, and its confidence. */
+function createdEdgeValues(after: Record<string, unknown>): Record<string, unknown> {
+  const properties = asObj(after.properties)
+  return {
+    ...(Object.keys(properties).length > 0 ? { properties } : {}),
+    ...(typeof after.confidence === 'number' ? { confidence: after.confidence } : {}),
+  }
+}
+
 /** Empty in every spelling a form produces — so an untouched blank field is not an edit. */
 const blank = (v: unknown) =>
   v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0)
@@ -185,12 +195,14 @@ export function stagedChangesToOps(
             edgeType: after.edgeType ?? data.edgeType,
             sourceEntityId: src != null ? resolveId(String(src)) : src,
             targetEntityId: tgt != null ? resolveId(String(tgt)) : tgt,
+            ...createdEdgeValues(after),
           },
         })
         break
       }
       case 'reverse_edge': {
-        // Endpoints aren't mutable in place — drop the original and recreate it flipped.
+        // Endpoints aren't mutable in place — drop the original and recreate it flipped, with what
+        // it held (the canvas line carries none: the reverse recorded them beside it).
         const before = asObj(asObj(c.before).edge)
         const after = asObj(asObj(c.after).edge)
         if (before.id) ops.push({ op: 'delete', kind: 'edge', id: String(before.id) })
@@ -204,6 +216,7 @@ export function stagedChangesToOps(
             edgeType: after.edgeType ?? asObj(after.data).edgeType,
             sourceEntityId: after.source != null ? resolveId(String(after.source)) : after.source,
             targetEntityId: after.target != null ? resolveId(String(after.target)) : after.target,
+            ...createdEdgeValues(asObj(c.after)),
           },
         })
         break

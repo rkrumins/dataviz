@@ -475,7 +475,12 @@ class GraphSeenORM(Base):
 class GraphWatchORM(Base):
     """One person watching a versioned graph (``entity_urn`` NULL) or one entity in it (its urn):
     a publish that changes what they watch tells them in their Inbox. NULLs are distinct to a
-    unique constraint, so ``uq_graph_watches_graph`` holds "the whole graph" to one row."""
+    unique constraint, so ``uq_graph_watches_graph`` holds "the whole graph" to one row.
+
+    ``entity_kind`` says what ``entity_urn`` names: an entity (``node``), by its urn, or a
+    relationship (``edge``), by its id, as a relationship has no urn. ``uq_graph_watches`` leaves
+    the kind out: a relationship's id and an entity's urn don't coincide in one graph (a copy from
+    a source graph re-keys a relationship whose id is an entity's)."""
 
     __tablename__ = "graph_watches"
 
@@ -483,6 +488,7 @@ class GraphWatchORM(Base):
     user_id = Column(Text, nullable=False)
     data_source_id = Column(Text, nullable=False)
     entity_urn = Column(Text, nullable=True)
+    entity_kind = Column(Text, nullable=False, default="node", server_default="node")
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (

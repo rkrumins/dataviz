@@ -57,6 +57,10 @@ _DECISION = {"action": "collapse", "fingerprint": "f" * 32}
      "decide_duplicates", "not_awaiting_decision", {}),
     (f"/api/v1/{WS}/graph/bootstrap/decision?dataSourceId={DS}",
      "decide_duplicates", "stale_decision", {"fingerprint": "e" * 32}),
+    (f"/api/v1/{WS}/graph/bootstrap/review/decision?dataSourceId={DS}",
+     "decide_review", "not_awaiting_decision", {}),
+    (f"/api/v1/{WS}/graph/bootstrap/review/decision?dataSourceId={DS}",
+     "decide_review", "stale_decision", {"fingerprint": "e" * 32}),
 ])
 async def test_a_refused_action_is_a_409_the_ui_can_act_on(
     test_client: AsyncClient, _data_source, monkeypatch, path, target, kind, extra,
@@ -295,3 +299,109 @@ async def test_a_decision_is_202_with_the_job_and_200_when_already_recorded(
     assert (await test_client.post(path, json=_DECISION)).status_code == 200
     bad = await test_client.post(path, json={"action": "keep_all", "fingerprint": "f" * 32})
     assert bad.status_code == 422 and len(calls) == 2
+
+
+
+# ── the review: what the copy couldn't keep exactly as the source has it ─────────────────────────
+
+async def test_the_review_comes_in_pages_and_as_a_download(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    seen = {}
+
+    async def page(**kw):
+        seen.update(kw)
+        return {"items": [{"entityId": "e1", "versions": []}], "next": "e1"}
+
+    async def csv_rows(**kw):
+        async def rows():
+            yield "connection,version,copies\r\n"
+            yield "e1,1,2\r\n"
+        seen["csv_kind"] = kw["kind"]
+        return rows()
+
+    monkeypatch.setattr(bootstrap_worker, "review_page", page)
+    monkeypatch.setattr(bootstrap_worker, "review_csv", csv_rows)
+    base = f"/api/v1/{WS}/graph/bootstrap/review?dataSourceId={DS}"
+    resp = await test_client.get(base + "&kind=copies&after=d&limit=20&q=calls")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["next"] == "e1"
+    assert (seen["kind"], seen["after"], seen["limit"], seen["q"]) == ("copies", "d", 20, "calls")
+    resp = await test_client.get(base + "&kind=values&format=csv")
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/csv")
+    assert "values-stored-as-text" in resp.headers["content-disposition"]
+    assert seen["csv_kind"] == "values"
+
+
+async def test_nothing_held_is_a_404_and_an_unknown_kind_a_422(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    async def none(**_kw):
+        raise LookupError("enabling version control held nothing for review here")
+
+    async def bad(**_kw):
+        raise ValueError("kind must be one of copies, values")
+    base = f"/api/v1/{WS}/graph/bootstrap/review?dataSourceId={DS}"
+    monkeypatch.setattr(bootstrap_worker, "review_page", none)
+    assert (await test_client.get(base)).status_code == 404
+    monkeypatch.setattr(bootstrap_worker, "review_page", bad)
+    assert (await test_client.get(base + "&kind=nodes")).status_code == 422
+
+
+async def test_a_connections_choice_is_saved_or_refused_as_the_ui_can_act_on(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    calls = []
+
+    async def save(**kw):
+        calls.append(kw)
+        if kw["entity_id"] == "gone":
+            raise LookupError("no connection by that id was held for review")
+        if kw["choice"] == {"rule": "drop"}:
+            raise ValueError("rule must be one of keep_first, keep, merge")
+        return {"entityId": kw["entity_id"], "choice": kw["choice"]}
+
+    monkeypatch.setattr(bootstrap_worker, "save_review_choice", save)
+    path = f"/api/v1/{WS}/graph/bootstrap/review/choice?dataSourceId={DS}"
+    ok = await test_client.put(path, json={"entityId": "e1", "choice": {"rule": "keep", "keep": 2}})
+    assert ok.status_code == 200, ok.text
+    assert calls[0]["choice"] == {"rule": "keep", "keep": 2}
+    assert (await test_client.put(path, json={"entityId": "gone", "choice": None})).status_code == 404
+    assert (await test_client.put(path, json={"entityId": "e1", "choice": {"rule": "drop"}})).status_code == 422
+    monkeypatch.setattr(bootstrap_worker, "save_review_choice", _refusing("not_awaiting_decision"))
+    late = await test_client.put(path, json={"entityId": "e1", "choice": None})
+    assert late.status_code == 409 and late.json()["detail"]["type"] == "not_awaiting_decision"
+
+
+async def test_a_review_decision_is_202_and_recorded_once(
+    test_client: AsyncClient, db_session, _data_source, monkeypatch,
+):
+    from sqlalchemy import select
+    calls = []
+
+    async def decide(**kw):
+        calls.append(kw)
+        if kw["copies"] is None:
+            raise ValueError("say how to copy the connections held more than once")
+        return {"jobId": "j1", "already": len(calls) > 2}
+
+    async def status(**_kw):
+        return {"jobId": "j1", "status": "pending", "review": {
+            "fingerprint": "r" * 32, "copies": {"connections": 2}, "values": {"count": 1}}}
+
+    monkeypatch.setattr(bootstrap_worker, "decide_review", decide)
+    monkeypatch.setattr(bootstrap_worker, "bootstrap_status", status)
+    path = f"/api/v1/{WS}/graph/bootstrap/review/decision?dataSourceId={DS}"
+    body = {"fingerprint": "r" * 32, "copies": {"rule": "merge", "excludeProperties": ["ts"]},
+            "values": "as_text"}
+    assert (await test_client.post(path, json={"fingerprint": "r" * 32})).status_code == 422
+    first = await test_client.post(path, json=body)
+    assert first.status_code == 202, first.text
+    assert first.json()["review"]["copies"]["connections"] == 2
+    assert calls[1]["copies"] == {"rule": "merge", "excludeProperties": ["ts"]}
+    assert calls[1]["values"] == "as_text" and calls[1]["actor"] != "system"
+    assert (await test_client.post(path, json=body)).status_code == 200
+    from backend.app.db.models import OutboxEventORM
+    events = (await db_session.execute(select(OutboxEventORM).where(
+        OutboxEventORM.event_type == "workspace.versioning.review_decided"))).scalars().all()
+    assert len(events) == 1, "recorded once: a repeat records nothing more"

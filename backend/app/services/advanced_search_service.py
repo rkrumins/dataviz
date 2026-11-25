@@ -47,7 +47,6 @@ from backend.app.services.view_scope import (
     ViewScopeResolver,
 )
 from backend.common.derived_artifacts import is_derived_edge_type
-from backend.common.edge_properties import EDGE_NATIVE_KEYS, JSON_OPS
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
     LINEAGE_AXES,
@@ -318,13 +317,10 @@ def _validate_edge_comparisons(predicate, path: str, *, groups: int) -> int:
             for i, child in enumerate(predicate.children)
         )
     if isinstance(predicate, EdgePropertyPredicate):
+        # Every operator: an edge's properties are native within the name budget. A value an
+        # edge still keeps in its JSON is reached by presence and equality alone
+        # (``falkordb_deep_search._visit_edge_property``; discovery's ``storedAs`` says which).
         _resolve_or_raise(predicate, path)
-        if predicate.key not in EDGE_NATIVE_KEYS and predicate.op not in JSON_OPS:
-            raise ValidationError(
-                f"{path} ({predicate.key}): an edge keeps its own properties as JSON "
-                "text, which a condition can test with is set, is, is not or is one "
-                f"of — not {predicate.op!r}"
-            )
     return 1
 
 

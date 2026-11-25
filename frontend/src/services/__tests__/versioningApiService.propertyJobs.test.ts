@@ -8,7 +8,8 @@ vi.mock('../fetchWithTimeout', () => ({ fetchWithTimeout: vi.fn() }))
 
 import { fetchWithTimeout } from '../fetchWithTimeout'
 import {
-  JobActiveError, PropertyJobRefusedError, PropertyJobUndoRefusedError, createPropertyJob, previewPropertyJobSample, undoPropertyJob,
+  JobActiveError, PropertyJobRefusedError, PropertyJobUndoRefusedError, createPropertyJob, previewPropertyJobSample,
+  previewPropertyJobValues, undoPropertyJob,
 } from '../versioningApiService'
 
 const answer = (status: number, body: unknown) =>
@@ -92,5 +93,19 @@ describe('a change’s sample', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ op, target: { ids: ['urn:n1', 'urn:nope'] } })
     expect(sample.truncated).toBe(true)
     expect(sample.rows.map((r) => [r.outcome, r.reason, 'before' in r])).toEqual([['change', undefined, true], ['skip', 'missing', false]])
+  })
+})
+
+describe('the values a change of relationships reaches', () => {
+  it('asks for one property’s values on the relationships it names, read on the draft', async () => {
+    const property = { key: 'team', count: 2, distinct: 1, distinctExact: true, kinds: { String: 2 }, byEntityType: { FLOWS_TO: 2 },
+      residual: 0, values: [{ value: 'Finance', kind: 'String', count: 2 }] }
+    answer(200, { property, read: 3, truncated: false })
+    const got = await previewPropertyJobValues('ws1', 'g1', 'd1', 'team', { edgeIds: ['e1', 'e2', 'e3'] })
+    const [url, init] = vi.mocked(fetchWithTimeout).mock.calls[0]
+    expect(url).toBe('/api/v1/ws1/versioning/graphs/g1/branches/d1/property-jobs/preview/values')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toEqual({ key: 'team', target: { edgeIds: ['e1', 'e2', 'e3'] } })
+    expect(got).toEqual({ property, read: 3, truncated: false })
   })
 })

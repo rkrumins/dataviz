@@ -9,6 +9,7 @@ import hashlib
 import json
 import contextvars
 import functools
+import itertools
 import logging
 import math
 import os
@@ -55,6 +56,7 @@ from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError, children_batch_by_query
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.moments import from_cell
 from backend.common.property_patch import apply_properties_patch
 from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
 
@@ -2200,16 +2202,95 @@ def _node_from_props(
         return None
 
 
+#: A relationship's envelope, never one of its properties: its id, its confidence, the
+#: platform's JSON bag of properties (``r.properties``) and the projector's fingerprint.
+_EDGE_ENVELOPE_KEYS = frozenset({"id", "confidence", "properties", "gvHash"})
+
+
+def _json_object(value: Any) -> Optional[Dict[str, Any]]:
+    """``value`` as the platform's bag of properties — a JSON object in a string, as every
+    platform writer stores ``r.properties``, or a dict as given; None for anything else."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_number(value: Any) -> bool:
+    """A real, finite number: what an edge's ``confidence`` holds (NaN is not one)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _native_edge_properties(rel_type: str, props: Dict[str, Any]) -> Dict[str, Any]:
+    """The properties a relationship holds ON itself (``r.weight = 3``): every key outside the
+    envelope, a ``confidence`` that is not a number, and a ``properties`` that is not the
+    platform's bag. The platform writes an edge's properties this way too — each one the graph's
+    property-name budget admits natively, the rest in the bag (:func:`_split_edge_properties`) —
+    as a graph another tool built keeps all of them. Writers remove a native key the edge no
+    longer holds (the projector's ``gone``, ``update_edge``), so every one read is the edge's.
+
+    None for a rollup (``AGGREGATED``), whose attributes are the platform's own."""
+    if is_derived_edge_type(rel_type):
+        return {}
+    out = {k: v for k, v in props.items() if k not in _EDGE_ENVELOPE_KEYS}
+    conf = props.get("confidence")
+    if conf is not None and not _is_number(conf):
+        out["confidence"] = conf
+    bag = props.get("properties")
+    if bag is not None and _json_object(bag) is None:
+        out["properties"] = bag
+    return out
+
+
+def _split_edge_properties(
+    props: Optional[Dict[str, Any]], native_keys: Optional[Set[str]] = None,
+) -> Tuple[Dict[str, Any], str]:
+    """An edge's user properties as the writers store them: ``(native, bag)`` — each value
+    FalkorDB stores natively under a name the budget admits (``native_keys``; None admits every
+    one) on the relationship itself, where every search operator reaches it; everything else in
+    the JSON bag ``r.properties``, as an edge always kept them. As :func:`_split_user_properties`
+    does for a node — but nothing is dropped: a name the envelope uses (``id``, ``confidence``,
+    ``properties``, ``gvHash``) stays in the bag, which the reader takes over a native key. A
+    ``None`` value stays in the bag too (a native one would be no value at all)."""
+    native: Dict[str, Any] = {}
+    bag: Dict[str, Any] = {}
+    for k, v in (props or {}).items():
+        if (v is not None and k not in _EDGE_ENVELOPE_KEYS and _is_native_value(v)
+                and (native_keys is None or k in native_keys)):
+            native[k] = v
+        else:
+            bag[k] = v
+    return native, json.dumps(bag, default=from_cell)
+
+
+def _countable_edge_properties(props: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """An edge's properties as :func:`_admit_native_keys` counts them: without the envelope,
+    whose names stay in the bag (:func:`_split_edge_properties`)."""
+    return {k: v for k, v in (props or {}).items() if k not in _EDGE_ENVELOPE_KEYS}
+
+
 def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[str, Any]) -> GraphEdge:
-    """Build GraphEdge from FalkorDB edge data."""
-    edge_id = props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"
+    """Build GraphEdge from FalkorDB edge data (``properties(r)``).
+
+    Its properties are the relationship's own native ones (:func:`_native_edge_properties`) with
+    the platform's bag over them — the bag wins a name both hold. Only a number is the edge's
+    ``confidence``; the id is text, whatever the source stored."""
+    conf = props.get("confidence")
+    properties = _native_edge_properties(rel_type, props)
+    properties.update(_json_object(props.get("properties")) or {})
     return GraphEdge(
-        id=edge_id,
+        id=str(props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"),
         sourceUrn=source_urn,
         targetUrn=target_urn,
         edgeType=str(rel_type),
-        confidence=props.get("confidence"),
-        properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+        confidence=float(conf) if _is_number(conf) else None,
+        properties=properties,
     )
 
 
@@ -15639,13 +15720,39 @@ class FalkorDBProvider(GraphDataProvider):
             "name", "title", "label",
         } - {""}
 
+    async def _edge_native_keys(
+        self, where: str, rel_type: str, properties: Optional[Dict[str, Any]],
+    ) -> Set[str]:
+        """Which of one relationship's property keys a single-edge write stores natively: the
+        same budget, over the same registered names, as :meth:`create_node`. None of a rollup's
+        (``AGGREGATED``), whose attributes are the platform's own."""
+        if is_derived_edge_type(rel_type):
+            return set()
+        registered = await self._registered_property_names(fresh=False)
+        await self._reserve_platform_property_names(registered)
+        budget = self._native_property_budget()
+        native_keys, demoted = _admit_native_keys(
+            [_countable_edge_properties(properties)],
+            registered=registered, budget=budget, reserve=self._native_key_reserve(),
+        )
+        if demoted:
+            self._log_demoted_keys(where, demoted, native_keys, budget)
+        return native_keys
+
+    def _names_registered(self, native: Dict[str, Any]) -> None:
+        """Note in the registered-names cache what a write just registered."""
+        cached = getattr(self, "_property_names_cache", None)
+        if cached is not None:
+            cached[1].update(native)
+
     def _log_demoted_keys(
         self, where: str, demoted: List[str], native: Set[str], budget: int,
     ) -> None:
         logger.warning(
-            "%s on %s: %d property key(s) stored as values in propertiesRaw "
-            "rather than as node properties — shown in the Properties panel and "
-            "searched from that text, without an index. The graph holds %d of the %d "
+            "%s on %s: %d property key(s) stored as values (an item's propertiesRaw, "
+            "a relationship's r.properties) rather than as native properties — shown "
+            "in the Properties panel and searched from that text, without an index. "
+            "The graph holds %d of the %d "
             "native property names FALKORDB_NATIVE_PROPERTY_BUDGET allows. "
             "Most common first: %s",
             where, self._graph_name, len(demoted), len(native), budget, demoted[:5],
@@ -15788,9 +15895,10 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Which user property keys this call writes natively — see
         # ``_admit_native_keys``. The graph's registered names are read on
-        # the write node once per call.
+        # the write node once per call. Nodes and relationships draw on one
+        # budget: FalkorDB numbers a graph's property names in one map.
         native_keys: Optional[Set[str]] = None
-        if nodes:
+        if nodes or edges:
             # Before the first data write: the platform's names are
             # registered by us, not by whichever source key happens to
             # arrive first. The reading this call already takes is what
@@ -15800,7 +15908,10 @@ class FalkorDBProvider(GraphDataProvider):
             await self._reserve_platform_property_names(registered)
             budget = self._native_property_budget()
             native_keys, demoted = _admit_native_keys(
-                (node.properties for node in nodes),
+                itertools.chain((node.properties for node in nodes),
+                                (_countable_edge_properties(edge.properties)
+                                 for edge in edges
+                                 if not is_derived_edge_type(str(edge.edge_type)))),
                 registered=registered,
                 budget=budget, reserve=self._native_key_reserve(),
             )
@@ -15943,12 +16054,15 @@ class FalkorDBProvider(GraphDataProvider):
                 _sanitize_label(str(edge.edge_type)), rel_casing,
             )
             key = (rel_type, urn_label.get(edge.source_urn), urn_label.get(edge.target_urn))
+            native_props, bag = _split_edge_properties(
+                edge.properties, set() if is_derived_edge_type(rel_type) else native_keys)
             edges_grouped[key].append({
                 "src": edge.source_urn,
                 "tgt": edge.target_urn,
                 "eid": edge.id,
                 "conf": edge.confidence,
-                "props": json.dumps(edge.properties),
+                "props": bag,
+                "nativeProps": native_props,
             })
 
         for (rel_type, src_label, tgt_label), items in edges_grouped.items():
@@ -15962,7 +16076,8 @@ class FalkorDBProvider(GraphDataProvider):
                     f"MATCH {b_pat} "
                     f"MERGE (a)-[r:{rel_type}]->(b) "
                     f"SET r.id = item.eid, r.confidence = item.conf, "
-                    f"r.properties = item.props",
+                    f"r.properties = item.props "
+                    f"SET r += item.nativeProps",
                     {"batch": batch},
                     what=f"edge batch :{rel_type}",
                 )
@@ -15980,7 +16095,8 @@ class FalkorDBProvider(GraphDataProvider):
             await self._reserve_platform_property_names(registered)
             budget = self._native_property_budget()
             native_keys, demoted = _admit_native_keys(
-                [node.properties],
+                [node.properties,
+                 _countable_edge_properties(containment_edge.properties if containment_edge else None)],
                 registered=registered,
                 budget=budget, reserve=self._native_key_reserve(),
             )
@@ -16029,11 +16145,14 @@ class FalkorDBProvider(GraphDataProvider):
                 rel_type = self._consistent_casing(
                     _sanitize_label(str(containment_edge.edge_type)), rel_casing,
                 )
+                edge_native, edge_bag = _split_edge_properties(
+                    containment_edge.properties, native_keys)
                 await self._query(
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
                     MERGE (a)-[r:{rel_type}]->(b)
                     SET r.id = $eid, r.confidence = $conf, r.properties = $props
+                    SET r += $native
                     """,
                     params={
                         "src": containment_edge.source_urn,
@@ -16042,9 +16161,11 @@ class FalkorDBProvider(GraphDataProvider):
                         "conf": containment_edge.confidence,
                         # Write r.properties like every other edge writer — it was omitted here, so a
                         # containment edge created with properties lost them until the next rebuild.
-                        "props": json.dumps(containment_edge.properties or {}),
+                        "props": edge_bag,
+                        "native": edge_native,
                     },
                 )
+                self._names_registered(edge_native)
             return True
         except AttributeNameLimitReached:
             # Terminal and operator-facing: a graph with no attribute ids
@@ -16062,10 +16183,13 @@ class FalkorDBProvider(GraphDataProvider):
             rel_type = self._consistent_casing(
                 _sanitize_label(str(edge.edge_type)), rel_casing,
             )
+            native_keys = await self._edge_native_keys("create_edge", rel_type, edge.properties)
+            native, bag = _split_edge_properties(edge.properties, native_keys)
             await self._query(
                 f"MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
-                f"SET r.id = $eid, r.confidence = $conf, r.properties = $props",
+                f"SET r.id = $eid, r.confidence = $conf, r.properties = $props "
+                f"SET r += $native",
                 params={
                     "src": edge.source_urn,
                     "tgt": edge.target_urn,
@@ -16075,10 +16199,14 @@ class FalkorDBProvider(GraphDataProvider):
                     # silently rewrote a legitimate 0.0 (and None) to 1.0, fabricating a value the
                     # rebuild round-trip would then treat as real.
                     "conf": edge.confidence,
-                    "props": json.dumps(edge.properties or {}),
+                    "props": bag,
+                    "native": native,
                 },
             )
+            self._names_registered(native)
             return True
+        except AttributeNameLimitReached:
+            raise
         except Exception as e:
             logger.error(f"create_edge failed: {e}")
             return False
@@ -16090,28 +16218,42 @@ class FalkorDBProvider(GraphDataProvider):
         back — SETting the patch alone replaced the bag and dropped every property it didn't
         name. (Two queries: a concurrent PATCH of the same edge can interleave; the versioned
         write path above this provider is what serialises edits.)
+
+        A relationship another tool wrote holds its properties natively as well
+        (:func:`_native_edge_properties`): they are read as the edge's, and one the patch removes
+        is removed natively too — else the next read would bring it back.
         """
         await self._ensure_connected()
         try:
             read = await self._query(
-                "MATCH ()-[r]->() WHERE r.id = $eid RETURN r.properties LIMIT 1",
+                "MATCH ()-[r]->() WHERE r.id = $eid RETURN type(r), properties(r) LIMIT 1",
                 params={"eid": edge_id},
             )
             if not read.result_set:
                 return None
-            raw = read.result_set[0][0]
-            existing = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+            rel, raw = read.result_set[0][0], dict(read.result_set[0][1] or {})
+            patched = apply_properties_patch(_edge_from_row("", "", rel, raw).properties, properties)
+            native_keys = await self._edge_native_keys("update_edge", rel, patched)
+            native, bag = _split_edge_properties(patched, native_keys)
+            # A native key the edge no longer holds natively goes: removed by the patch, or now in
+            # the bag. A non-number ``confidence`` (or non-bag ``properties``) another tool wrote is
+            # the edge's property until the patch removes it.
+            gone = {k: None for k in _native_edge_properties(rel, raw)
+                    if k not in native and (k not in _EDGE_ENVELOPE_KEYS
+                                            or (k not in patched and k != "properties"))}
             result = await self._query(
                 "MATCH (a)-[r]->(b) WHERE r.id = $eid "
-                "SET r.properties = $props "
+                "SET r += $gone SET r.properties = $props SET r += $native "
                 "RETURN a.urn, b.urn, type(r), properties(r)",
-                params={"eid": edge_id,
-                        "props": json.dumps(apply_properties_patch(existing, properties))},
+                params={"eid": edge_id, "gone": gone, "native": native, "props": bag},
             )
             if not result.result_set:
                 return None
+            self._names_registered(native)
             row = result.result_set[0]
             return _edge_from_row(row[0], row[1], row[2], row[3] or {})
+        except AttributeNameLimitReached:
+            raise
         except Exception as e:
             logger.error(f"update_edge failed: {e}")
             return None

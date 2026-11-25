@@ -73,6 +73,91 @@ const asNumber = (v: unknown) => {
   return Number.isFinite(n) ? n : v
 }
 
+const text = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v))
+
+/** A text field's keys: leaving it or Enter stages it (⌘Enter in a multi-line one), Esc puts it back. */
+const commitKeys = (onCommit: () => void, onCancel: () => void) => ({
+  onBlur: () => onCommit(),
+  onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (e.key === 'Escape') onCancel()
+    else if (e.key === 'Enter' && e.currentTarget.tagName === 'INPUT') { e.preventDefault(); onCommit() }
+  },
+})
+
+/** A type's fields, each edited as its type (see the header) — shared by the entity drawer's Edit tab
+ *  and the relationship drawer's. Where a field's value is kept is `read`/`write`'s: an entity's by
+ *  `lib/nodeFields`, a relationship's among its properties (`edges`, which judges a relationship
+ *  type's fields). */
+export function SchemaFieldInputs({ fields, form, original, read, write, typeLabel, edges = false, onEdit, onCommit, onCancel }: {
+  fields: readonly SchemaField[]
+  form: Data
+  /** As first read — a value's warning is said once it is changed — or null for one not saved yet,
+   *  every value of which publishing judges. */
+  original: Data | null
+  read: (data: Data, id: string) => unknown
+  write: (data: Data, id: string, value: unknown) => Data
+  /** Its type, as the warnings name it. */
+  typeLabel: string
+  edges?: boolean
+  onEdit: (update: (data: Data) => Data) => void
+  onCommit: (update?: (data: Data) => Data) => void
+  onCancel: () => void
+}) {
+  const commitOn = commitKeys(() => onCommit(), onCancel)
+  return (
+    <div className="space-y-4">
+      {fields.map((field) => {
+        const value = read(form, field.id)
+        const keep = (v: unknown) => onCommit((d) => write(d, field.id, v))
+        const type = inputTypeOf(field.type)
+        // What publishing would refuse of what this edit gives it (a new one: of anything).
+        const changed = original === null || JSON.stringify(read(original, field.id)) !== JSON.stringify(value)
+        const warning = changed && isPropertyField(field, edges) ? fieldWarning(field as EntityFieldDefinition, value, typeLabel, edges) : null
+        return (
+          <Field key={field.id} label={field.name} required={field.required}>
+            {(id) => (
+              <div className="space-y-1.5">
+                {field.type === 'textarea' || field.type === 'markdown' ? (
+                  <textarea id={id} rows={2} className={cn(INPUT, 'resize-none')}
+                    value={text(value)}
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => write(d, field.id, v)) }} {...commitOn} />
+                ) : type === 'boolean' ? (
+                  <div id={id} className="h-6 flex items-center">
+                    <BooleanToggle value={value === true || String(value).toLowerCase() === 'true'} onChange={keep} />
+                  </div>
+                ) : type === 'tags' ? (
+                  <TagInput value={Array.isArray(value) ? value.map(String) : typeof value === 'string' && value ? value.split(',').map((s) => s.trim()).filter(Boolean) : []}
+                    onChange={keep} />
+                ) : type === 'datetime' ? (
+                  <DateTimeField value={text(value)} onChange={keep} />
+                ) : (
+                  <input id={id} className={cn(INPUT, type === 'number' && 'font-mono')}
+                    type={type === 'date' ? 'date' : type === 'url' ? 'url' : 'text'}
+                    inputMode={type === 'number' ? 'decimal' : undefined}
+                    aria-invalid={warning ? true : undefined}
+                    value={text(value)}
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => write(d, field.id, v)) }}
+                    {...(type === 'number' ? {
+                      onBlur: () => onCommit((d) => write(d, field.id, asNumber(read(d, field.id)))),
+                      onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => {
+                        if (e.key === 'Escape') onCancel()
+                        else if (e.key === 'Enter') { e.preventDefault(); onCommit((d) => write(d, field.id, asNumber(read(d, field.id)))) }
+                      },
+                    } : commitOn)} />
+                )}
+                {isPropertyField(field, edges) && (field.allowedValues?.length ?? 0) > 0 && (
+                  <AllowedValuePicker field={field as EntityFieldDefinition} value={value} label={field.name || field.id} onPick={keep} />
+                )}
+                {warning && <FieldNote>{warning}</FieldNote>}
+              </div>
+            )}
+          </Field>
+        )
+      })}
+    </div>
+  )
+}
+
 /** The node with `bag` as its user properties — reserved names kept, and the business label,
  *  which the header also shows, kept as one with its property. */
 export function withPropertyBag(d: Data, bag: Data): Data {
@@ -137,13 +222,7 @@ export function EntityEditTab({
 }) {
   const set = (key: string, value: unknown) => onEdit((d) => ({ ...d, [key]: value }))
   // Every text field: leaving it or Enter stages it (⌘Enter in a multi-line one), Esc puts it back.
-  const commitOn = {
-    onBlur: () => onCommit(),
-    onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (e.key === 'Escape') onCancel()
-      else if (e.key === 'Enter' && e.currentTarget.tagName === 'INPUT') { e.preventDefault(); onCommit() }
-    },
-  }
+  const commitOn = commitKeys(() => onCommit(), onCancel)
   // The Name input is also the source's own name property, and the platform assigns its identity
   // property: neither is offered as a schema field of its own.
   const identity = useCanvasNodeIdentity()
@@ -164,8 +243,6 @@ export function EntityEditTab({
     const layerId = assignments[urn]?.layerId
     return layerId ? (layers.find((l) => l.id === layerId)?.name ?? layerId) : ''
   }, [activeView?.layout?.referenceLayout, urn])
-
-  const text = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v))
 
   return (
     <div className="p-5 space-y-5">
@@ -223,56 +300,8 @@ export function EntityEditTab({
       {schemaFields.length > 0 && (
         <div className="pt-5 border-t border-glass-border">
           <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">Schema properties</h4>
-          <div className="space-y-4">
-            {schemaFields.map((field) => {
-              const value = readSchemaField(form, field.id)
-              const keep = (v: unknown) => onCommit((d) => writeSchemaField(d, field.id, v))
-              const type = inputTypeOf(field.type)
-              // What publishing would refuse of what this edit gives it (a new entity: of anything).
-              const changed = original === null || JSON.stringify(readSchemaField(original, field.id)) !== JSON.stringify(value)
-              const warning = changed && isPropertyField(field) ? fieldWarning(field as EntityFieldDefinition, value, typeLabel) : null
-              return (
-                <Field key={field.id} label={field.name} required={field.required}>
-                  {(id) => (
-                    <div className="space-y-1.5">
-                      {field.type === 'textarea' || field.type === 'markdown' ? (
-                        <textarea id={id} rows={2} className={cn(INPUT, 'resize-none')}
-                          value={text(value)}
-                          onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }} {...commitOn} />
-                      ) : type === 'boolean' ? (
-                        <div id={id} className="h-6 flex items-center">
-                          <BooleanToggle value={value === true || String(value).toLowerCase() === 'true'} onChange={keep} />
-                        </div>
-                      ) : type === 'tags' ? (
-                        <TagInput value={Array.isArray(value) ? value.map(String) : typeof value === 'string' && value ? value.split(',').map((s) => s.trim()).filter(Boolean) : []}
-                          onChange={keep} />
-                      ) : type === 'datetime' ? (
-                        <DateTimeField value={text(value)} onChange={keep} />
-                      ) : (
-                        <input id={id} className={cn(INPUT, type === 'number' && 'font-mono')}
-                          type={type === 'date' ? 'date' : type === 'url' ? 'url' : 'text'}
-                          inputMode={type === 'number' ? 'decimal' : undefined}
-                          aria-invalid={warning ? true : undefined}
-                          value={text(value)}
-                          onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }}
-                          {...(type === 'number' ? {
-                            onBlur: () => onCommit((d) => writeSchemaField(d, field.id, asNumber(readSchemaField(d, field.id)))),
-                            onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => {
-                              if (e.key === 'Escape') onCancel()
-                              else if (e.key === 'Enter') { e.preventDefault(); onCommit((d) => writeSchemaField(d, field.id, asNumber(readSchemaField(d, field.id)))) }
-                            },
-                          } : commitOn)} />
-                      )}
-                      {isPropertyField(field) && (field.allowedValues?.length ?? 0) > 0 && (
-                        <AllowedValuePicker field={field as EntityFieldDefinition} value={value} label={field.name || field.id} onPick={keep} />
-                      )}
-                      {warning && <FieldNote>{warning}</FieldNote>}
-                    </div>
-                  )}
-                </Field>
-              )
-            })}
-          </div>
+          <SchemaFieldInputs fields={schemaFields} form={form} original={original} read={readSchemaField} write={writeSchemaField}
+            typeLabel={typeLabel} onEdit={onEdit} onCommit={onCommit} onCancel={onCancel} />
         </div>
       )}
 

@@ -81,6 +81,60 @@ Every new capability ships behind its own switch, off by default.
   — their types and fields, not anyone's data — to build on them. Layers kept to one workspace
   and system layers stay hidden.
 - The Explorer keeps a selection to its list; the Review Center reads one workspace or all.
+- **A relationship's properties are stored and searched as an item's are**: natively, within the
+  same property-name budget as items (one count over both, since the graph store numbers them in
+  one map and never frees a name), and the rest as values in the relationship's JSON. An edge
+  filter now takes every operator (greater than, contains, between, …) on a relationship's own
+  property. A property still held in the JSON is matched by is set, is, is not and is one of, and
+  the search builder offers just those for it.
+- **A relationship's drawer does what an item's does**: a relationship drawn or reversed in a draft
+  can be given properties before it is saved, and reversing one keeps its properties and
+  confidence; every kind of relationship but a roll-up has editable properties, typed from its
+  type's fields with suggested names and values; a relationship deleted in a draft can be restored
+  from its drawer or its History.
+- **Restoring a deleted item brings back its relationships too**, with their properties and ids, as
+  Discard in Review does. It is now one change to the draft, made at once, rather than a staged
+  re-create.
+- **A relationship can be watched as an item can**: Watch in the relationship drawer; a publish
+  that changes it says so in the Inbox, and the digest lists it by its ends and type.
+- **The import template and record schema know a relationship's fields**: an edge row's
+  `prop.<field>` columns are typed from its relationship type, and the template shows an example
+  for each.
+- **Bulk clean-ups reach relationships**: replace, normalize, map values and convert, previewed on
+  the relationships' own values. A job over a Connections search covers the relationships the
+  draft added or changed, and lists those that no longer match.
+- **A versioned graph's health shows its property names**: how many it uses of the graph store's
+  65,534, the budget past which new names are kept as values (still shown and exported), a warning
+  near and at it, and which keys on items and on relationships were kept as values.
+
+### Fixed
+
+- **Enabling version control keeps every property of a graph another tool built.** A
+  relationship's own properties (`r.weight`, `r.\`my prop\``) were not copied into history — only
+  the platform's `r.properties` bag was — so they disappeared the first time the graph was rebuilt
+  from history, and the canvas never showed them. They are now read, copied, checked and served:
+  - the enable re-reads a sample of connections from the source, every property, and counts every
+    property of every item and connection it copied (`edge_sample_matches`, `properties_kept`);
+  - an item's own property under a name the platform keeps for itself (`entityId`, `properties`,
+    an `entityType` its label doesn't say) is kept as `__src.<name>`, and an item whose name or
+    description is a number is copied instead of left out;
+  - an integer relationship id, a text `confidence` and a `properties` that isn't JSON no longer
+    fail the enable; date and time values are stored the one way dates are.
+- **Nothing the source holds is dropped without a person deciding.** A connection held more than
+  once — the same source, type and target, under one id or several — loses nothing when its copies
+  agree (read twice under one id they fold; under ids of their own they stay, as before); when
+  they differ, the enable pauses before anything goes live and lists them, with
+  their versions side by side: keep the first, merge them (every property, the value picked where
+  they disagree), leave versions or properties out, per connection or for all — or fix the source
+  and re-check it. Values JSON can't hold (NaN, ±Infinity, a NUL character) pause it the same way,
+  to be stored as text. Connections that shared an id with another are given one of their own.
+- **Reversing a relationship onto one of the same type already there the other way** is refused at
+  once, with the message drawing one gives, instead of only when the draft is saved.
+- **An export re-imports every property as it was**, into the same graph or a new one: a value a
+  cell can't give back (a blank, padding, a `\N`, text that reads as a list, a control
+  character) travels in `properties_json`.
+- **Bring into history** copies every property the way the enable does; a value history can't
+  hold is refused as such (422), not reported as an unavailable graph.
 
 ### Upgrading
 
@@ -103,6 +157,18 @@ Every new capability ships behind its own switch, off by default.
   of Postgres-only `IF [NOT] EXISTS`; databases that ran it are unaffected.
 - All five new switches ship **off**. Turn them on under Admin → Features; set up the Playground
   (its sandbox provider) before turning it on.
+- **`20261202_1000_bootstrap_review`** adds `graphver.bootstrap_review`, what an enable holds for a
+  review (created by the versioning worker where alembic doesn't reach the graphver schema).
+- **`20261203_1000_gv_ps_prop_names`** adds `projection_state.property_names`, the reading each
+  update records (created by the versioning worker where alembic doesn't reach the graphver
+  schema). Until a graph's next update, its health shows its data source's last statistics count.
+- **`20261203_1100_watch_edges`** adds `graph_watches.entity_kind` (`node` by default).
+- **Existing relationships keep their properties in their JSON** until they are written again, and
+  read and search as before meanwhile. The next full rebuild of a graph rewrites each relationship
+  once into the new form; nothing has to be run.
+- **Graphs enabled before this release** may lack their relationships' own properties in history.
+  **Check sync** now reports them as differing; **Bring into history** copies whatever the graph
+  still holds. A graph already rebuilt from history no longer holds them.
 
 ### Known limitations
 
@@ -113,6 +179,17 @@ Every new capability ships behind its own switch, off by default.
 - Excel files go to the server as they are, so the Playground can't rank semantic layers against
   them or match their types beforehand; their rows are still checked against the layer.
 - Analytics charts overflow their cards at phone width (as the Content tab already did).
+- An item's labels after its first, and a relationship type of the source's own named
+  `AGGREGATED`, are still not copied by an enable.
+- A CSV or TSV export carries numbers and booleans as text (NDJSON, JSON and Excel keep them), and
+  no flat file carries a property whose value is null.
+- A bulk job over a Connections search doesn't reach a relationship the draft didn't change whose
+  ends it changed to match; the job's summary says so.
+- One relationship per source, type and target, as before (both directions and several types per
+  pair are supported). Several of one type between two items is proposed as an opt-in per type in
+  `docs/versioning/20-parallel-relationships.md`.
+- A connection kept or merged by a review is one connection in history; the source graph keeps
+  every copy until it is rebuilt from history.
 
 ---
 

@@ -19,6 +19,7 @@ export type ReasonContext =
     | 'member-remove'
     | 'versioning'
     | 'duplicates'
+    | 'review'
     | 'cache'
     | 'move'
     | 'move-undo'
@@ -66,6 +67,7 @@ export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
         'Turned on by mistake',
     ],
     duplicates: ['Source loaded twice', 'Known duplicates upstream', 'Left over from a migration'],
+    review: ['Copies loaded twice upstream', 'Checked with the data owner', 'Values to be cleaned up later'],
     cache: [
         'Graph changed outside the app',
         'Restored from a backup',

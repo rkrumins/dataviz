@@ -6,11 +6,13 @@ against the same database, the versioning store's versions stood in for.
 * Each route has the data-source read in the graph's workspace as its gate; a graph elsewhere is
   a 404; an API key is refused.
 * A marker and a watch are their owner's alone; the marker only moves forward, save from past
-  the head of a graph re-created under its data source.
+  the head of a graph re-created under its data source. A relationship is watched by its id,
+  apart from the entities, and counts toward the same limit.
 * No marker: the last 7 days, said so. The versions, their counts (null where none were
   recorded), the cap, the authors, the reviews and the watched entities, as the store answers.
 * A fork is read and marked like any graph, forks on or off.
 * A pass tells each watcher who may read the graph once, never anyone of only what they published;
+  a relationship is told of by its ends and its type;
   several versions are told in one notification; nobody gets a second while one is unread; a round
   cut short carries on where it stopped, telling nobody twice; a failed one is told again; a pass
   never raises. Watching starts the telling at the head; a caught-up author has seen their own
@@ -90,9 +92,9 @@ class _Store:
         self.reviews = []
         self.watched = []
 
-    async def read(self, svc, *, graph_id, after, cutoff, actor, urns, limit=None):
+    async def read(self, svc, *, graph_id, after, cutoff, actor, urns, edges=(), limit=None):
         self.asked.append(SimpleNamespace(graph_id=graph_id, after=after, cutoff=cutoff, actor=actor,
-                                          urns=sorted(urns)))
+                                          urns=sorted(urns), edges=sorted(edges)))
         if after is not None and after > HEAD:      # an earlier graph's marker: the time window
             after = None
         shown = [v for v in self.versions if after is None or v["seq"] > after]
@@ -219,7 +221,7 @@ async def test_markers_and_watches_are_each_persons_own(world, test_client):
     body = (await test_client.get(_V.format("g_1") + "/digest")).json()
     assert body["since"] is None and world.store.asked[-1].urns == []
     assert (await test_client.get(_V.format("g_1") + "/watch")).json() == {
-        "graph": False, "entities": [], "entitiesMax": graph_watch_repo.ENTITIES_MAX}
+        "graph": False, "entities": [], "edges": [], "entitiesMax": graph_watch_repo.ENTITIES_MAX}
     # Bob's own writes leave Alice's rows as they were.
     await test_client.post(_V.format("g_1") + "/digest/seen", json={"seq": 211})
     await test_client.delete(_V.format("g_1") + "/watch", params={"entityUrn": "urn:t:orders"})
@@ -291,18 +293,54 @@ async def test_watching_the_graph_and_entities_in_it(world, test_client):
     got = (await test_client.delete(url, params={"entityUrn": "urn:t:orders"})).json()
     assert got["entities"] == [] and got["graph"] is True
     got = (await test_client.delete(url)).json()
-    assert got == {"graph": False, "entities": [], "entitiesMax": graph_watch_repo.ENTITIES_MAX}
+    assert got == {"graph": False, "entities": [], "edges": [],
+                   "entitiesMax": graph_watch_repo.ENTITIES_MAX}
     assert (await test_client.delete(url)).status_code == 200                  # not watched: no change
+
+
+async def test_watching_a_relationship_by_its_id(world, test_client):
+    """A relationship has no urn: it is watched by its id, apart from the entities, and the digest
+    is asked of it apart from them."""
+    url = _V.format("g_1") + "/watch"
+    got = (await test_client.put(url, json={"edgeId": "urn:uuid:feeds"})).json()
+    assert (got["graph"], got["entities"]) == (False, [])
+    assert [e["id"] for e in got["edges"]] == ["urn:uuid:feeds"] and got["edges"][0]["since"]
+    await test_client.put(url, json={"edgeId": "urn:uuid:feeds"})              # twice is once
+    got = (await test_client.put(url, json={"entityUrn": "urn:t:orders"})).json()
+    assert [e["id"] for e in got["edges"]] == ["urn:uuid:feeds"]
+    assert [e["urn"] for e in got["entities"]] == ["urn:t:orders"]
+    await test_client.get(_V.format("g_1") + "/digest")
+    asked = world.store.asked[-1]
+    assert (asked.urns, asked.edges) == (["urn:t:orders"], ["urn:uuid:feeds"])
+
+    # One thing at a time, never nothing named.
+    both = {"entityUrn": "urn:t:orders", "edgeId": "urn:uuid:feeds"}
+    put_both = await test_client.put(url, json=both)
+    delete_both = await test_client.delete(url, params=both)
+    put_empty = await test_client.put(url, json={"edgeId": ""})
+    assert (put_both.status_code, delete_both.status_code, put_empty.status_code) == (422, 422, 422)
+
+    # Stopping one by the other's name stops nothing: an entity and a relationship are kept apart.
+    got = (await test_client.delete(url, params={"entityUrn": "urn:uuid:feeds"})).json()
+    assert [e["id"] for e in got["edges"]] == ["urn:uuid:feeds"]
+    got = (await test_client.delete(url, params={"edgeId": "urn:t:orders"})).json()
+    assert [e["urn"] for e in got["entities"]] == ["urn:t:orders"]
+    got = (await test_client.delete(url, params={"edgeId": "urn:uuid:feeds"})).json()
+    assert got["edges"] == [] and [e["urn"] for e in got["entities"]] == ["urn:t:orders"]
+    rows = (await world.session.execute(select(GraphWatchORM.entity_urn, GraphWatchORM.entity_kind))).all()
+    assert [tuple(r) for r in rows] == [("urn:t:orders", "node")]
 
 
 async def test_watching_more_entities_than_the_limit_is_refused(world, test_client, monkeypatch):
     monkeypatch.setattr(graph_watch_repo, "ENTITIES_MAX", 2)
     url = _V.format("g_1") + "/watch"
-    for urn in ("urn:a", "urn:b"):
-        assert (await test_client.put(url, json={"entityUrn": urn})).status_code == 200
+    assert (await test_client.put(url, json={"entityUrn": "urn:a"})).status_code == 200
+    assert (await test_client.put(url, json={"edgeId": "urn:e"})).status_code == 200   # counts too
     refused = await test_client.put(url, json={"entityUrn": "urn:c"})
     assert refused.status_code == 409 and refused.json()["detail"]["limit"] == 2
+    assert (await test_client.put(url, json={"edgeId": "urn:f"})).status_code == 409
     assert (await test_client.put(url, json={"entityUrn": "urn:a"})).status_code == 200   # held
+    assert (await test_client.put(url, json={"edgeId": "urn:e"})).status_code == 200
     assert (await test_client.put(url, json={})).json()["graph"] is True       # the graph isn't one
 
 
@@ -329,17 +367,22 @@ def _commit(seq=216, kind="squash_publish", actor="usr_alice", message="Fix owne
                            stats={"create": 12, "update": 3, "delete": 1} if stats is None else stats)
 
 
+def _q(*names):
+    """Entities as a watcher is told of them: by name, quoted."""
+    return [digest._entity(n) for n in names]
+
+
 def test_what_a_watcher_is_told_says_what_changed():
     graph = digest._copy(_commit(), "Ledger", [], whole=True)
     assert graph == ("New version of “Ledger”",
                      "Version #216: “Fix owner emails”. 12 added, 3 changed, 1 removed.")
-    one = digest._copy(_commit(stats={}), "Ledger", ["Orders"], whole=False)
+    one = digest._copy(_commit(stats={}), "Ledger", _q("Orders"), whole=False)
     assert one == ("“Orders” changed in “Ledger”", "Version #216: “Fix owner emails”.")
     many = digest._copy(_commit(kind="revert", stats={"create": 0, "update": 2, "delete": 0}),
-                        "Ledger", ["A", "B", "C", "D", "E"], whole=False)
+                        "Ledger", _q("A", "B", "C", "D", "E"), whole=False)
     assert many == ("5 things you watch changed in “Ledger”",
                     "Version #216. 2 changed. It changed “A”, “B”, “C” and 2 more.")
-    both = digest._copy(_commit(kind="restore"), "Ledger", ["A", "B"], whole=True)
+    both = digest._copy(_commit(kind="restore"), "Ledger", _q("A", "B"), whole=True)
     assert both[0] == "“Ledger” was restored to an earlier version"
     assert both[1].endswith("It changed “A” and “B”, which you watch.")
     assert digest._copy(_commit(kind="revert"), "L", [], whole=True)[0] == "A change to “L” was undone"
@@ -348,12 +391,34 @@ def test_what_a_watcher_is_told_says_what_changed():
 def test_a_round_of_several_versions_is_told_in_one_notification():
     graph = digest._copy(_commit(218), "Ledger", [], whole=True, versions=3)
     assert graph == ("3 new versions of “Ledger”", "The latest is version #218: “Fix owner emails”.")
-    named = digest._copy(_commit(218, kind="revert"), "Ledger", ["A", "B"], whole=True, versions=2)
+    named = digest._copy(_commit(218, kind="revert"), "Ledger", _q("A", "B"), whole=True, versions=2)
     assert named == ("2 new versions of “Ledger”",
                      "The latest is version #218. They changed “A” and “B”, which you watch.")
-    entity = digest._copy(_commit(218), "Ledger", ["Orders"], whole=False, versions=4)
+    entity = digest._copy(_commit(218), "Ledger", _q("Orders"), whole=False, versions=4)
     assert entity == ("“Orders” changed in “Ledger”",
                       "In 4 new versions, the latest version #218: “Fix owner emails”.")
+
+
+def _edge(edge_type="DEPENDS_ON", source="Orders", target="Customers"):
+    return {"kind": "edge", "entityId": "urn:uuid:e1", "edgeType": edge_type,
+            "source": {"entityId": "urn:uuid:a", "name": source},
+            "target": {"entityId": "urn:uuid:b", "name": target}}
+
+
+def test_a_relationship_is_told_of_by_its_ends_and_its_type():
+    said = digest._relationship(_edge())
+    assert said == "the “depends on” relationship from “Orders” to “Customers”"
+    assert digest._relationship(_edge("partOf")) == (
+        "the “part of” relationship from “Orders” to “Customers”")
+    assert digest._relationship(_edge(None)) == "the relationship from “Orders” to “Customers”"
+    nameless = digest._relationship(_edge(source=None))              # an end never named: its id
+    assert nameless == "the “depends on” relationship from “urn:uuid:a” to “Customers”"
+    one = digest._copy(_commit(stats={}), "Ledger", [said], whole=False)
+    assert one == ("The “depends on” relationship from “Orders” to “Customers” changed in “Ledger”",
+                   "Version #216: “Fix owner emails”.")
+    both = digest._copy(_commit(stats={}), "Ledger", sorted([said, *_q("Invoices")]), whole=True)
+    assert both[1] == ("Version #216: “Fix owner emails”. It changed the “depends on” relationship "
+                       "from “Orders” to “Customers” and “Invoices”, which you watch.")
 
 
 @pytest.fixture
@@ -372,7 +437,8 @@ def telling(world, monkeypatch):
 
     state = SimpleNamespace(head=216, versions={216: _commit()}, readers={"usr_bob", "usr_carol",
                             "usr_alice"}, session=world.session, rounds=[])
-    changed = {"urn:t:orders": "Orders", "urn:t:invoices": "Invoices"}
+    changed = {("node", "urn:t:orders"): "“Orders”", ("node", "urn:t:invoices"): "“Invoices”",
+               ("edge", "urn:uuid:feeds"): "the “feeds” relationship from “Orders” to “Invoices”"}
 
     async def heads(data_source_ids):
         return {"ds_1": ("g_1", "ws_1", state.head)} if "ds_1" in data_source_ids else {}
@@ -384,8 +450,8 @@ def telling(world, monkeypatch):
                              authors=frozenset(c.actor for c in told),
                              runs=tuple((c.commit_seq - 1, c.commit_seq) for c in told))
 
-    async def changed_between(graph_id, runs, urns):
-        return {u: changed[u] for u in urns if u in changed}
+    async def changed_between(graph_id, runs, watched):
+        return {w: changed[w] for w in watched if w in changed}
 
     async def resolve_many(s, user_ids):
         return {u: PermissionClaims(sid="", ws_perms={"ws_1": _LEAVES} if u in state.readers else {})
@@ -399,8 +465,8 @@ def telling(world, monkeypatch):
     return state
 
 
-async def _watch(s, user_id, urn=None, ds="ds_1", head=215):
-    await graph_watch_repo.watch(s, user_id, ds, urn)
+async def _watch(s, user_id, urn=None, ds="ds_1", head=215, kind="node"):
+    await graph_watch_repo.watch(s, user_id, ds, urn, kind=kind)
     await graph_watch_repo.start_telling(s, ds, head)
 
 
@@ -444,6 +510,27 @@ async def test_a_pass_tells_each_watcher_once_and_never_the_author(telling):
                                          "1 removed. It changed “Invoices” and “Orders”.")
     assert await _mark(s) == (216, None, None)
     assert await digest.tell_pending() == 0 and telling.rounds == [(215, 216)]   # nothing new
+
+
+async def test_a_relationship_watcher_is_told_of_it_by_its_ends_and_type(telling):
+    s = telling.session
+    await _watch(s, "usr_carol", "urn:uuid:feeds", kind="edge")
+    await _watch(s, "usr_bob", "urn:uuid:feeds")                   # an entity by that name: none
+    await _watch(s, "usr_erin", "urn:uuid:unchanged", kind="edge")  # one it didn't change
+    await _watch(s, "usr_frank")                                    # the graph, and the relationship
+    await _watch(s, "usr_frank", "urn:uuid:feeds", kind="edge")
+    telling.readers.update({"usr_erin", "usr_frank"})
+    await s.commit()
+    assert await digest.tell_pending() == 2
+    told = await _told(s)
+    assert sorted(told) == ["usr_carol", "usr_frank"]
+    assert told["usr_carol"][0][1:3] == (
+        "The “feeds” relationship from “Orders” to “Invoices” changed in “Ledger”",
+        "Version #216: “Fix owner emails”. 12 added, 3 changed, 1 removed.")
+    assert told["usr_frank"][0][1:3] == (
+        "New version of “Ledger”",
+        "Version #216: “Fix owner emails”. 12 added, 3 changed, 1 removed. It changed the “feeds” "
+        "relationship from “Orders” to “Invoices”, which you watch.")
 
 
 async def test_several_versions_are_one_notification_and_one_unread_is_all_anyone_gets(telling):

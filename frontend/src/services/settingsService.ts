@@ -508,6 +508,17 @@ export interface LastBuild {
     windowSecs: number | null
 }
 
+export interface PropertyNames {
+    registered: number | null
+    platform: number | null
+    budget: number
+    ceiling: number
+    measuredAt: string | null
+    measuredBy: 'update' | 'poll' | null
+    storedAsValues: { nodes: string[]; edges: string[]; count: number } | null
+    state: 'unknown' | 'ok' | 'near_budget' | 'at_budget'
+}
+
 /**
  * A graph's health right now: each part best effort (null, with a problem saying why). A version
  * is known by its `seq` ("version #42"); its `version` is the revision behind it, null when that
@@ -529,6 +540,14 @@ export interface GraphHealth {
     } | null
     lastBuild: LastBuild | null
     signals: Array<{ id: string; count24h: number }> | null
+    /**
+     * How many of the graph store's property names its copy uses: items and relationships share
+     * them, at most `ceiling`, and none is ever freed. Past `budget` the platform keeps a new name
+     * as a value instead (`storedAsValues` names those keys): still shown and exported, searched by
+     * presence and equality. `measuredBy`: its last update, or its data source's statistics poll
+     * (which names no keys); null: not measured yet. Absent from a server that doesn't report it.
+     */
+    propertyNames?: PropertyNames | null
     /** A fork: the graph whose copy it reads through, named. */
     follows: { graphId: string; dataSourceId: string | null; label: string | null } | null
     problems: Array<{ part: string; message: string }>
@@ -632,6 +651,7 @@ export const settingsService = {
                 memory: w.memory ?? null,
                 lastBuild: w.lastBuild ?? null,
                 signals: w.signals ?? null,
+                propertyNames: w.propertyNames,
                 follows: w.follows ?? null,
                 problems: w.problems ?? [],
             }

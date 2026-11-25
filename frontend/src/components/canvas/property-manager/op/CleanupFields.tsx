@@ -12,7 +12,8 @@
  *   convert (left as they are, or removed).
  *
  * The preview reads the values the catalog lists, the server's rule written again (`cleanup.ts`);
- * the server's reading of every entity is the one applied.
+ * the server's reading of every entity is the one applied. A clean-up of relationships, whose values
+ * no catalog counts, previews those read from the relationships it reaches (`relationships`).
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ArrowRight, Info, RotateCw } from 'lucide-react'
@@ -28,30 +29,69 @@ import { cleanValue, mergeMap, similarGroups, type SimilarGroup } from './cleanu
 import { VALUE_KIND_LABEL, type OpDraft } from './opModel'
 import { FIELD, LABEL } from './styles'
 import { useAllValues, type AllValues } from './useAllValues'
+import type { RelationshipValues } from './useRelationshipValues'
 
 /** Rows a preview shows of each list. */
 const SHOWN = 6
 /** A merge group's height before it is measured: a few values, one per line. */
 const GROUP_ESTIMATE = 96
 
-export function CleanupFields({ op, onChange, known, viewId }: {
+export function CleanupFields({ op, onChange, known, viewId, relationships }: {
   op: OpDraft
   onChange: (patch: Partial<OpDraft>) => void
-  /** The property as the catalog reads it in this view, if any entity holds it. */
+  /** The property as the catalog reads it in this view, if any entity holds it — for relationships,
+   *  as those read hold it. */
   known: SearchCatalogProperty | null
   viewId: string
+  /** A clean-up of relationships: the values read from those it reaches, which `known` holds. */
+  relationships?: RelationshipValues
 }) {
-  switch (op.kind) {
-    case 'replace': return <ReplaceFields op={op} onChange={onChange} known={known} />
-    case 'normalize': return <NormalizeFields op={op} onChange={onChange} known={known} />
-    case 'mapValues': return <MergeFields op={op} onChange={onChange} known={known} viewId={viewId} />
-    case 'convert': return <ConvertFields op={op} onChange={onChange} known={known} viewId={viewId} />
-    default: return null
+  if (relationships?.loading && !known) {
+    return <div className="space-y-1.5">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-8 w-full rounded-lg" />)}</div>
   }
+  const who = holders(relationships)
+  const fields = (() => {
+    switch (op.kind) {
+      case 'replace': return <ReplaceFields op={op} onChange={onChange} known={known} who={who} />
+      case 'normalize': return <NormalizeFields op={op} onChange={onChange} known={known} who={who} />
+      case 'mapValues': return <MergeFields op={op} onChange={onChange} known={known} viewId={viewId} who={who} />
+      case 'convert': return <ConvertFields op={op} onChange={onChange} known={known} viewId={viewId} who={who} />
+      default: return null
+    }
+  })()
+  if (!relationships?.error) return fields
+  return <div className="space-y-3"><ReadFailed all={relationships} listed={known?.values?.length ?? 0} />{fields}</div>
+}
+
+/** Whose values a preview reads, in words. */
+interface Holders {
+  /** Those holding a value, after a count: "entities in this view". */
+  some: string
+  /** The values they hold. */
+  values: string
+  /** None of them holds one: why there is nothing to preview. */
+  none: string
+  /** Who the change still reaches when there are too many values to preview. */
+  every: string
+  /** Its values are the view's catalog's, where values are picked to merge. */
+  catalog: boolean
+}
+
+/** The view's entities — the catalog's values — or the relationships read for a clean-up of them. */
+function holders(relationships?: RelationshipValues): Holders {
+  if (!relationships) {
+    return { some: 'entities in this view', values: 'the values this view holds', every: 'every entity holding one', catalog: true,
+      none: 'This view’s entities hold none of its values yet, so there is nothing to preview.' }
+  }
+  const read = relationships.truncated ? `the first ${relationships.read.toLocaleString()} relationships it reaches` : 'the relationships it reaches'
+  return { some: relationships.truncated ? `of ${read}` : 'relationships it reaches', values: `the values ${read} hold`,
+    every: 'every relationship holding one', catalog: false, none: `None of ${read} holds a value of it, so there is nothing to preview.` }
 }
 
 // ── Find & replace ─────────────────────────────────────────────────────────────
-function ReplaceFields({ op, onChange, known }: { op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null }) {
+function ReplaceFields({ op, onChange, known, who }: {
+  op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; who: Holders
+}) {
   return (
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -71,8 +111,8 @@ function ReplaceFields({ op, onChange, known }: { op: OpDraft; onChange: (p: Par
         <Toggle label="Whole value only" checked={!!op.wholeValue} onChange={(wholeValue) => onChange({ wholeValue })}
           detail="Replace a value only when it is all of it" />
       </div>
-      {op.find ? <Preview op={op} values={known?.values ?? []} distinct={known?.distinct} unlisted={unlisted(known)} />
-        : <Hint>Type what to find to see what it changes in the values this view holds.</Hint>}
+      {op.find ? <Preview op={op} values={known?.values ?? []} distinct={known?.distinct} unlisted={unlisted(known)} who={who} />
+        : <Hint>Type what to find to see what it changes in {who.values}.</Hint>}
       <Hint>Only text is changed — in a list, each text value. A value that ends up reading as a date is stored the way dates are (YYYY-MM-DD).</Hint>
     </div>
   )
@@ -81,7 +121,9 @@ function ReplaceFields({ op, onChange, known }: { op: OpDraft; onChange: (p: Par
 // ── Normalize ──────────────────────────────────────────────────────────────────
 type CaseChoice = 'keep' | 'lower' | 'upper' | 'title'
 
-function NormalizeFields({ op, onChange, known }: { op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null }) {
+function NormalizeFields({ op, onChange, known, who }: {
+  op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; who: Holders
+}) {
   const values = useMemo(() => known?.values ?? [], [known])
   // Distinct values that become one: what tidying the text merges.
   const merged = useMemo(() => {
@@ -113,7 +155,7 @@ function NormalizeFields({ op, onChange, known }: { op: OpDraft; onChange: (p: P
           ]}
         />
       </div>
-      <Preview op={op} values={values} distinct={known?.distinct} unlisted={unlisted(known)} />
+      <Preview op={op} values={values} distinct={known?.distinct} unlisted={unlisted(known)} who={who} />
       {merged.length > 0 && (
         <Hint tone="warning">
           {merged.length === 1 ? 'Two or more values become one' : `${merged.length} sets of values become one each`}:{' '}
@@ -128,10 +170,11 @@ function NormalizeFields({ op, onChange, known }: { op: OpDraft; onChange: (p: P
 }
 
 // ── Merge values ───────────────────────────────────────────────────────────────
-function MergeFields({ op, onChange, known, viewId }: {
-  op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string
+function MergeFields({ op, onChange, known, viewId, who }: {
+  op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string; who: Holders
 }) {
-  const all = useAllValues(viewId, op.key.trim())
+  // A relationship's values are only those read for it (`known`): no catalog lists more.
+  const all = useAllValues(viewId, op.key.trim(), who.catalog)
   const values = useMemo(() => all.values ?? known?.values ?? [], [all.values, known?.values])
   // How many entities hold each value, by value: what the counts here look up.
   const held = useMemo(() => new Map(values.map((v) => [key(v), v.count])), [values])
@@ -176,8 +219,9 @@ function MergeFields({ op, onChange, known, viewId }: {
       <ReadFailed all={all} listed={values.length} />
       {groups.length === 0 ? (
         <Hint>
-          None of its {values.length.toLocaleString()} values differ only in case or in spaces around them. To merge other values,
-          select them in the property’s values on the Properties tab and choose <span className="font-semibold">Merge into…</span>
+          None of its {values.length.toLocaleString()} values differ only in case or in spaces around them.
+          {who.catalog && <> To merge other values, select them in the property’s values on the Properties tab and choose{' '}
+            <span className="font-semibold">Merge into…</span></>}
         </Hint>
       ) : (
         <>
@@ -213,7 +257,7 @@ function MergeFields({ op, onChange, known, viewId }: {
             }} />
           <p className="text-[13px] text-ink-secondary" aria-live="polite">
             {map.length === 0 ? 'Nothing chosen to merge.'
-              : <>Merges <span className="font-semibold tabular-nums">{map.length.toLocaleString()}</span> value{map.length === 1 ? '' : 's'} into another — held by about <span className="tabular-nums">{entities.toLocaleString()}</span> entities in this view.</>}
+              : <>Merges <span className="font-semibold tabular-nums">{map.length.toLocaleString()}</span> value{map.length === 1 ? '' : 's'} into another — held by about <span className="tabular-nums">{entities.toLocaleString()}</span> {who.some}.</>}
           </p>
         </>
       )}
@@ -271,10 +315,10 @@ function askedGroup(map: NonNullable<OpDraft['map']>, held: ReadonlyMap<string, 
 // ── Convert kind ───────────────────────────────────────────────────────────────
 const KINDS: ValueKind[] = ['Integer', 'Float', 'String', 'Boolean']
 
-function ConvertFields({ op, onChange, known, viewId }: {
-  op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string
+function ConvertFields({ op, onChange, known, viewId, who }: {
+  op: OpDraft; onChange: (p: Partial<OpDraft>) => void; known: SearchCatalogProperty | null; viewId: string; who: Holders
 }) {
-  const all = useAllValues(viewId, op.key.trim())
+  const all = useAllValues(viewId, op.key.trim(), who.catalog)
   const values = useMemo(() => all.values ?? known?.values ?? [], [all.values, known?.values])
   const kinds = Object.entries(known?.kinds ?? {}).sort((a, b) => b[1] - a[1])
   const fails = useMemo(
@@ -294,7 +338,7 @@ function ConvertFields({ op, onChange, known, viewId }: {
               {i > 0 && (i === kinds.length - 1 ? ' and ' : ', ')}
               <span className="font-semibold">{VALUE_KIND_LABEL[kind as ValueKind] ?? kind}</span> on <span className="tabular-nums">{n.toLocaleString()}</span>
             </span>
-          ))} entities in this view.
+          ))} {who.some}.
         </p>
       )}
       <div>
@@ -309,12 +353,12 @@ function ConvertFields({ op, onChange, known, viewId }: {
       </div>
       {op.toKind && (
         <>
-          <Preview op={{ ...op, onFail: 'skip' }} values={converts} distinct={known?.distinct} unlisted={unlisted(known)} title="Converts" />
+          <Preview op={{ ...op, onFail: 'skip' }} values={converts} distinct={known?.distinct} unlisted={unlisted(known)} who={who} title="Converts" />
           {fails.length > 0 ? (
             <fieldset className="rounded-lg border border-amber-500/30 bg-amber-500/[0.06] p-2.5">
               <legend className="px-1 text-xs text-amber-700 dark:text-amber-300">
                 {fails.length.toLocaleString()} value{fails.length === 1 ? '' : 's'} won’t convert to {VALUE_KIND_LABEL[op.toKind]} — held by{' '}
-                {fails.reduce((n, v) => n + v.count, 0).toLocaleString()} entities in this view:
+                {fails.reduce((n, v) => n + v.count, 0).toLocaleString()} {who.some}:
               </legend>
               <ul className="mb-1.5 flex flex-wrap gap-1" aria-label="Values that won’t convert">
                 {fails.slice(0, 12).map((v) => (
@@ -363,17 +407,18 @@ function ReadFailed({ all, listed }: { all: AllValues; listed: number }) {
 }
 
 /** Before → after for the values listed that the clean-up changes, the most held first. */
-function Preview({ op, values, distinct, unlisted: tooMany = false, title = 'Changes' }: {
+function Preview({ op, values, distinct, unlisted: tooMany = false, who, title = 'Changes' }: {
   op: OpDraft; values: readonly SearchCatalogValue[]; distinct?: number
   /** It holds more values than the catalog lists. */
   unlisted?: boolean
+  who: Holders
   title?: string
 }) {
   const changed = values.map((v) => ({ v, out: cleanValue(op, v.value, v.kind) })).filter((r) => r.out.changed)
   if (values.length === 0) {
     return tooMany
-      ? <Hint>It holds more than {(distinct ?? 0).toLocaleString()} values — too many to preview here. The change still reaches every entity holding one.</Hint>
-      : <Hint>This view’s entities hold none of its values yet, so there is nothing to preview.</Hint>
+      ? <Hint>It holds more than {(distinct ?? 0).toLocaleString()} values — too many to preview here. The change still reaches {who.every}.</Hint>
+      : <Hint>{who.none}</Hint>
   }
   const entities = changed.reduce((n, r) => n + r.v.count, 0)
   const of = distinct !== undefined && distinct > values.length ? ` of the ${values.length.toLocaleString()} most held` : ''
@@ -398,7 +443,7 @@ function Preview({ op, values, distinct, unlisted: tooMany = false, title = 'Cha
           </ul>
           <p className="mt-1.5 text-xs text-ink-muted">
             {changed.length.toLocaleString()} value{changed.length === 1 ? '' : 's'}{of} change — on{' '}
-            <span className="tabular-nums">{entities.toLocaleString()}</span> entities in this view
+            <span className="tabular-nums">{entities.toLocaleString()}</span> {who.some}
             {changed.length > SHOWN && `; the first ${SHOWN} shown`}.
           </p>
         </>

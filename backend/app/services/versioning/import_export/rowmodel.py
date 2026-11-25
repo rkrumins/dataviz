@@ -190,10 +190,28 @@ def _expand_payload(out: Dict[str, Any], raw: Dict[str, Any], kind: str) -> None
     out["properties"] = dict(payload.get("properties") or {})
 
 
+#: Characters a flat cell doesn't give back: an Excel cell drops the ones XML can't hold, and a CSV
+#: line's CR is read as its end. A tab and a newline survive every format.
+_CONTROL = frozenset(chr(c) for c in (*range(0x00, 0x09), *range(0x0b, 0x20), 0x7f, 0xfffe, 0xffff))
+
+
+def _cell_gives_back(v: Any) -> bool:
+    """Whether a flat cell holding ``v`` is read back as ``v``. A string isn't when it is blank (a
+    blank cell means "leave unchanged"), padded (cells are trimmed), a removal token, text a TEXT
+    format reads back as a list (:func:`parse_list_cells`), or holds a control character."""
+    if not isinstance(v, str):
+        return True
+    return (v.strip() != "" and v == v.strip() and v not in _DELETE_TOKENS
+            and _list_in(v) is None and not any(ch in _CONTROL for ch in v))
+
+
 def _spill_properties(rec: Dict[str, Any], properties: Optional[Dict[str, Any]]) -> None:
+    """Each property in its own ``prop.<name>`` column when a flat cell gives it back exactly — its
+    value and its name — else in ``properties_json``, which an import reads as it was written
+    (``_assemble_properties``): so every property comes back, whatever it holds."""
     overflow: Dict[str, Any] = {}
     for key, val in (properties or {}).items():
-        if _is_scalar_or_flat_list(val):
+        if _is_scalar_or_flat_list(val) and _cell_gives_back(val) and _cell_gives_back(key):
             rec[f"{_PROP_PREFIX}{key}"] = val
         else:
             overflow[key] = val
@@ -265,16 +283,23 @@ def parse_list_cells(rec: Dict[str, Any]) -> Dict[str, Any]:
     for key, val in rec.items():
         if not key.startswith(_PROP_PREFIX) or not isinstance(val, str):
             continue
-        text = val.strip()
-        if not (text.startswith("[") and text.endswith("]")):
-            continue
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            continue
-        if isinstance(parsed, list) and _is_scalar_or_flat_list(parsed):
+        parsed = _list_in(val)
+        if parsed is not None:
             rec[key] = parsed
     return rec
+
+
+def _list_in(text: str) -> Optional[list]:
+    """The flat list of scalars ``text`` is the JSON of, as :func:`parse_list_cells` reads a cell;
+    None when it is anything else."""
+    text = text.strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, list) and _is_scalar_or_flat_list(parsed) else None
 
 
 _NODE_COL_ORDER = ["entity_id", "urn", "entityType", "displayName", "qualifiedName",

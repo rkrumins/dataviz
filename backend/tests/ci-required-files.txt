@@ -126,6 +126,7 @@ tests/test_export_plan_budget.py
 tests/test_export_selection_route.py
 tests/test_export_view_scope.py
 tests/test_falkor_indexes.py
+tests/test_falkordb_edge_attributes.py
 tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
@@ -156,6 +157,7 @@ tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
+tests/test_graph_watch_edges_migration.py
 tests/test_graph_watch_migration.py
 tests/test_graph_watch_told_migration.py
 tests/test_heal_native_leftovers.py

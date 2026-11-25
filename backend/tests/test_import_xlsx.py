@@ -75,3 +75,30 @@ def test_import_xlsx():
 if __name__ == "__main__":
     asyncio.run(_run())
     print("import xlsx: OK")
+
+
+def test_an_xlsx_round_trip_gives_every_property_back():
+    """A record exported to a workbook and read back keeps every property as it was: a value a
+    cell can't give back (a blank, padding, a removal token, text that reads as a list, a control
+    character, a padded name) travels in properties_json, and Excel keeps numbers and booleans."""
+    from backend.app.services.versioning.import_export.rowmodel import (
+        column_order, denormalize_edge, denormalize_node, normalize)
+
+    props = {"empty": "", "spaces": "  ", "padded": " x ", "token": "\\N", "listy": "[1,2]",
+             "cr": "a\rb", "ctl": "a\x01b", " padded key ": "v", "my prop": "val1", "n": 5,
+             "flag": True, "list": ["a", "b"], "draft": "[draft]", "naïve ü": "x"}
+    records = [{"kind": "node", **denormalize_node("n1", "h1", {"urn": "urn:x", "properties": props})},
+               {"kind": "edge", **denormalize_edge("e1", "h2", {"edgeType": "T", "properties": props})}]
+
+    async def _go():
+        ad = get_adapter("xlsx")
+
+        async def _recs():
+            for r in records:
+                yield r
+
+        blob = b"".join([b async for b in ad.write(_recs(), columns=column_order(records))])
+        return [r async for r in ad.parse(_one(blob))]
+
+    parsed = asyncio.run(_go())
+    assert [normalize(r, r["kind"])["properties"] for r in parsed] == [props, props]

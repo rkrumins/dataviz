@@ -1200,7 +1200,7 @@ class ImportExportService:
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         derived: Dict[str, str] = {}
         if entity_kind == "edge":
-            found, deleted, missing, derived = await property_job.read_edge_targets(snap, ids)
+            found, deleted, missing, derived, _stale = await property_job.read_edge_targets(snap, ids)
         else:
             found, deleted, missing, _stale = await property_job.read_targets(snap, ids)
         props = {eid: p for eid, p, _urn in found.values()}
@@ -1555,9 +1555,9 @@ class ImportExportService:
         records = contract.template_records(ontology) or example_template_records()
         extra = contract.template_columns(ontology, identity_property)
         columns = column_order(records, schema_props={
-            "node": [c[len("prop."):] for c in extra["node"]]})
+            kind: [c[len("prop."):] for c in extra[kind]] for kind in ("node", "edge")})
         if any(r.get("kind") == "edge" for r in records):
-            columns = columns[:-1] + extra["edge"] + columns[-1:]          # ahead of _op
+            columns = columns[:-1] + extra["ends"] + columns[-1:]          # ahead of _op
         adapter = get_adapter(export_format)
 
         async def _iter():

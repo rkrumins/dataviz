@@ -675,6 +675,24 @@
       ],
       "on": [],
       "at_tips": []
+    },
+    "20261203_1000_watch_edges": {
+      "parents": [
+        [
+          "20261202_1000_bootstrap_review"
+        ],
+        [
+          "20261203_1000_gv_ps_prop_names"
+        ]
+      ],
+      "on": [
+        "origin/claude/serene-allen-geoowh"
+      ],
+      "at_tips": [
+        [
+          "20261203_1000_gv_ps_prop_names"
+        ]
+      ]
     }
   }
 }

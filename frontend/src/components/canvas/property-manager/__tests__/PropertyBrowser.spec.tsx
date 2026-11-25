@@ -432,6 +432,18 @@ describe('PropertyBrowser — the draft\'s bulk changes', () => {
         expect(screen.getByText('new')).toBeInTheDocument()
     })
 
+    it('lists no relationship’s new key as an entity property — the catalog lists entities’', () => {
+        usePropertyJobsStore.getState().track(tracked('j9', {
+            op: { kind: 'set', key: 'via_pipeline', value: 'nightly' }, entityKind: 'edge',
+            targetLabel: 'the picked relationships',
+        }))
+        renderBrowser()
+        // The change itself is listed, as any of the draft's are…
+        expect(within(screen.getByRole('region', { name: 'Changes on this draft' })).getByText(/via_pipeline/)).toBeInTheDocument()
+        // …but no entity property row comes with it.
+        expect(screen.queryByText('new')).toBeNull()
+    })
+
     it('says what one that ended did, and offers why some could not be changed', () => {
         usePropertyJobsStore.getState().track(tracked('j2', {
             op: { kind: 'remove', key: 'legacyCode' },
