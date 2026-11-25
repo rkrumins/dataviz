@@ -91,7 +91,7 @@ class TestCheckPredicate:
         ({"kind": "layer", "layerAssignment": "Gold"}, "filter by layer"),
         ({"kind": "group", "op": "and", "children": [{"kind": "layer", "layerAssignment": "g"}]},
          "filter by layer"),
-        ({"kind": "edges", "sourceWhere": P}, "edges"),
+        ({"kind": "edges", "sourceWhere": P}, "apply the rule to relationships"),
         ({"kind": "withinHops", "urns": ["urn:a"], "hops": 2}, "route"),
         ({"kind": "nope"}, "invalid predicate"),
     ])

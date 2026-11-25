@@ -85,6 +85,22 @@ Every new capability ships behind its own switch, off by default.
   well as lineage (roll-ups stay read-only). A field the type keeps unique is never given one value
   for several. Adding a property suggests the names others of their types carry. The Property
   Manager offers "Compare the N selected relationships".
+- **Relationship properties in the Property Manager**: the Properties tab switches between
+  Entities and Relationships. A relationship property gets what an entity property has:
+  - how many carry it, its kinds, its values and their counts, in each relationship type's colour;
+  - how many hold it in the relationship's JSON;
+  - "Find relationships with / without this", and the same from a value or a type;
+  - set, rename, copy, remove, normalize, map values, convert and "Make it a field…" from its row.
+
+  The bulk dialog reads relationship keys and every value from the catalog. It falls back to a
+  sample only where no catalog can be read.
+- **Display rules for relationships**: a rule can apply to relationships — a Connections search,
+  its ends optional, through the types you pick, with an edge filter by any operator — and draws
+  their lines on the Graph canvas in its colour, dashed or dotted, thin or bold, with its chip. The
+  editor asks what a rule applies to, then its condition (with a count of what it matches), then
+  its look, shown as it will be drawn. A bundled line is styled when any relationship it stands
+  for matches; a roll-up never is. Library files carry them, warning of relationship types the
+  view's semantic layer doesn't have. Existing rules are unchanged.
 
 ### Changed
 
@@ -121,13 +137,6 @@ Every new capability ships behind its own switch, off by default.
 - **Bulk clean-ups reach relationships**: replace, normalize, map values and convert, previewed on
   the relationships' own values. A job over a Connections search covers the relationships the
   draft added or changed, and lists those that no longer match.
-- **Display rules for relationships**: a rule can apply to relationships — a Connections search,
-  its ends optional, through the types you pick, with an edge filter by any operator — and draws
-  their lines on the Graph canvas in its colour, dashed or dotted, thin or bold, with its chip. The
-  editor asks what a rule applies to, then its condition (with a count of what it matches), then
-  its look, shown as it will be drawn. A bundled line is styled when any relationship it stands
-  for matches; a roll-up never is. Library files carry them, warning of relationship types the
-  view's semantic layer doesn't have. Existing rules are unchanged.
 - **A versioned graph's health shows its property names**: how many it uses of the graph store's
   65,534, the budget past which new names are kept as values (still shown and exported), a warning
   near and at it, and which keys on items and on relationships were kept as values.

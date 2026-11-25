@@ -212,7 +212,7 @@ export function PropertyManagerDrawer({
                                             Property Manager
                                         </h2>
                                         <p className="text-[10px] text-ink-muted/80">
-                                            Browse · change in bulk · tag matched entities
+                                            Browse · change in bulk · tag and style what matches
                                         </p>
                                     </div>
                                 </div>

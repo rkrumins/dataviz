@@ -160,7 +160,7 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
                     )}
                 >
                     <span className="font-semibold text-accent-lineage">New — Property Manager.</span>{' '}
-                    Browse properties in use and tag matched entities with colored display rules.
+                    Browse the properties of entities and relationships, change them in bulk, and tag or style what matches with display rules.
                     <button
                         type="button"
                         onClick={dismissHint}
