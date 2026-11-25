@@ -13,6 +13,9 @@
  *             `trace`  a trace walking (its capsule), with the provider pill
  *             `scale`  a warehouse of `containers` schemas × `children` tables
  *                      (default 500 × 200), to expand a level at a time
+ *             `create` a draft whose columns each add differently: Finance (a
+ *                      column mapped to the Finance domain), Domains (several
+ *                      top-level domains) and Apps (a type that needs a domain)
  *   theme     `dark` for the dark palette
  *   persona   `business` (default `technical`)
  *   latency   ms each child page waits (default 0; `scale` defaults to 120)
@@ -70,12 +73,16 @@ document.body.style.margin = '0'
 const COLUMNS = 3
 const node = (urn: string, displayName: string, entityType: string, childCount: number): GraphNode =>
   ({ urn, displayName, entityType, childCount, properties: {} }) as unknown as GraphNode
-const ROOTS: GraphNode[] = [
+const CREATE = fixture === 'create'
+const DOMAINS = ['Finance', 'Sales', 'Marketing', 'Operations', 'People']
+const APPS: Record<string, string[]> = { Finance: ['Billing', 'Ledger', 'Payroll'], Sales: ['CRM', 'Quotes'], Marketing: ['Campaigns'] }
+const ROOTS: GraphNode[] = CREATE ? DOMAINS.map((d) => node(`dom:${d}`, d, 'domain', APPS[d]?.length ?? 0)) : [
   node('wh', 'Warehouse', 'warehouse', CONTAINERS),
   node('lake', 'Data Lake', 'warehouse', 4),
   ...['Revenue', 'Churn', 'Pipeline', 'Retention'].map((name, i) => node(`d${i}`, `${name} dashboard`, 'dashboard', 0)),
 ]
 function childrenOf(urn: string): GraphNode[] {
+  if (CREATE) return (APPS[urn.replace(/^dom:/, '')] ?? []).map((a) => node(`app:${a}`, a, 'app', 0))
   if (urn === 'wh') return Array.from({ length: CONTAINERS }, (_, i) => node(`s${i}`, `schema_${String(i).padStart(3, '0')}`, 'schema', CHILDREN))
   if (urn === 'lake') return Array.from({ length: 4 }, (_, i) => node(`lk${i}`, `bucket_${i}`, 'schema', 0))
   const schema = urn.match(/^s(\d+)$/)
@@ -85,6 +92,10 @@ function childrenOf(urn: string): GraphNode[] {
   return []
 }
 function parentOf(urn: string): string | undefined {
+  if (CREATE) {
+    const d = Object.keys(APPS).find((k) => APPS[k].includes(urn.replace(/^app:/, '')))
+    return urn.startsWith('app:') && d ? `dom:${d}` : undefined
+  }
   if (/^s\d+$/.test(urn)) return 'wh'
   if (/^lk\d+$/.test(urn)) return 'lake'
   const t = urn.match(/^t(\d+)_\d+$/)
@@ -99,14 +110,36 @@ function lookup(urn: string): GraphNode | undefined {
   return parent ? childrenOf(parent).find((c) => c.urn === urn) : undefined
 }
 
-const LAYERS = [
+const LAYERS = CREATE ? [
+  { id: 'fin', name: 'Finance', color: '#10b981', order: 0, entityTypes: [], rules: [], anchorUrn: 'dom:Finance' },
+  { id: 'domains', name: 'Domains', color: '#6366f1', order: 1, entityTypes: ['domain'], rules: [] },
+  { id: 'apps', name: 'Apps', color: '#f59e0b', order: 2, entityTypes: ['app'], rules: [] },
+] : [
   { id: 'sources', name: 'Sources', color: '#6366f1', order: 0, entityTypes: [], rules: [] },
   { id: 'reports', name: 'Reports', color: '#f59e0b', order: 1, entityTypes: [], rules: [] },
 ]
-const ASSIGNMENTS: Record<string, { layerId: string }> = {
-  wh: { layerId: 'sources' }, lake: { layerId: 'sources' },
-  d0: { layerId: 'reports' }, d1: { layerId: 'reports' }, d2: { layerId: 'reports' }, d3: { layerId: 'reports' },
-}
+const ASSIGNMENTS: Record<string, { layerId: string }> = CREATE
+  ? Object.fromEntries(DOMAINS.map((d) => [`dom:${d}`, { layerId: d === 'Finance' ? 'fin' : 'domains' }]))
+  : {
+    wh: { layerId: 'sources' }, lake: { layerId: 'sources' },
+    d0: { layerId: 'reports' }, d1: { layerId: 'reports' }, d2: { layerId: 'reports' }, d3: { layerId: 'reports' },
+  }
+// `create`'s ontology: a Domain holds Apps and Data Platforms; an App holds Services.
+const type = (id: string, name: string, icon: string, color: string, level: number, canContain: string[], canBeContainedBy: string[]) => ({
+  id, name, pluralName: `${name}s`, description: '', visual: { icon, color, shape: 'rounded', size: 'md', borderStyle: 'solid', showInMinimap: true },
+  fields: [], behavior: { selectable: true, draggable: true, expandable: canContain.length > 0, traceable: true, collapsible: true },
+  hierarchy: { level, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
+})
+const ENTITY_TYPES = CREATE ? [
+  type('domain', 'Domain', 'Building2', '#6366f1', 0, ['app', 'dataPlatform'], []),
+  type('app', 'App', 'AppWindow', '#10b981', 1, ['service'], ['domain']),
+  type('dataPlatform', 'Data Platform', 'Database', '#0ea5e9', 1, [], ['domain']),
+  type('service', 'Service', 'Server', '#f59e0b', 2, [], ['app']),
+] : []
+const RELATIONSHIP_TYPES = CREATE ? [{
+  id: 'CONTAINS', name: 'Contains', sourceTypes: [], targetTypes: [], isContainment: true, isLineage: false,
+  visual: { strokeColor: '#94a3b8', strokeWidth: 1, strokeStyle: 'solid', animated: false, curveType: 'bezier' },
+}] : []
 
 // ── The network ───────────────────────────────────────────────────────────
 const report = { childPages: 0, batches: 0, inFlight: 0, maxInFlight: 0 }
@@ -222,15 +255,18 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── The stores ────────────────────────────────────────────────────────────
 usePersonaStore.setState({ mode: persona })
 usePreferencesStore.setState({ canvasDensity: 'comfortable' } as never)
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewMembershipEnabled: true } } as never)
-useBranchStore.setState({ workspaceId: null, dataSourceId: null, viewId: null, currentBranchId: null } as never)
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewMembershipEnabled: true, ...(CREATE ? { editModeEnabled: true, versioningEnabled: true } : {}) } } as never)
+// `create` edits: a draft is open.
+useBranchStore.setState((CREATE
+  ? { workspaceId: 'harness-ws', dataSourceId: null, viewId: 'harness-view', currentBranchId: 'harness-branch' }
+  : { workspaceId: null, dataSourceId: null, viewId: null, currentBranchId: null }) as never)
 useSchemaStore.setState({
   activeViewId: 'harness-view',
   schema: {
     id: 'harness', name: 'harness', version: '1',
-    entityTypes: [], relationshipTypes: [], globalVisuals: {},
+    entityTypes: ENTITY_TYPES, relationshipTypes: RELATIONSHIP_TYPES, globalVisuals: {},
     containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
-    rootEntityTypes: [], defaultViewId: 'harness-view',
+    rootEntityTypes: CREATE ? ['domain'] : [], defaultViewId: 'harness-view',
     views: [{
       id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
       content: { visibleEntityTypes: [], visibleRelationshipTypes: [], defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated' },
