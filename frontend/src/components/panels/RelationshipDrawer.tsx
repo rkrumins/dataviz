@@ -31,7 +31,6 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ArrowLeftRight, Code, Crosshair, Eye, FileText, History, Info, ListChecks, Pencil, Trash2, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageNode } from '@/store/canvas'
-import { useActiveView } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { stagedIndexOf } from '@/store/stagedIndex'
 import { useFeature } from '@/store/features'
@@ -43,8 +42,7 @@ import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
 import { isGhostEdge } from '@/features/versioning/canvas/deletionGhosts'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
-import { useDiscovery } from '@/components/canvas/search/builder/useDiscovery'
-import { EDGE_ENVELOPE_KEYS, EDGE_RESERVED_KEYS } from '@/components/canvas/property-manager/op/opModel'
+import { EDGE_ENVELOPE_KEYS } from '@/components/canvas/property-manager/op/opModel'
 import { PromoteRelationshipFieldDialog } from '@/components/canvas/property-manager/PromoteFieldDialog'
 import { storedKindOf } from '@/components/canvas/property-manager/propertyValueTypes'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -82,6 +80,7 @@ import { ConnectionView } from './relationship/ConnectionView'
 import { MultiRelationshipView } from './relationship/multi/MultiRelationshipView'
 import { Bridge, DetailRow, DetailList, Notice, TypeChip } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
+import { useEdgePropertySuggestions } from './relationship/useEdgePropertySuggestions'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
 
 interface RelationshipDrawerProps {
@@ -655,17 +654,7 @@ function RelationshipPanel({
  *  type carry in the view's discovery sample, each with a value or two it holds. Mounted only where
  *  they are edited, so the sample is asked for only then. */
 function EditedProperties({ edgeType, ...props }: PropertyEditorProps & { edgeType: string }) {
-  const { keysByEdgeType, getEdgeValueSamples } = useDiscovery(useActiveView()?.id ?? null)
-  const suggestions = useMemo(() => {
-    const at = Object.keys(keysByEdgeType).find((t) => t.toLowerCase() === edgeType.toLowerCase())
-    return (at ? keysByEdgeType[at]! : []).filter((key) => !EDGE_RESERVED_KEYS.has(key)).map((key) => ({
-      key,
-      count: 0,
-      examples: getEdgeValueSamples(at!, key)
-        .filter((v): v is string | number => typeof v === 'string' || typeof v === 'number')
-        .map(String).filter((v) => v.length <= 40).slice(0, 2),
-    }))
-  }, [keysByEdgeType, getEdgeValueSamples, edgeType])
+  const suggestions = useEdgePropertySuggestions([edgeType])
   return <PropertyEditor {...props} suggestions={suggestions} />
 }
 
