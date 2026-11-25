@@ -35,6 +35,7 @@ import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './Flat
 import { DropHint } from './DropHint'
 import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
 import { draggedEntity } from './entityDrag'
+import { draggedLayer, setDraggedLayer } from './layerDrag'
 import { useReparentNode } from './useReparentNode'
 import { COLUMN_KIND_ICON, columnKind, columnKindCopy, type ColumnKind, type ColumnKindCopy } from './columnKind'
 import { ColumnKindMark } from './ColumnKindMark'
@@ -581,6 +582,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   }
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
+  // A column hovering this header: where it lands — after this one coming from the left, before it
+  // from the right (reorderLayer's rule).
+  const [layerDropTitle, setLayerDropTitle] = useState<string | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
@@ -2080,7 +2084,9 @@ export const LayerColumn = React.memo(function LayerColumn({
           requestFold(false)
         } : undefined}
         className={cn(
-          "group/header sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
+          "group/header sticky top-0 z-10 border-b transition-all duration-200",
+          // Open and reorderable, the header is a handle: grab it to move the column.
+          onReorderLayer && !isCollapsed && !isRenaming ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
           isCollapsed
             ? "flex-1 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/50"
             : cn("flex-shrink-0", header.paddingClass),
@@ -2099,11 +2105,23 @@ export const LayerColumn = React.memo(function LayerColumn({
         }}
         onClick={() => isCollapsed && requestFold(false)}
         onContextMenu={onHeaderContextMenu ? (e) => onHeaderContextMenu(e, layer.id) : undefined}
+        // The whole header is the handle for reordering — not only its icon tile — except while its
+        // name is being edited (a drag there selects text).
+        draggable={!!onReorderLayer && !isRenaming}
+        onDragStart={onReorderLayer && !isRenaming ? (e) => {
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/x-layer-id', layer.id)
+          setDraggedLayer({ id: layer.id, order: layer.order })
+        } : undefined}
+        onDragEnd={onReorderLayer ? () => setDraggedLayer(null) : undefined}
         onDragOver={(e) => {
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
           const isEntity = types.includes('text/x-entity-id')
           const isGroup = types.includes('text/x-group-id')
+          // A column over its own header: nothing to do there.
+          const from = isLayer ? draggedLayer() : null
+          if (from && from.id === layer.id) return
           // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
           // gate on the presence of the typed key + the matching handler).
           if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer) || (isGroup && groupActions)) {
@@ -2111,15 +2129,20 @@ export const LayerColumn = React.memo(function LayerColumn({
             e.dataTransfer.dropEffect = 'move'
             setIsDragOver(true)
             setDragKind(isLayer ? 'layer' : isGroup ? 'group' : 'entity')
+            if (isLayer) {
+              const title = !from ? 'Drop to reorder here' : from.order < layer.order ? `Move after ${layer.name}` : `Move before ${layer.name}`
+              if (title !== layerDropTitle) setLayerDropTitle(title)
+            }
           }
         }}
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null); setLayerDropTitle(null) }
         }}
         onDrop={(e) => {
           e.preventDefault()
           setIsDragOver(false)
           setDragKind(null)
+          setLayerDropTitle(null)
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
           const groupId = e.dataTransfer.getData('text/x-group-id')
@@ -2173,7 +2196,7 @@ export const LayerColumn = React.memo(function LayerColumn({
             ) : (
               <DropHint
                 kind="view"
-                title={dragKind === 'layer' ? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : 'Show in this column'}
+                title={dragKind === 'layer' ? layerDropTitle ?? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : 'Show in this column'}
                 detail="only this view"
                 className="mx-2"
               />
@@ -2202,12 +2225,6 @@ export const LayerColumn = React.memo(function LayerColumn({
               </button>
             )}
             <div
-              draggable={!!onReorderLayer}
-              onDragStart={onReorderLayer ? (e) => {
-                e.stopPropagation()
-                e.dataTransfer.effectAllowed = 'move'
-                e.dataTransfer.setData('text/x-layer-id', layer.id)
-              } : undefined}
               title={onReorderLayer ? `Drag to reorder ${layer.name}` : undefined}
               className={cn(
                 "relative flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
@@ -3743,6 +3760,17 @@ function LayerHeaderTitle({
   useEffect(() => () => {
     clearTimeout(openTimerRef.current)
     clearTimeout(closeTimerRef.current)
+  }, [])
+
+  // A drag (the header is the handle for reordering) puts the card away: it would ride over the
+  // columns the reader is dropping onto.
+  useEffect(() => {
+    const putAway = () => {
+      clearTimeout(openTimerRef.current)
+      setOpen(false)
+    }
+    window.addEventListener('dragstart', putAway)
+    return () => window.removeEventListener('dragstart', putAway)
   }, [])
 
   const scheduleOpen = () => {
