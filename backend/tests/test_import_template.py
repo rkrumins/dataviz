@@ -80,6 +80,42 @@ async def test_a_playground_template_carries_the_identifier_every_type_has_once(
     assert "identifier property" in explained["prop.id"]
 
 
+async def test_an_edge_row_carries_its_relationship_types_fields():
+    """A relationship type's fields are columns of the template, as an entity type's are: its
+    edge row filled with an example of each field's type, every field a column even of a type with
+    no row, explained on the Columns sheet — and the rows pass the contract and read back as the
+    edge's properties."""
+    typed = {**ONTOLOGY, "edge_types": ["CONTAINS", "OWNS"], "edge_fields": {
+        "CONTAINS": [{"id": "weight", "name": "Weight", "type": "number", "required": True},
+                     {"id": "note", "name": "Note", "type": "text"}],
+        "OWNS": [{"id": "since", "name": "Since", "type": "date"}]},
+        "edge_ends": {**ONTOLOGY["edge_ends"], "OWNS": {"source": ["Team"], "target": ["Table"]}}}
+    blob = await _service().build_template(export_format="csv", ontology=typed)
+    rows = _csv(blob)
+    assert [(r["kind"], r["entityType"] or r["edgeType"]) for r in rows][-1] == ("edge", "CONTAINS"), \
+        "OWNS joins no type the template has a row of"
+    edge = rows[-1]
+    assert (edge["prop.weight"], edge["prop.note"]) == ("1", "example Note")
+    assert {"prop.since", "prop.weight", "prop.note"} <= set(rows[0]), "every field is a column"
+    assert all(r["prop.weight"] == "" for r in rows if r["kind"] == "node")
+
+    async def body():
+        yield blob
+    records = [r async for r in get_adapter("csv").parse(body())]
+    for record in records:
+        contract.validate_record({k: v for k, v in record.items() if v not in ("", None)})
+    assert normalize(records[-1], "edge")["properties"] == {"weight": "1", "note": "example Note"}
+
+    book = openpyxl.load_workbook(io.BytesIO(await _service().build_template(
+        export_format="xlsx", ontology=typed)))
+    edge_headers = [c.value for c in next(book["Edges"].iter_rows(max_row=1))]
+    node_headers = [c.value for c in next(book["Nodes"].iter_rows(max_row=1))]
+    assert {"prop.weight", "prop.note"} <= set(edge_headers) and "prop.weight" not in node_headers
+    explained = {row[0].value: row[3].value for row in book["Columns"].iter_rows(min_row=2)}
+    assert explained["prop.weight"].startswith(
+        "On CONTAINS: Weight (number), required for a new CONTAINS relationship.")
+
+
 async def test_without_an_ontology_a_template_holds_worked_examples():
     rows = _csv(await _service().build_template(export_format="csv"))
     assert [r["kind"] for r in rows] == ["node", "node", "edge"]

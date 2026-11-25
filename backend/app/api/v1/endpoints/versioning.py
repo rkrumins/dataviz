@@ -4328,12 +4328,20 @@ def import_contract_of(resolved) -> Optional[dict]:
     edge_ends = {t: {"source": list(getattr(d, "source_types", None) or []),
                      "target": list(getattr(d, "target_types", None) or [])}
                  for t, d in rels.items()}
+    # Every field of each relationship type, typing its edge rows' properties as an entity type's
+    # type a node row's. Never a key or unique: an edge is found by its ends and its type, and no
+    # publish holds a relationship's value unique.
+    edge_fields = {t: [{"id": f.id, "name": getattr(f, "name", None) or f.id,
+                        "type": getattr(f, "type", None), "required": bool(getattr(f, "required", False))}
+                       for f in getattr(d, "fields", []) or []]
+                   for t, d in rels.items()}
     return {"node_types": node_types, "edge_types": edge_types,
             # What a row's _op=delete takes with it: the node's containment subtree.
             "containment": list(getattr(resolved, "containment_edge_types", []) or []),
             "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
             "unique": {t: fs for t, fs in flagged("unique").items() if fs},
-            "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
+            "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends,
+            "edge_fields": {t: fs for t, fs in edge_fields.items() if fs}}
 
 
 async def _resolve_node_identity_for_import(workspace_id, data_source_id):

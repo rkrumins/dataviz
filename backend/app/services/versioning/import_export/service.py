@@ -1555,9 +1555,9 @@ class ImportExportService:
         records = contract.template_records(ontology) or example_template_records()
         extra = contract.template_columns(ontology, identity_property)
         columns = column_order(records, schema_props={
-            "node": [c[len("prop."):] for c in extra["node"]]})
+            kind: [c[len("prop."):] for c in extra[kind]] for kind in ("node", "edge")})
         if any(r.get("kind") == "edge" for r in records):
-            columns = columns[:-1] + extra["edge"] + columns[-1:]          # ahead of _op
+            columns = columns[:-1] + extra["ends"] + columns[-1:]          # ahead of _op
         adapter = get_adapter(export_format)
 
         async def _iter():

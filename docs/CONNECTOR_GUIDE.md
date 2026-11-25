@@ -156,7 +156,8 @@ connector written against it keeps working.
 
 - **The schema.** `GET /api/v1/{ws}/versioning/graphs/{graphId}/imports/schema` is the JSON Schema
   (draft 2020-12) of one record, narrowed to the data source: its entity and edge types as enums,
-  and its properties typed. Validate what you write against it in your own CI.
+  and its properties typed — a node row's by its entity types' fields, an edge row's by its
+  relationship types'. Validate what you write against it in your own CI.
   - The generic version is committed at `backend/common/schema/import-record.v1.json`.
   - `X-Schema-Version` is the format's version.
   - The schema follows the ontology, so cache it by its `ETag`: `If-None-Match` answers `304` while
