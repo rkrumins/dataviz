@@ -26,7 +26,6 @@ object, which ``normalize(..., native=True)`` reads into the same normalized row
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Dict, List, Optional
 
 from backend.common.ancestry_columns import ANCESTRY_COLUMNS
@@ -193,7 +192,7 @@ def _expand_payload(out: Dict[str, Any], raw: Dict[str, Any], kind: str) -> None
 
 #: Characters a flat cell doesn't give back: an Excel cell drops the ones XML can't hold, and a CSV
 #: line's CR is read as its end. A tab and a newline survive every format.
-_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f\ufffe\uffff]")
+_CONTROL = frozenset(chr(c) for c in (*range(0x00, 0x09), *range(0x0b, 0x20), 0x7f, 0xfffe, 0xffff))
 
 
 def _cell_gives_back(v: Any) -> bool:
@@ -203,7 +202,7 @@ def _cell_gives_back(v: Any) -> bool:
     if not isinstance(v, str):
         return True
     return (v.strip() != "" and v == v.strip() and v not in _DELETE_TOKENS
-            and _list_in(v) is None and not _CONTROL.search(v))
+            and _list_in(v) is None and not any(ch in _CONTROL for ch in v))
 
 
 def _spill_properties(rec: Dict[str, Any], properties: Optional[Dict[str, Any]]) -> None:

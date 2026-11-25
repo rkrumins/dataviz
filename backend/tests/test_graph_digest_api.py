@@ -315,9 +315,10 @@ async def test_watching_a_relationship_by_its_id(world, test_client):
 
     # One thing at a time, never nothing named.
     both = {"entityUrn": "urn:t:orders", "edgeId": "urn:uuid:feeds"}
-    assert (await test_client.put(url, json=both)).status_code == 422
-    assert (await test_client.delete(url, params=both)).status_code == 422
-    assert (await test_client.put(url, json={"edgeId": ""})).status_code == 422
+    put_both = await test_client.put(url, json=both)
+    delete_both = await test_client.delete(url, params=both)
+    put_empty = await test_client.put(url, json={"edgeId": ""})
+    assert (put_both.status_code, delete_both.status_code, put_empty.status_code) == (422, 422, 422)
 
     # Stopping one by the other's name stops nothing: an entity and a relationship are kept apart.
     got = (await test_client.delete(url, params={"entityUrn": "urn:uuid:feeds"})).json()
