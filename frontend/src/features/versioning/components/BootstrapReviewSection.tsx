@@ -17,6 +17,7 @@ import {
   AlertTriangle, ArrowRight, Check, Download, GitMerge, Hourglass, ListChecks, Loader2, Plus, RefreshCw, Trash2, Type, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ReasonField } from '@/components/activity/ReasonField'
 import { useReasonDraft } from '@/components/activity/useReasonDraft'
@@ -305,15 +306,19 @@ export function BootstrapReviewSection({
       )}
       {canManage && !confirming && !confirmingContinue && (
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <button
-            onClick={() => { reason.reset(); setConfirmingContinue(true) }}
-            disabled={!ready || decide.isPending}
-            title={ready ? undefined : 'Say how to copy each kind of thing held first'}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+          <HoverTip
+            label="Copy the graph into version control as chosen"
+            detail={ready ? 'You confirm, with a reason, before anything goes live' : 'Say how to copy each kind of thing held first'}
           >
-            {decide.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitMerge className="w-3.5 h-3.5" />}
-            Continue with these choices
-          </button>
+            <button
+              onClick={() => { reason.reset(); setConfirmingContinue(true) }}
+              disabled={!ready || decide.isPending}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+            >
+              {decide.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitMerge className="w-3.5 h-3.5" />}
+              Continue with these choices
+            </button>
+          </HoverTip>
           <button
             onClick={() => onAsk('restart')}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted border border-glass-border hover:text-ink transition-colors"
