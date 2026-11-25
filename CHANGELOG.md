@@ -162,7 +162,7 @@ Every new capability ships behind its own switch, off by default.
 - **`20261203_1000_gv_ps_prop_names`** adds `projection_state.property_names`, the reading each
   update records (created by the versioning worker where alembic doesn't reach the graphver
   schema). Until a graph's next update, its health shows its data source's last statistics count.
-- **`20261203_1000_watch_edges`** adds `graph_watches.entity_kind` (`node` by default).
+- **`20261203_1100_watch_edges`** adds `graph_watches.entity_kind` (`node` by default).
 - **Existing relationships keep their properties in their JSON** until they are written again, and
   read and search as before meanwhile. The next full rebuild of a graph rewrites each relationship
   once into the new form; nothing has to be run.

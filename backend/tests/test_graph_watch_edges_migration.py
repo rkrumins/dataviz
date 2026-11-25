@@ -1,4 +1,4 @@
-"""``20261203_1000_watch_edges``, without a database server: the revision follows
+"""``20261203_1100_watch_edges``, without a database server: the revision follows
 ``20261203_1000_gv_ps_prop_names`` and fits ``alembic_version``; it gives ``graph_watches`` the
 ORM's ``entity_kind``, every watch there already an entity's (``node``); its DDL is guarded, so it
 runs on a database ``create_all`` already built and runs again; the downgrade takes the
@@ -19,7 +19,7 @@ from alembic.operations import Operations
 from backend.app.db.models import GraphWatchORM
 
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-_REVISION = _VERSIONS / "20261203_1000_watch_edges.py"
+_REVISION = _VERSIONS / "20261203_1100_watch_edges.py"
 _WATCHES = _VERSIONS / "20261116_1200_graph_watch.py"
 
 
@@ -67,7 +67,7 @@ def _watches(conn) -> list:
         "SELECT id, entity_urn, entity_kind FROM graph_watches")))
 
 
-def test_the_revision_follows_the_bootstrap_review_and_fits_alembic_version():
+def test_the_revision_follows_the_property_names_one_and_fits_alembic_version():
     module = _module()
     assert module.revision == _REVISION.stem and len(module.revision) <= 32
     assert module.down_revision == "20261203_1000_gv_ps_prop_names"

@@ -10,7 +10,7 @@ Guarded DDL (a ``create_all`` baseline already has it), waiting at most five sec
 the revisions before it. The downgrade drops the column and, with it, the relationship watches:
 left behind, each would read as an entity's urn that names nothing, held against the limit.
 
-Revision ID: 20261203_1000_watch_edges
+Revision ID: 20261203_1100_watch_edges
 Revises: 20261203_1000_gv_ps_prop_names
 Create Date: 2026-12-03 10:00
 """
@@ -21,7 +21,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20261203_1000_watch_edges"
+revision: str = "20261203_1100_watch_edges"
 down_revision: Union[str, None] = "20261203_1000_gv_ps_prop_names"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
