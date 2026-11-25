@@ -16,7 +16,9 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from backend.app.providers.falkordb_provider import FalkorDBProvider
+import pytest
+
+from backend.app.providers.falkordb_provider import FalkorDBProvider, _edge_from_row
 from backend.common.models.graph import GraphEdge, GraphNode
 
 
@@ -92,3 +94,69 @@ def test_create_node_containment_edge_writes_properties():
     assert "r.properties = $props" in cypher, cypher
     assert json.loads(params["props"]) == {"origin": "manual"}
     assert params["conf"] == 0.9                     # confidence still passes through raw
+
+
+# ── reading a relationship the platform did not write ─────────────────────────────────────────
+#
+# A graph built by another tool keeps a relationship's properties ON the relationship
+# (``r.weight = 3``), not in the platform's one ``r.properties`` JSON string. The reader is what
+# both the canvas and the "enable version control" copy go through, so every such property must
+# come back as one of the edge's properties.
+
+
+#: Ten properties of a customer's relationship, as ``properties(r)`` returns them.
+CUSTOMER_EDGE = {
+    "my prop": "val1", "MyProp": "a", "MySpecialProp": "b", "MyLogicalProp": True,
+    "weight": 3, "score": 0.7, "naïve ü": "x", "dotted.key": "y", "tags list": ["a", "b"],
+    "since": "2024-01-01",
+}
+
+
+def test_a_customers_relationship_reads_with_all_its_native_properties():
+    e = _edge_from_row("urn:a", "urn:b", "FLOWS_TO", dict(CUSTOMER_EDGE))
+    assert e.properties == CUSTOMER_EDGE
+    assert e.id == "urn:a|FLOWS_TO|urn:b" and e.confidence is None
+
+
+def test_a_platform_written_relationship_reads_exactly_as_before():
+    """Only the envelope and the bag: what every platform writer stores. Byte-identical, so the
+    content hashes of graphs already enabled do not change."""
+    e = _edge_from_row("urn:a", "urn:b", "FLOWS_TO",
+                       {"id": "e1", "confidence": 0.9, "properties": '{"sql": "select 1"}'})
+    assert (e.id, e.confidence, e.properties) == ("e1", 0.9, {"sql": "select 1"})
+    bare = _edge_from_row("urn:a", "urn:b", "CONTAINS", {"id": "c1"})
+    assert (bare.id, bare.confidence, bare.properties) == ("c1", None, {})
+
+
+def test_the_bag_wins_a_name_both_hold_on_a_relationship_the_projector_never_wrote():
+    e = _edge_from_row("urn:a", "urn:b", "T", {"owner": "native", "only": 1,
+                                               "properties": '{"owner": "bag"}'})
+    assert e.properties == {"owner": "bag", "only": 1}
+
+
+def test_a_projected_relationship_reads_from_its_bag_alone():
+    """The projector writes the bag (and ``gvHash``) and never removes a native key: a property
+    deleted in history must not come back from a stale native copy."""
+    e = _edge_from_row("urn:a", "urn:b", "T", {"id": "e1", "gvHash": 42, "stale": "gone",
+                                               "properties": '{"kept": 1}'})
+    assert e.properties == {"kept": 1}
+
+
+@pytest.mark.parametrize("rel", ["AGGREGATED", "aggregated"])
+def test_a_rollup_never_shows_its_attributes_as_properties(rel):
+    e = _edge_from_row("urn:a", "urn:b", rel, {"weight": 4, "aggKey": "a|b", "sourceEdgeTypes": ["X"],
+                                               "latestUpdate": 1})
+    assert e.properties == {}
+
+
+@pytest.mark.parametrize("props, want_id, want_conf, want_props", [
+    ({"id": 42}, "42", None, {}),
+    ({"confidence": "high"}, "urn:a|T|urn:b", None, {"confidence": "high"}),
+    ({"confidence": True}, "urn:a|T|urn:b", None, {"confidence": True}),
+    ({"confidence": 1}, "urn:a|T|urn:b", 1.0, {}),
+    ({"properties": "free text"}, "urn:a|T|urn:b", None, {"properties": "free text"}),
+    ({"properties": "[1, 2]"}, "urn:a|T|urn:b", None, {"properties": "[1, 2]"}),
+])
+def test_source_values_never_break_the_read(props, want_id, want_conf, want_props):
+    e = _edge_from_row("urn:a", "urn:b", "T", props)
+    assert (e.id, e.confidence, e.properties) == (want_id, want_conf, want_props)

@@ -61,10 +61,15 @@ class _Result:
         self.result_set = rows
 
 
-def _falkor(stored: Dict[str, Any] | None):
-    """A FalkorDB provider whose `_query` plays one edge with ``stored`` as its JSON bag."""
+def _falkor(stored: Dict[str, Any] | None, native: Dict[str, Any] | None = None):
+    """A FalkorDB provider whose `_query` plays one edge with ``stored`` as its JSON bag — and
+    ``native`` as the properties it holds on itself, as a graph another tool wrote keeps them."""
     provider = FalkorDBProvider.__new__(FalkorDBProvider)
-    state = {"props": None if stored is None else json.dumps(stored), "queries": []}
+    state = {"props": None if stored is None else json.dumps(stored), "native": dict(native or {}),
+             "queries": []}
+
+    def _rel():
+        return {**state["native"], "id": "e1", "properties": state["props"]}
 
     async def _ensure_connected():
         return None
@@ -74,9 +79,12 @@ def _falkor(stored: Dict[str, Any] | None):
         if state["props"] is None:
             return _Result([])
         if "SET r.properties" in cypher:
+            for k, v in params["gone"].items():          # SET r += {k: null} removes k
+                assert v is None
+                state["native"].pop(k, None)
             state["props"] = params["props"]
-            return _Result([["a", "b", "FLOWS_TO", {"id": params["eid"], "properties": state["props"]}]])
-        return _Result([[state["props"]]])
+            return _Result([["a", "b", "FLOWS_TO", _rel()]])
+        return _Result([["FLOWS_TO", _rel()]])
 
     provider._ensure_connected = _ensure_connected
     provider._query = _query
@@ -90,6 +98,17 @@ async def test_falkordb_patch_keeps_unnamed_properties_and_removes_marked_ones()
     assert json.loads(state["props"]) == {"a": 1, "b": 20, "d": 4}
     assert edge.properties == {"a": 1, "b": 20, "d": 4}
     assert PROP_DELETE not in state["props"]
+
+
+@pytest.mark.asyncio
+async def test_falkordb_patch_of_a_relationship_another_tool_wrote_keeps_and_removes_natively():
+    """Its properties are on the relationship itself: an edit keeps the ones it doesn't name, and
+    one it removes is removed there too, so the next read can't bring it back."""
+    provider, state = _falkor({}, native={"my prop": "val1", "weight": 3, "old": "x"})
+    edge = await provider.update_edge("e1", {"weight": 4, "old": PROP_DELETE})
+    assert edge.properties == {"my prop": "val1", "weight": 4}
+    assert "old" not in state["native"], "removed natively as well as from the bag"
+    assert json.loads(state["props"]) == {"my prop": "val1", "weight": 4}
 
 
 @pytest.mark.asyncio

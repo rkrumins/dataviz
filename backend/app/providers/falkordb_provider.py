@@ -55,6 +55,7 @@ from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError, children_batch_by_query
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.moments import from_cell
 from backend.common.property_patch import apply_properties_patch
 from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
 
@@ -2200,16 +2201,67 @@ def _node_from_props(
         return None
 
 
+#: A relationship's envelope, never one of its properties: its id, its confidence, the
+#: platform's JSON bag of properties (``r.properties``) and the projector's fingerprint.
+_EDGE_ENVELOPE_KEYS = frozenset({"id", "confidence", "properties", "gvHash"})
+
+
+def _json_object(value: Any) -> Optional[Dict[str, Any]]:
+    """``value`` as the platform's bag of properties — a JSON object in a string, as every
+    platform writer stores ``r.properties``, or a dict as given; None for anything else."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_number(value: Any) -> bool:
+    """A real, finite number: what an edge's ``confidence`` holds (NaN is not one)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _native_edge_properties(rel_type: str, props: Dict[str, Any]) -> Dict[str, Any]:
+    """The properties a relationship holds ON itself (``r.weight = 3``), as a graph another tool
+    built keeps them: every key outside the envelope, a ``confidence`` that is not a number, and a
+    ``properties`` that is not the platform's bag.
+
+    None for a relationship the projector wrote (it carries ``gvHash``): its bag is the whole of
+    it, and a native key left on it is a stale copy of a property history has since changed or
+    removed. None for a rollup (``AGGREGATED``), whose attributes are the platform's own."""
+    if "gvHash" in props or is_derived_edge_type(rel_type):
+        return {}
+    out = {k: v for k, v in props.items() if k not in _EDGE_ENVELOPE_KEYS}
+    conf = props.get("confidence")
+    if conf is not None and not _is_number(conf):
+        out["confidence"] = conf
+    bag = props.get("properties")
+    if bag is not None and _json_object(bag) is None:
+        out["properties"] = bag
+    return out
+
+
 def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[str, Any]) -> GraphEdge:
-    """Build GraphEdge from FalkorDB edge data."""
-    edge_id = props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"
+    """Build GraphEdge from FalkorDB edge data (``properties(r)``).
+
+    Its properties are the relationship's own native ones (:func:`_native_edge_properties`) with
+    the platform's bag over them — the bag wins a name both hold. Only a number is the edge's
+    ``confidence``; the id is text, whatever the source stored."""
+    conf = props.get("confidence")
+    properties = _native_edge_properties(rel_type, props)
+    properties.update(_json_object(props.get("properties")) or {})
     return GraphEdge(
-        id=edge_id,
+        id=str(props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"),
         sourceUrn=source_urn,
         targetUrn=target_urn,
         edgeType=str(rel_type),
-        confidence=props.get("confidence"),
-        properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+        confidence=float(conf) if _is_number(conf) else None,
+        properties=properties,
     )
 
 
@@ -16090,23 +16142,29 @@ class FalkorDBProvider(GraphDataProvider):
         back — SETting the patch alone replaced the bag and dropped every property it didn't
         name. (Two queries: a concurrent PATCH of the same edge can interleave; the versioned
         write path above this provider is what serialises edits.)
+
+        A relationship another tool wrote holds its properties natively as well
+        (:func:`_native_edge_properties`): they are read as the edge's, and one the patch removes
+        is removed natively too — else the next read would bring it back.
         """
         await self._ensure_connected()
         try:
             read = await self._query(
-                "MATCH ()-[r]->() WHERE r.id = $eid RETURN r.properties LIMIT 1",
+                "MATCH ()-[r]->() WHERE r.id = $eid RETURN type(r), properties(r) LIMIT 1",
                 params={"eid": edge_id},
             )
             if not read.result_set:
                 return None
-            raw = read.result_set[0][0]
-            existing = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+            rel, raw = read.result_set[0][0], dict(read.result_set[0][1] or {})
+            patched = apply_properties_patch(_edge_from_row("", "", rel, raw).properties, properties)
+            gone = {k: None for k in _native_edge_properties(rel, raw)
+                    if k not in patched and k != "properties"}
             result = await self._query(
                 "MATCH (a)-[r]->(b) WHERE r.id = $eid "
-                "SET r.properties = $props "
+                "SET r += $gone SET r.properties = $props "
                 "RETURN a.urn, b.urn, type(r), properties(r)",
-                params={"eid": edge_id,
-                        "props": json.dumps(apply_properties_patch(existing, properties))},
+                params={"eid": edge_id, "gone": gone,
+                        "props": json.dumps(patched, default=from_cell)},
             )
             if not result.result_set:
                 return None

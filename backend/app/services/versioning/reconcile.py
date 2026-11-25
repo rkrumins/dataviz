@@ -64,7 +64,7 @@ _NOT_DERIVED = config.not_derived_clause("n")
 
 # Reuse the reader/projector's label sanitiser so the deep check compares against the SAME
 # label the projector wrote (``_sanitize_label(entityType)``), not the raw ontology type.
-from backend.app.providers.falkordb_provider import _sanitize_label
+from backend.app.providers.falkordb_provider import _edge_from_row, _sanitize_label
 from backend.common.derived_artifacts import DERIVED_LABELS
 
 logger = logging.getLogger(__name__)
@@ -377,8 +377,11 @@ async def rollup_health(client) -> RollupHealth:
 # is consistent.
 _SCAN_NODES = (f"MATCH (n) WHERE {_NOT_DERIVED} AND n.entityId IS NOT NULL "
                "RETURN n.entityId, n.urn, n.displayName, labels(n) ORDER BY n.entityId SKIP $s LIMIT $l")
+# Edges RETURN the whole relationship: a customer's key holds an edge's properties ON it as well as
+# in the ``r.properties`` bag, and the reader (``_edge_from_row``) decides which are the edge's. Ids
+# compare as text, as history holds them (another tool may have written a number).
 _SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT NULL "
-               "RETURN r.id, type(r), r.confidence, r.properties ORDER BY r.id SKIP $s LIMIT $l")
+               "RETURN toString(r.id) AS rid, type(r), properties(r) ORDER BY rid SKIP $s LIMIT $l")
 
 _PG_BATCH = 5000      # keyset page size for the Postgres entity_heads stream
 
@@ -762,9 +765,11 @@ class ProjectionReconciler:
                     extra.append(item[0])
                 else:
                     truncated = True
-            elif deep:                                   # ("match", (pg, fk)); fk = [r.id, type, conf, props]
+            elif deep:                                   # ("match", (pg, fk)); fk = [r.id, type, properties(r)]
                 pg, fk = item
-                for fname, pg_val, fk_val in _edge_field_mismatches(pg, fk[1], fk[2], fk[3]):
+                edge = _edge_from_row("", "", fk[1], dict(fk[2] or {}))
+                for fname, pg_val, fk_val in _edge_field_mismatches(pg, fk[1], edge.confidence,
+                                                                    edge.properties):
                     if len(mismatched) < sample_limit:
                         mismatched.append({"entityId": pg["entityId"], "field": fname,
                                            "pg": pg_val, "falkor": fk_val})

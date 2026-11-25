@@ -126,6 +126,7 @@ tests/test_export_plan_budget.py
 tests/test_export_selection_route.py
 tests/test_export_view_scope.py
 tests/test_falkor_indexes.py
+tests/test_falkordb_edge_attributes.py
 tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py

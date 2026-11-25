@@ -883,9 +883,11 @@ def _delete_nodes_cypher(label: str) -> str:
 def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     # Anchored + typed: found between its two ends (``_between``), never by walking one end's
     # relationships, which a container holds hundreds of thousands of. ``item.pid`` is the id a
-    # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``).
+    # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``). Compared
+    # as text: history holds every id as text, and a customer's relationship keeps its own id,
+    # which another tool may have written as a number.
     return (f"UNWIND $batch AS item {_between(rel_type, src_label, tgt_label)} "
-            f"WHERE r.id IN [item.eid, item.pid] DELETE r")
+            f"WHERE toString(r.id) IN [item.eid, item.pid] DELETE r")
 
 
 # Heal-path sweep: match the deleted node by (label, committed urn) — the

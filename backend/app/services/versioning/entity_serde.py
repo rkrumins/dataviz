@@ -21,7 +21,9 @@ Canonical shapes (historically ``versioned_branch_provider._node_payload`` / ``_
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping
+import json
+import math
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from backend.common.models.graph import GraphEdge, GraphNode
 
@@ -143,3 +145,169 @@ def payload_to_node(entity_id: str, payload: Mapping) -> GraphNode:
     data.setdefault("entityType", payload.get("entityType") or "unknown")
     data.setdefault("displayName", payload.get("displayName") or "")
     return GraphNode.model_validate(data)
+
+
+# --------------------------------------------------------------------------------------------- #
+# A SOURCE graph's node, as version history keeps it (docs/versioning/14-graph-lifecycle-v2.md   #
+# §9). The serving reader (``falkordb_provider._node_from_props``) shows a node the way the       #
+# platform wrote it; a graph another tool built may use the platform's own names for its data,   #
+# or hold a value a field can't take — the copy keeps every one of them.                        #
+# --------------------------------------------------------------------------------------------- #
+
+#: A source node's keys that are the PLATFORM's derived bookkeeping, never a person's data: the
+#: copy leaves them out (the projector derives them again).
+SOURCE_DERIVED_NODE_KEYS = frozenset({
+    "gvHash", "searchableText", "level", "levelDigest", "childCount", "urnSource", "nameSource",
+})
+#: Where the copy keeps a source property whose name the platform keeps for itself.
+SOURCE_KEY_PREFIX = "__src."
+_TEXT_FIELDS = ("displayName", "qualifiedName", "description", "layerAssignment",
+                "sourceSystem", "lastSyncedAt")
+_NAME_FALLBACKS = ("name", "title", "label")
+
+
+def _source_tags(value: Any) -> Optional[list]:
+    """A source node's ``tags`` as the node's tags: a list of text, or a JSON list of text in a
+    string (as the platform writes it); None for anything else."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(value, list) and all(isinstance(t, str) for t in value):
+        return value
+    return None
+
+
+def source_node_payload(props: Mapping, label: Optional[str]) -> Optional[dict]:
+    """A source graph's node (``properties(n)`` and its label) → canonical node payload, keeping
+    every property it holds. None when it has no urn (the reader can't see it either).
+
+    * A key the platform doesn't reserve is a property, as the reader has it.
+    * A reserved name fills the node's own field when it holds what the field takes (``urn``,
+      text ``displayName``/``description``/…, ``tags`` as a list of text, an ``entityType`` when
+      the node has no label).
+    * The platform's own bookkeeping (:data:`SOURCE_DERIVED_NODE_KEYS`), an ``entityId`` that is
+      the urn and an ``entityType`` that is the label are left out: they say nothing new.
+    * A ``properties`` / ``propertiesRaw`` JSON object (the platform's bag) is unpacked; a key
+      the node holds natively wins.
+    * Anything else under a reserved name is kept as ``__src.<name>``: an ``entityId`` of the
+      source's own, a numeric ``description``, a ``properties`` that is plain text.
+
+    A ``name``/``title``/``label`` that is a number still names the node (as its text); the
+    property keeps the number. An ordinary node's payload is exactly the reader's."""
+    from backend.app.providers.falkordb_provider import (
+        _RESERVED_NODE_KEYS, _json_object, _node_from_props,
+    )
+    urn = props.get("urn")
+    clean: Dict[str, Any] = {}
+    native: Dict[str, Any] = {}
+    kept: Dict[str, Any] = {}
+    bags = []
+    for k, v in props.items():
+        if k not in _RESERVED_NODE_KEYS:
+            native[k] = v
+        elif v is None or k in SOURCE_DERIVED_NODE_KEYS:
+            continue
+        elif k == "urn":
+            clean[k] = v
+        elif k == "entityId":
+            if v != urn:
+                kept[k] = v
+        elif k == "entityType":
+            if not label and isinstance(v, str):
+                clean[k] = v
+            elif v != label:
+                kept[k] = v
+        elif k in ("properties", "propertiesRaw"):
+            bag = _json_object(v)
+            if bag is None:
+                kept[k] = v
+            else:
+                bags.append(bag)
+        elif k == "tags":
+            tags = _source_tags(v)
+            if tags is None:
+                kept[k] = v
+            else:
+                clean[k] = tags
+        elif k in _TEXT_FIELDS and isinstance(v, str):
+            clean[k] = v
+        else:
+            kept[k] = v
+    for k in _NAME_FALLBACKS:
+        v = native.get(k)
+        if isinstance(v, str):
+            clean[k] = v
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            clean[k] = str(v)
+    node = _node_from_props(clean, label)
+    if node is None:
+        return None
+    properties = dict(native)
+    for bag in bags:
+        for k, v in bag.items():
+            if k in _RESERVED_NODE_KEYS:
+                kept.setdefault(k, v)
+            else:
+                properties.setdefault(k, v)
+    properties.update({f"{SOURCE_KEY_PREFIX}{k}": v for k, v in kept.items()})
+    payload = node.model_dump(by_alias=True, exclude_none=True)
+    payload["properties"] = properties
+    return payload
+
+
+# --------------------------------------------------------------------------------------------- #
+# Values Postgres JSONB can hold                                                                #
+# --------------------------------------------------------------------------------------------- #
+
+#: What :func:`storable` had to change, by kind: a NaN or infinite number (JSONB has no such
+#: number), a NUL character (JSONB text can't hold one), a value of a kind JSON doesn't have.
+STORABLE_PROBLEMS = ("nan", "infinity", "nul", "unsupported")
+
+
+def storable(value: Any, path: str = "") -> Tuple[Any, List[Dict[str, str]]]:
+    """``value`` as version history can store it, and what had to change.
+
+    A date, a moment, a time of day or a duration is stored the one way the platform stores
+    them (``moments.from_cell``) — nothing is lost, so nothing is reported. Every other change is
+    reported, ``{path, problem, value}``, so a person decides about it: NaN and ±infinity as the
+    text ``"NaN"``/``"Infinity"``/``"-Infinity"``, a NUL character removed (from text or a key),
+    a value of a kind JSON doesn't have as its text."""
+    from backend.common.moments import from_cell
+    issues: List[Dict[str, str]] = []
+
+    def walk(v: Any, at: str) -> Any:
+        if v is None or isinstance(v, (bool, int)):
+            return v
+        if isinstance(v, float):
+            if math.isfinite(v):
+                return v
+            text = "NaN" if math.isnan(v) else ("Infinity" if v > 0 else "-Infinity")
+            issues.append({"path": at, "problem": "nan" if math.isnan(v) else "infinity",
+                           "value": text})
+            return text
+        if isinstance(v, str):
+            if "\x00" not in v:
+                return v
+            issues.append({"path": at, "problem": "nul", "value": v.replace("\x00", "")[:200]})
+            return v.replace("\x00", "")
+        if isinstance(v, (list, tuple)):
+            return [walk(x, f"{at}[{i}]") for i, x in enumerate(v)]
+        if isinstance(v, dict):
+            out = {}
+            for k, x in v.items():
+                key = str(k)
+                if "\x00" in key:
+                    issues.append({"path": f"{at}.{key.replace(chr(0), '')}".lstrip("."),
+                                   "problem": "nul", "value": key.replace("\x00", "")})
+                    key = key.replace("\x00", "")
+                out[key] = walk(x, f"{at}.{key}".lstrip("."))
+            return out
+        converted = from_cell(v)
+        if converted is not v:
+            return converted
+        issues.append({"path": at, "problem": "unsupported", "value": str(v)[:200]})
+        return str(v)
+
+    return walk(value, path), issues

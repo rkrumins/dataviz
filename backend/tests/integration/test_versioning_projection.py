@@ -138,9 +138,12 @@ class FakeGraph:
                           key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
         if cypher == _SCAN_EDGES:
-            # RETURN r.id, type(r), r.confidence, r.properties (r.id == eid; parallel edges already
+            # RETURN toString(r.id), type(r), properties(r) (r.id == eid; parallel edges already
             # collapsed to one entry in self.edges by the MERGE interpreter above)
-            rows = sorted(([eid, e.get("type"), e.get("conf"), e.get("props")]
+            rows = sorted(([eid, e.get("type"), {k: v for k, v in (
+                               ("id", eid), ("confidence", e.get("conf")),
+                               ("properties", e.get("props")), ("gvHash", e.get("gvHash")))
+                               if v is not None}]
                            for eid, e in self.edges.items()
                            if e.get("type") != "AGGREGATED" and eid is not None),
                           key=lambda r: r[0])

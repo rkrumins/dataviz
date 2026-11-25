@@ -97,7 +97,7 @@ def test_edge_deletes_are_typed_and_anchored_and_never_scan():
     }
     _run(p._apply(client, [], [], [], [resolved]))
     typed = [c for c in client.cyphers()
-             if "-[r:FLOWS]->" in c and "WHERE r.id IN [item.eid, item.pid] DELETE r" in c]
+             if "-[r:FLOWS]->" in c and "WHERE toString(r.id) IN [item.eid, item.pid] DELETE r" in c]
     assert typed, f"no typed anchored edge delete: {client.cyphers()}"
     assert all("(a:Table {urn: item.src})" in c for c in typed)
     # No delete matches every relationship by id: one with no known position was never written.
@@ -165,7 +165,7 @@ def test_a_pass_writes_and_matches_the_graph_own_spelling_of_its_types():
     assert "MATCH (a:table {urn: item.src})" in written and "MERGE (a)-[r:flows]->(b)" in written
     assert "MATCH (n:table {urn: u}) DETACH DELETE n" in written
     assert ("MATCH (b:Dataset {urn: item.tgt}) WITH item, a, b MATCH (a)-[r:flows]->(b) "
-            "WHERE r.id IN") in written
+            "WHERE toString(r.id) IN") in written
     assert ":Dataset" in written
     assert ":Table" not in written and ":FLOWS" not in written, written
 

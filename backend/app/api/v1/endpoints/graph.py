@@ -696,8 +696,11 @@ async def resync_versioned_graph_endpoint(
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
-    except BootstrapFailure as exc:                 # a server that cuts replies short
-        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",
+    except BootstrapFailure as exc:
+        if exc.code != "infrastructure":            # what the graph holds, said as such
+            raise HTTPException(status_code=422, detail={"type": "integrity",
+                                                         "message": exc.reason})
+        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",  # replies cut short
                                                      "message": str(exc)})
     except AmbiguousSpelling as exc:                # a type the graph spells two ways
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
