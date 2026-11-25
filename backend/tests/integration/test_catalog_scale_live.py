@@ -20,6 +20,7 @@ Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
 from __future__ import annotations
 
 import json
+import math
 import os
 import statistics
 import time
@@ -43,7 +44,7 @@ SCHEDULES = ["daily", "hourly", "weekly"]
 
 #: What each statement a catalog sends is, by what it says.
 KINDS = [("properties(e)", "bag page"), ("propertiesRaw", "raw page"), ("UNWIND keys", "keys"),
-         ("LIMIT $_probe", "probe"), ("IN ['Integer', 'Float']", "bounds"),
+         ("LIMIT $_probe", "probe"), ("min(CASE WHEN", "bounds"),
          ("collect([_t", "values"), ("count(e)", "count"), ("count(n)", "count"),
          ("n.tags AS _t", "tags")]
 
@@ -140,7 +141,7 @@ async def _timed_catalog(provider, subject):
     def summary(ms):
         ms = sorted(ms)
         return {"n": len(ms), "median": round(statistics.median(ms), 1),
-                "p95": round(ms[int(0.95 * (len(ms) - 1))], 1), "max": round(ms[-1], 1)}
+                "p95": round(ms[max(0, math.ceil(0.95 * len(ms)) - 1)], 1), "max": round(ms[-1], 1)}
 
     return out, {"seconds": round(time.monotonic() - started, 1), "requests": requests,
                  "statements": {k: summary(v) for k, v in sorted(timings.items())}}

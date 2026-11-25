@@ -862,7 +862,17 @@ inside one:
 - the tag-set cutoff is one row inside the cap.
 
 **Measured.** The CI step "Property catalogs at scale"
-(`test_catalog_scale_live.py`) reads about a million relationships across
-eleven types, one entity a hub with half a million. Half keep their
-properties natively and half in the bag. Each statement of both catalogs is
-timed into the `CATALOG_SCALE_REPORT` line.
+(`test_catalog_scale_live.py`, the `CATALOG_SCALE_REPORT` line) reads
+999,980 relationships across eleven types. One entity is a hub with 499,990
+of them. Half keep their properties natively and half in the bag. Every
+count is exact.
+
+| | |
+|---|---:|
+| Complete | 68.5 s, 6 requests |
+| Bag pages (114 statements) | median 0.69 s, p95 1.25 s, max 1.48 s |
+| Slowest statement of any kind | 1.76 s |
+| The entity catalog of the same graph's 50,001 entities | 0.1 s |
+
+No statement came near the per-unit budget, so the hub's band was read whole.
+The hub split by edge-ID band (§16) is the fallback for one that does.
