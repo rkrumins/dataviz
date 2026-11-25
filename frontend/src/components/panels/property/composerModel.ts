@@ -59,7 +59,7 @@ export function parsePastedLines(text: string): PastedProperty[] {
 /** What others of this entity's type say of a property: how many carry it, an example, its usual type. */
 export interface PropertySuggestion {
   key: string
-  /** How many other entities of this type carry it. */
+  /** How many other entities of this type carry it — 0 when not counted (a sample's names). */
   count: number
   examples: string[]
   type?: FieldType

@@ -7,8 +7,12 @@
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/providers/GraphProviderContext', () => ({ useGraphProvider: () => null }))
-vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
+const { provider, notify } = vi.hoisted(() => ({
+  provider: { current: null as null | { getEdges: ReturnType<typeof vi.fn> } },
+  notify: vi.fn(),
+}))
+vi.mock('@/providers/GraphProviderContext', () => ({ useGraphProvider: () => provider.current }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
 import { useCanvasInteractions } from '../useCanvasInteractions'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
@@ -35,6 +39,8 @@ beforeEach(() => {
     } as unknown as WorkspaceSchema,
   })
   useStagedChangesStore.setState({ changes: [], redoStack: [] } as never)
+  provider.current = null
+  notify.mockClear()
 })
 
 describe('stageEdgeCreateMany', () => {
@@ -133,5 +139,34 @@ describe('reverseEdge', () => {
     const reversed = useCanvasStore.getState().edges.find((e) => e.id === change.targetId)
     expect(reversed).toMatchObject({ source: 'r1', target: 't2', data: { isPending: 'create' } })
     expect(useCanvasStore.getState().edges.some((e) => e.id === 'e0')).toBe(false)
+  })
+
+  it('keeps what the relationship holds — handed over by the drawer, the canvas line carrying none', () => {
+    const { result } = renderHook(() => useCanvasInteractions())
+    act(() => { void result.current.reverseEdge('e0', { properties: { owner: 'ana' }, confidence: 0.8 }) })
+    const [change] = useStagedChangesStore.getState().changes
+    expect(change.after).toMatchObject({ properties: { owner: 'ana' }, confidence: 0.8 })
+  })
+
+  it('reads what it holds when nothing hands it over (the canvas menu), as the draft has it', async () => {
+    provider.current = {
+      getEdges: vi.fn(async () => [{ id: 'e0', sourceUrn: 't2', targetUrn: 'r1', edgeType: 'FLOWS_TO', confidence: 0.6, properties: { owner: 'ana' } }]),
+    }
+    useStagedChangesStore.getState().stage({ type: 'edit_edge', targetId: 'e0', before: { properties: { owner: 'ana' } }, after: { properties: { owner: 'bo' } }, summary: 'Edit' })
+    const { result } = renderHook(() => useCanvasInteractions())
+    await act(async () => { await result.current.reverseEdge('e0') })
+    expect(provider.current.getEdges).toHaveBeenCalledWith({ sourceUrns: ['t2'], targetUrns: ['r1'] })
+    const change = useStagedChangesStore.getState().changes.find((c) => c.type === 'reverse_edge')!
+    // Its staged edit goes with it: what the drawer shows is what moves.
+    expect(change.after).toMatchObject({ properties: { owner: 'bo' }, confidence: 0.6 })
+  })
+
+  it('reverses nothing when what it holds can’t be read — its properties would be lost', async () => {
+    provider.current = { getEdges: vi.fn(async () => { throw new Error('offline') }) }
+    const { result } = renderHook(() => useCanvasInteractions())
+    await act(async () => { await result.current.reverseEdge('e0') })
+    expect(useStagedChangesStore.getState().changes).toEqual([])
+    expect(useCanvasStore.getState().edges.map((e) => e.id)).toEqual(['e0'])
+    expect(notify).toHaveBeenCalledWith('error', expect.stringMatching(/wasn’t reversed/))
   })
 })

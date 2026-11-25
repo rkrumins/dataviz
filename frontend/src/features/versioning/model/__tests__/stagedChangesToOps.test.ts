@@ -150,6 +150,28 @@ describe('stagedChangesToOps', () => {
       { op: 'create', kind: 'edge', ref: 'staged-edge-3', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:b' } },
     ])
   })
+
+  it('a new relationship is created with the properties and confidence it was given before it was saved', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'create_edge', targetId: 'staged-edge-4', after: { edgeType: 'FLOWS_TO', source: 'urn:a', target: 'urn:b', properties: { owner: 'ana' }, confidence: 0.7 } }),
+      sc({ type: 'create_edge', targetId: 'staged-edge-5', after: { edgeType: 'FLOWS_TO', source: 'urn:b', target: 'urn:c', properties: {} } }),
+    ])
+    expect(ops.map((o) => o.payload)).toEqual([
+      { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:a', targetEntityId: 'urn:b', properties: { owner: 'ana' }, confidence: 0.7 },
+      { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:b', targetEntityId: 'urn:c' },
+    ])
+  })
+
+  it('a reversed relationship keeps the properties and confidence of the one it replaces', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'reverse_edge', targetId: 'staged-edge-6', before: { edge: { id: 'e9' } },
+        after: { edge: { edgeType: 'FLOWS_TO', source: 'urn:b', target: 'urn:a' }, properties: { owner: 'ana', sla: '1h' }, confidence: 0.9 } }),
+    ])
+    expect(ops[1]).toEqual({
+      op: 'create', kind: 'edge', ref: 'staged-edge-6',
+      payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:b', targetEntityId: 'urn:a', properties: { owner: 'ana', sla: '1h' }, confidence: 0.9 },
+    })
+  })
 })
 
 /**

@@ -122,8 +122,8 @@ export function EntityHeader({
             <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">Deleted in this draft</span>
           </div>
           <p className="text-xs text-ink-muted mb-3">
-            Removed on this branch — it disappears once the draft merges. Restore to bring it back
-            (nested under its parent when that parent still exists).
+            Removed on this branch — it disappears once the draft merges. Restore brings it back as
+            it was, with the links and relationships its deletion took with it.
           </p>
           <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}
             className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">

@@ -20,6 +20,14 @@ import { mapWithConcurrency } from '@/lib/concurrency'
 import { validateDrawnEdge } from '@/services/ontologyPreflightService'
 import { judgePairs, type LinkPair, type PairVerdict } from '@/lib/bulkLinks'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
+import { stagedIndexOf } from '@/store/stagedIndex'
+import { pickRelationship } from './useRelationshipRecord'
+
+/** What a relationship holds that its canvas line doesn't carry — kept by its reversal. */
+export interface HeldByEdge {
+    properties?: Record<string, unknown>
+    confidence?: number
+}
 
 /** The ontology a batch of links is judged by. */
 export interface LinkOntology {
@@ -127,7 +135,9 @@ export interface UseCanvasInteractionsResult {
     // Edge CRUD Actions
     editEdge: (edgeId: string) => void
     deleteEdge: (edgeId: string) => void
-    reverseEdge: (edgeId: string) => void
+    /** Stage the edge pointing the other way — saved as a new relationship, with what this one
+     *  holds (`held`, as the drawer read it; read here when not given). */
+    reverseEdge: (edgeId: string, held?: HeldByEdge) => Promise<void>
     /** Stage a new RAW edge between two nodes (optimistic + create_edge change). Returns the temp
      *  edge id, or `null` when the ontology gate rejects it (invalid type/endpoints or duplicate). */
     stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
@@ -496,7 +506,7 @@ export function useCanvasInteractions(
         onEdgeDeleted?.(edgeId)
     }, [onEdgeDeleted])
 
-    const reverseEdge = useCallback((edgeId: string) => {
+    const reverseEdge = useCallback(async (edgeId: string, held?: HeldByEdge) => {
         const edge = useCanvasStore.getState().edges.find(e => e.id === edgeId)
         if (!edge) return
 
@@ -508,6 +518,25 @@ export function useCanvasInteractions(
         if (containmentEdgeTypes.some(c => c.toUpperCase() === edgeTypeUpper)) {
             notify('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
             return
+        }
+
+        // The reversed one is saved as a new relationship, with what this one holds — which the
+        // canvas line doesn't carry: the drawer hands over its own read; from anywhere else it is
+        // read here, its staged edit applied. Unread, nothing is reversed rather than lose them.
+        if (!held && provider) {
+            try {
+                const between = await provider.getEdges({ sourceUrns: [edge.source], targetUrns: [edge.target] })
+                const record = pickRelationship(between, { id: edge.id, source: edge.source, target: edge.target, edgeType: edgeTypeUpper })
+                const staged = record && stagedIndexOf(useStagedChangesStore.getState().changes).edgeEdit.get(record.id)
+                held = record ? {
+                    properties: (staged?.after as { properties?: Record<string, unknown> } | undefined)?.properties ?? record.properties,
+                    confidence: record.confidence,
+                } : {}
+            } catch {
+                notify('error', 'Couldn’t read this relationship, so it wasn’t reversed — its properties would have been lost. Try again.')
+                return
+            }
+            if (!useCanvasStore.getState().edges.some(e => e.id === edgeId)) return
         }
 
         // A temp id: the save sends the reversed edge as a create, and the server mints its real one.
@@ -527,7 +556,11 @@ export function useCanvasInteractions(
             type: 'reverse_edge',
             targetId: reversedId,
             before: { edge: { ...edge } },
-            after: { edge: reversed },
+            after: {
+                edge: reversed,
+                ...(held?.properties && Object.keys(held.properties).length > 0 ? { properties: held.properties } : {}),
+                ...(typeof held?.confidence === 'number' ? { confidence: held.confidence } : {}),
+            },
             summary: `Reverse edge ${edge.source} → ${edge.target}`,
             discard: () => {
                 useCanvasStore.getState().removeEdge(reversedId)
@@ -538,7 +571,7 @@ export function useCanvasInteractions(
                 useCanvasStore.getState().addEdges([reversed])
             },
         })
-    }, [notify])
+    }, [notify, provider])
 
     const stageEdgeCreate = useCallback((sourceUrn: string, targetUrn: string, edgeType: string) => {
         // Ontology gate before we stage anything: lineage-only (no hand-drawn containment), valid

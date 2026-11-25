@@ -46,6 +46,23 @@ describe('stageEdgeEdits', () => {
     expect(changes()).toEqual([])
   })
 
+  it('a relationship not saved yet — drawn, or reversed — keeps its properties on the change that makes it', () => {
+    useStagedChangesStore.getState().stage({ type: 'create_edge', targetId: 'tmp1', after: { edgeType: 'FLOWS_TO', source: 'a', target: 'b' }, summary: 'Create' })
+    useStagedChangesStore.getState().stage({ type: 'reverse_edge', targetId: 'tmp2', before: { edge: { id: 'e9' } },
+      after: { edge: { id: 'tmp2', source: 'c', target: 'a' }, properties: { owner: 'ana' } }, summary: 'Reverse' })
+    stageEdgeEdits([
+      { edgeId: 'tmp1', current: { properties: {} }, after: { owner: 'bo' }, summary: 'Edit' },
+      { edgeId: 'tmp2', current: { properties: { owner: 'ana' } }, after: { owner: 'ana', tier: 'gold' }, summary: 'Edit' },
+    ])
+    expect(changes().map((c) => [c.type, c.targetId, c.after, c.summary])).toEqual([
+      ['create_edge', 'tmp1', { edgeType: 'FLOWS_TO', source: 'a', target: 'b', properties: { owner: 'bo' } }, 'Create'],
+      ['reverse_edge', 'tmp2', { edge: { id: 'tmp2', source: 'c', target: 'a' }, properties: { owner: 'ana', tier: 'gold' } }, 'Reverse'],
+    ])
+    // One Undo step takes both back.
+    useStagedChangesStore.getState().undo()
+    expect(changes().map((c) => (c.after as { properties?: unknown }).properties)).toEqual([undefined, { owner: 'ana' }])
+  })
+
   it('a batch is one Undo step, and Undo puts back what each relationship had staged', () => {
     stageEdgeEdits([edit('e1', { owner: 'bo', sla: '1h' })])
     const before = changes()

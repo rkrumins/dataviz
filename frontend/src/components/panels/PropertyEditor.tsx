@@ -1408,7 +1408,8 @@ export function PropertyComposer({
                   <span className="font-mono text-ink truncate">{o.key}</span>
                   <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted truncate max-w-[55%]">
                     {o.recent ? 'You used it recently'
-                      : `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}${o.examples[0] ? ` · e.g. ${o.examples[0]}` : ''}`}
+                      : [o.count > 0 && `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}`, o.examples[0] && `e.g. ${o.examples[0]}`]
+                        .filter(Boolean).join(' · ')}
                   </span>
                 </>)}
               />
