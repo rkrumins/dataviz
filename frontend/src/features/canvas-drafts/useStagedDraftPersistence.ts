@@ -27,7 +27,8 @@ import { overlayOnReplace, type MoveAfter } from '@/store/stagedOverlay'
 import type { LineageEdge, LineageNode } from '@/store/canvas'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { layoutWriter } from '@/store/canvasLayoutBridge'
-import { assignEntities } from '@/components/canvas/context-view/assignmentMutations'
+import { assignEntities, restoreAssignment } from '@/components/canvas/context-view/assignmentMutations'
+import type { LayerAssignmentEntry } from '@/types/schema'
 import { clearPendingSave, getPendingSave, resumePendingSave } from '@/features/versioning/model/saveStagedChangesToDraft'
 import {
   clearSnapshot,
@@ -68,11 +69,17 @@ function rebuildDiscard(change: SerializableChange): (() => void) | undefined {
     }
     case 'move_entity': {
       const after = change.after as MoveAfter
-      const before = (change.before ?? {}) as { removedLinks?: LineageEdge[]; layout?: NormalizedReferenceLayout | null }
+      // `pin`: the moved entity's own placement before the move (a snapshot written before moves
+      // kept that alone carries the whole layout instead).
+      const before = (change.before ?? {}) as {
+        removedLinks?: LineageEdge[]; pin?: LayerAssignmentEntry | null; layout?: NormalizedReferenceLayout | null
+      }
       return () => {
         if (after.edgeId) cs().removeEdge(after.edgeId)
         if (before.removedLinks?.length) cs().addEdges(before.removedLinks)
-        if (before.layout) layoutWriter()?.persist(before.layout)
+        const w = layoutWriter()
+        if (w && 'pin' in before) w.persist(restoreAssignment(w.current(), after.childId, before.pin ?? null))
+        else if (before.layout) w?.persist(before.layout)
       }
     }
     default:

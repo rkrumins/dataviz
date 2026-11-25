@@ -202,6 +202,20 @@ export function unassignEntities(
   return { ...layout, assignments }
 }
 
+/** Put one entity's own entry back as it was (`entry`, or none) — and nothing else, so every other
+ *  layout edit made since stays. Returns the SAME layout when it already is. */
+export function restoreAssignment(
+  layout: NormalizedReferenceLayout,
+  urn: string,
+  entry: LayerAssignmentEntry | null,
+): NormalizedReferenceLayout {
+  if ((layout.assignments[urn] ?? null) === entry) return layout
+  const assignments = { ...layout.assignments }
+  if (entry) assignments[urn] = entry
+  else delete assignments[urn]
+  return { ...layout, assignments }
+}
+
 /**
  * Temp urn prefix minted by the create paths (useStageEntityCreation / stageBuildRows mint
  * `urn:staged:<type>:<id>`). A temp urn is never a durable, backend-issued urn.

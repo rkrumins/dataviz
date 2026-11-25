@@ -41,6 +41,8 @@ import { useReparentNode } from '../useReparentNode'
 import { useCanvasStore } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
+import { useStageEntityCreation } from '@/components/canvas/create/useStageEntityCreation'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 
 const node = (id: string, type: string) => ({ id, type: 'generic', position: { x: 0, y: 0 }, data: { label: id, urn: id, type } })
 const setCanvas = (nodes: unknown[], edges: unknown[] = []) =>
@@ -211,5 +213,199 @@ describe('useReparentNode — returning a PLACED entity to its parent (view only
     const { result } = renderHook(() => useReparentNode())
     expect(result.current.returnToParent('D', 'S')).toBe(false)
     expect(staged()).toHaveLength(0)
+  })
+})
+
+describe('useReparentNode — where a moved entity is shown, and what moves with it', () => {
+  // S1 ⊃ D; S2 empty. Columns: `systems` holds systems, `datasets` holds datasets, `other` holds none.
+  let layout: NormalizedReferenceLayout
+  let unregister: () => void
+  const nodeWith = (id: string, type: string, childCount?: number) =>
+    ({ ...node(id, type), data: { ...node(id, type).data, ...(childCount != null ? { childCount } : {}) } })
+  const count = (id: string) => useCanvasStore.getState().nodes.find((n) => n.id === id)?.data?.childCount
+  beforeEach(async () => {
+    notify.mockClear(); resetStaged()
+    useBranchStore.setState({ currentBranchId: 'br_1' } as never)
+    layout = {
+      layers: [
+        { id: 'systems', name: 'Systems', order: 0, entityTypes: ['system'] },
+        { id: 'datasets', name: 'Datasets', order: 1, entityTypes: ['dataset'] },
+        { id: 'other', name: 'Other', order: 2, entityTypes: [] },
+      ],
+      assignments: {},
+    }
+    const { registerLayoutWriter } = await import('@/store/canvasLayoutBridge')
+    unregister = registerLayoutWriter({ current: () => layout, persist: (next) => { layout = next } })
+    setCanvas([nodeWith('S1', 'system', 1), nodeWith('S2', 'system', 0), node('D', 'dataset')],
+      [{ id: 'S1-D', source: 'S1', target: 'D', data: { edgeType: 'CONTAINS' } }])
+  })
+  afterEach(() => unregister())
+
+  it('keeps a placement in a column that holds its type — the column it was put in by hand', () => {
+    layout.assignments.D = { layerId: 'datasets', inheritsChildren: true }
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    expect(layout.assignments.D).toEqual({ layerId: 'datasets', inheritsChildren: true })
+    expect(notify).toHaveBeenCalledWith('success', 'Moved under S2. It stays in Datasets, the column that holds its type.')
+  })
+
+  it('clears any other placement, so the entity follows its new parent', () => {
+    layout.assignments.D = { layerId: 'other', inheritsChildren: true }
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    expect(layout.assignments.D).toBeUndefined()
+  })
+
+  it('moves the child counts with it, and discard puts them back', () => {
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    expect([count('S1'), count('S2')]).toEqual([0, 1])
+    useStagedChangesStore.getState().discard(moves()[0].id)
+    expect([count('S1'), count('S2')]).toEqual([1, 0])
+  })
+
+  it('undoing a re-move steps the counts back one move at a time', () => {
+    setCanvas([nodeWith('S1', 'system', 1), nodeWith('S2', 'system', 0), nodeWith('S3', 'system', 0), node('D', 'dataset')],
+      [{ id: 'S1-D', source: 'S1', target: 'D', data: { edgeType: 'CONTAINS' } }])
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    result.current.reparent('D', 'S3')
+    expect(moves()).toHaveLength(1)
+    expect([count('S1'), count('S2'), count('S3')]).toEqual([0, 0, 1])
+    useStagedChangesStore.getState().undo()
+    expect([count('S1'), count('S2'), count('S3')]).toEqual([0, 1, 0])
+    expect(parentLinks('D').map((e) => e.source)).toEqual(['S2'])
+    useStagedChangesStore.getState().undo()
+    expect([count('S1'), count('S2'), count('S3')]).toEqual([1, 0, 0])
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['S1-D'])
+  })
+
+  it('discarding a move puts back only its own placement — a layout edit made since stays', () => {
+    layout.assignments.D = { layerId: 'other', inheritsChildren: true }
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S2')
+    expect(layout.assignments.D).toBeUndefined()
+    // A later, unrelated layout edit.
+    layout = { ...layout, assignments: { ...layout.assignments, S2: { layerId: 'systems', inheritsChildren: true } } }
+    useStagedChangesStore.getState().discard(moves()[0].id)
+    expect(layout.assignments.D).toEqual({ layerId: 'other', inheritsChildren: true })
+    expect(layout.assignments.S2).toEqual({ layerId: 'systems', inheritsChildren: true })
+  })
+
+  it('to the top level only where its type may stand alone, and not when it is there already', () => {
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.topLevelVerdict('D')).toEqual({ kind: 'blocked', hint: 'A Dataset needs a parent', message: "A dataset can't stand on its own — it needs a parent.", tone: 'error' })
+    expect(result.current.topLevelVerdict('S2')).toEqual({ kind: 'none' })
+  })
+
+  it('to the top level: one move with no parent, shown in the column that holds its type', () => {
+    // A system (one of the ontology's roots) that sits inside another.
+    setCanvas([nodeWith('S1', 'system', 1), node('S9', 'system')],
+      [{ id: 'S1-S9', source: 'S1', target: 'S9', data: { edgeType: 'CONTAINS' } }])
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.topLevelVerdict('S9')).toEqual({ kind: 'data', edgeType: null })
+    result.current.moveToTopLevel('S9')
+    expect(moves()).toHaveLength(1)
+    expect(moves()[0].after).toMatchObject({ childId: 'S9', parentId: null, edgeId: null, edgeType: null })
+    expect(moves()[0].summary).toBe("Move 'S9' from 'S1' to the top level")
+    expect(parentLinks('S9')).toHaveLength(0)
+    expect(count('S1')).toBe(0)
+    expect(layout.assignments.S9).toMatchObject({ layerId: 'systems' })
+    expect(notify).toHaveBeenCalledWith('success', 'Moved to the top level, shown in Systems.')
+    useStagedChangesStore.getState().discard(moves()[0].id)
+    expect(parentLinks('S9').map((e) => e.id)).toEqual(['S1-S9'])
+    expect(layout.assignments.S9).toBeUndefined()
+    expect(count('S1')).toBe(1)
+  })
+})
+
+describe('useReparentNode — the canvas\'s gates', () => {
+  let unregister: () => void
+  beforeEach(() => {
+    notify.mockClear(); resetStaged()
+    useBranchStore.setState({ currentBranchId: 'br_1' } as never)
+    setCanvas([node('S', 'system'), node('D', 'dataset')])
+  })
+  afterEach(() => unregister?.())
+
+  it('a move the canvas refuses is said, and nothing is staged', async () => {
+    const { registerMoveHost } = await import('@/store/canvasLayoutBridge')
+    unregister = registerMoveHost({
+      blocked: () => ({ hint: 'A trace is read-only', message: 'A trace is read-only — leave it to move an entity to a different parent.' }),
+      columnOf: () => undefined, isDrawn: () => true, moved: vi.fn(),
+    })
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.verdict('D', 'S')).toMatchObject({ kind: 'blocked', hint: 'A trace is read-only' })
+    result.current.reparent('D', 'S')
+    expect(staged()).toHaveLength(0)
+    expect(notify).toHaveBeenCalledWith('info', 'A trace is read-only — leave it to move an entity to a different parent.')
+  })
+
+  it('a move it takes opens the new parent', async () => {
+    const moved = vi.fn()
+    const { registerMoveHost } = await import('@/store/canvasLayoutBridge')
+    unregister = registerMoveHost({ blocked: () => null, columnOf: () => undefined, isDrawn: () => true, moved })
+    const { result } = renderHook(() => useReparentNode())
+    expect(result.current.verdict('D', 'S')).toEqual({ kind: 'data', edgeType: 'CONTAINS' })
+    result.current.reparent('D', 'S')
+    expect(moved).toHaveBeenCalledWith('D', 'S')
+  })
+})
+
+describe('useReparentNode — an entity created in this draft', () => {
+  const both = () => renderHook(() => ({ move: useReparentNode(), create: useStageEntityCreation() }))
+  const creates = () => staged().filter((c) => c.type === 'create_entity')
+  beforeEach(() => {
+    notify.mockClear(); resetStaged()
+    useBranchStore.setState({ currentBranchId: 'br_1' } as never)
+    setCanvas([node('S1', 'system'), node('S2', 'system')])
+  })
+
+  it('moves by pointing its create at the new parent — no move staged, one pending link', () => {
+    const { result } = both()
+    const temp = result.current.create.stageEntity({ entityType: 'dataset', displayName: 'New', parentUrn: 'S1', containmentEdgeType: 'CONTAINS' })
+    result.current.move.reparent(temp, 'S2')
+    expect(moves()).toHaveLength(0)
+    expect(creates()).toHaveLength(1)
+    expect(creates()[0].after).toMatchObject({ parentUrn: 'S2', containmentEdgeType: 'CONTAINS', parentLabel: 'S2' })
+    expect(creates()[0].summary).toBe("Create dataset: 'New' · CONTAINS S2")
+    expect(parentLinks(temp).map((e) => [e.id, e.source, e.data?.isPending])).toEqual([[`contains-S2-${temp}`, 'S2', 'create']])
+  })
+
+  it('Undo points it back under its first parent; discarding it still removes it', () => {
+    const { result } = both()
+    const temp = result.current.create.stageEntity({ entityType: 'dataset', displayName: 'New', parentUrn: 'S1', containmentEdgeType: 'CONTAINS' })
+    result.current.move.reparent(temp, 'S2')
+    useStagedChangesStore.getState().undo()
+    expect(creates()[0].after).toMatchObject({ parentUrn: 'S1' })
+    expect(parentLinks(temp).map((e) => e.source)).toEqual(['S1'])
+    useStagedChangesStore.getState().redo()
+    expect(parentLinks(temp).map((e) => e.source)).toEqual(['S2'])
+    useStagedChangesStore.getState().discard(creates()[0].id)
+    expect(staged()).toHaveLength(0)
+    expect(useCanvasStore.getState().nodes.some((n) => n.id === temp)).toBe(false)
+    expect(parentLinks(temp)).toHaveLength(0)
+  })
+
+  it('to the top level: its create loses its parent, and no link is left', () => {
+    const { result } = both()
+    const temp = result.current.create.stageEntity({ entityType: 'system', displayName: 'Inner', parentUrn: 'S1', containmentEdgeType: 'CONTAINS' })
+    result.current.move.moveToTopLevel(temp)
+    expect(moves()).toHaveLength(0)
+    expect(creates()[0].after).toMatchObject({ parentUrn: undefined, containmentEdgeType: undefined })
+    expect(creates()[0].summary).toBe("Create system: 'Inner'")
+    expect(parentLinks(temp)).toHaveLength(0)
+  })
+
+  it('discarding a NEW parent sends a saved entity moved under it back where it was', () => {
+    setCanvas([node('S1', 'system'), node('D', 'dataset')],
+      [{ id: 'S1-D', source: 'S1', target: 'D', data: { edgeType: 'CONTAINS' } }])
+    const { result } = both()
+    const fresh = result.current.create.stageEntity({ entityType: 'system', displayName: 'Fresh' })
+    result.current.move.reparent('D', fresh)
+    expect(moves()).toHaveLength(1)
+    useStagedChangesStore.getState().discard(creates()[0].id)
+    expect(staged()).toHaveLength(0)                                    // the move went with it
+    expect(parentLinks('D').map((e) => e.id)).toEqual(['S1-D'])          // back where it was
   })
 })

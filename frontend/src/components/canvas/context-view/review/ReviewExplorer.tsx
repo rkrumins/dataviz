@@ -662,7 +662,7 @@ function ChangeDetail({ change, several, depth = 'all', onShowAll }: {
 }
 
 /** A move, in words: where the entity sits now and where the save puts it. (Its raw `before` holds
- *  the undo state — the whole view layout — which is no reading matter.) */
+ *  the undo state — the links it replaced and its own placement — which is no reading matter.) */
 function MoveDetail({ change }: { change: StagedChange }) {
   const label = (id: string | null | undefined) => {
     if (!id) return null
