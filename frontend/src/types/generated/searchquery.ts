@@ -156,6 +156,10 @@ export type Status = 'complete' | 'running' | 'expired'
 export type Refresh = boolean
 export type Sessionid1 = string | null
 /**
+ * ``entities`` (the default) or ``relationships``.
+ */
+export type Subject = 'entities' | 'relationships'
+/**
  * A key whose every value the catalog keeps (up to 1,000) is listed, not only the 20 most held — for merging near-duplicate values.
  */
 export type Valuesfor = string | null
@@ -230,6 +234,7 @@ export type Sessionid2 = string
  */
 export type Stale = boolean
 export type Status1 = 'running' | 'complete'
+export type Subject1 = 'entities' | 'relationships'
 /**
  * Entities carrying any tag — null when a unit held too many distinct tag sets to count them.
  */
@@ -1238,11 +1243,18 @@ export interface Typecounts {
  * entity in its scope, not a sample. A large view takes more than one
  * request: send it again with the returned ``sessionId`` until ``status``
  * is ``complete``.
+ *
+ * ``subject`` ``relationships`` lists the properties of the relationships
+ * between the entities in its scope instead (never a rollup): the answer
+ * has the same shape — ``entities`` counts relationships, ``entityTypes``
+ * and ``byEntityType`` are relationship types, ``residual`` counts those
+ * held in a relationship's JSON — and no tags.
  */
 export interface SearchCatalogRequest {
     refresh?: Refresh
     scope: SearchScope
     sessionId?: Sessionid1
+    subject?: Subject
     valuesFor?: Valuesfor
     waitMs?: Waitms
 }
@@ -1257,6 +1269,7 @@ export interface SearchCatalogResult {
     sessionId: Sessionid2
     stale?: Stale
     status: Status1
+    subject?: Subject1
     tagged?: Tagged
     tags?: Tags
 }
