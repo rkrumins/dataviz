@@ -47,7 +47,7 @@ import pytest
 from falkordb.asyncio import FalkorDB
 from redis.asyncio import ConnectionPool
 
-from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.app.providers.falkordb_provider import FalkorDBProvider, _edge_from_row
 from backend.app.services.versioning import bootstrap_worker as bw
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.bootstrap_worker import (
@@ -438,9 +438,10 @@ async def test_an_edge_whose_id_was_a_node_keeps_it_and_a_delete_reaches_it(grap
         assert res.get("verify_error") is None and await _fresh(gid), (message, res)
 
     rels = await _rows(client, "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' "
-                               "RETURN type(r), r.id, r.properties")
+                               "RETURN type(r), r.id, properties(r)")
     assert [r[:2] for r in rels] == [["FLOWS", "X"]], rels
-    assert json.loads(rels[0][2]) == {"w": 2}
+    # Read as the app reads it: its own properties, and the JSON field for any past the budget.
+    assert _edge_from_row("", "", rels[0][0], rels[0][2]).properties == {"w": 2}
     assert await _rows(client, "MATCH (n:Table) RETURN n.urn ORDER BY n.urn") == [
         ["X"], ["Y"], ["urn:a"], ["urn:b"]], "only the edge was deleted"
     # The id the graph uses names the edge, never the node that shares it.
@@ -549,7 +550,7 @@ async def test_an_edit_of_a_relationship_another_tool_wrote_removes_what_it_remo
         await provider.close()
     (raw,) = [r[0] for r in await _rows(client, "MATCH ()-[r]->() RETURN properties(r)")]
     assert "old" not in raw, "removed from the relationship itself"
-    assert json.loads(raw["properties"]) == {"my prop": "v", "weight": 2}
+    assert _edge_from_row("urn:a", "urn:b", "FEEDS", raw).properties == {"my prop": "v", "weight": 2}
 
 
 # ── L7: something else keeps writing to the graph ────────────────────────────
@@ -930,9 +931,9 @@ async def test_a_graph_keeps_its_own_spelling_of_its_types(graph, monkeypatch):
     assert await _rows(client, "MATCH (n:table) RETURN n.urn, n.displayName ORDER BY n.urn") == [
         ["urn:t1", "t1 renamed"], ["urn:t2", "urn:t2"]]
     rels = await _rows(client, "MATCH (a)-[r:flows_to]->(b) "
-                               "RETURN a.urn, r.id, b.urn, r.properties ORDER BY r.id")
+                               "RETURN a.urn, r.id, b.urn, properties(r) ORDER BY r.id")
     assert [r[:3] for r in rels] == [["urn:t1", "f1", "urn:t2"], ["urn:t2", "f2", "urn:t1"]], rels
-    assert json.loads(rels[0][3]) == {"w": 2}
+    assert _edge_from_row(rels[0][0], rels[0][2], "flows_to", rels[0][3]).properties == {"w": 2}
     report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
         gid, deep=True)
     assert report.in_sync and not report.mismatched and not report.edge_mismatched, report
