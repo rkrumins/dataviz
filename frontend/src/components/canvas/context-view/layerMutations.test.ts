@@ -85,6 +85,10 @@ describe('removeLayer', () => {
   it('can empty the list', () => {
     expect(removeLayer([L('a', 'Alpha', 0)], 'a')).toEqual([])
   })
+  it('keeps the others in the order they are shown when the stored array is in another order', () => {
+    const out = removeLayer([L('a', 'A', 0), L('c', 'C', 2), L('b', 'B', 1)], 'a')
+    expect([...out].sort((x, y) => x.order - y.order).map((l) => l.id)).toEqual(['b', 'c'])
+  })
 })
 
 describe('reorderLayer', () => {
@@ -105,6 +109,20 @@ describe('reorderLayer', () => {
   it('is a no-op when either id is missing', () => {
     expect(reorderLayer(base(), 'a', 'zzz').map((l) => l.id)).toEqual(['a', 'b', 'c'])
     expect(reorderLayer(base(), 'zzz', 'a').map((l) => l.id)).toEqual(['a', 'b', 'c'])
+  })
+  // Saved layers are not always stored in the order they are shown (`order`): a wizard save or an
+  // API write can keep its own array order. Every move is in what the reader SEES.
+  const shown = (out: ViewLayerConfig[]) => [...out].sort((x, y) => x.order - y.order).map((l) => l.id)
+  const outOfOrder = () => [L('a', 'A', 0), L('c', 'C', 2), L('b', 'B', 1)]   // shown a, b, c
+
+  it('moves left in display order when the stored array is in another order', () => {
+    expect(shown(reorderLayer(outOfOrder(), 'c', 'b'))).toEqual(['a', 'c', 'b'])
+    expect(shown(reorderLayer(outOfOrder(), 'b', 'a'))).toEqual(['b', 'a', 'c'])
+  })
+
+  it('moves right in display order when the stored array is in another order', () => {
+    expect(shown(reorderLayer(outOfOrder(), 'b', 'c'))).toEqual(['a', 'c', 'b'])
+    expect(shown(reorderLayer(outOfOrder(), 'a', 'b'))).toEqual(['b', 'a', 'c'])
   })
 })
 
