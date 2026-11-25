@@ -7783,11 +7783,12 @@ async def _property_targets_from_job(job: dict):
 
 async def _property_draft_matches_from_job(job: dict) -> dict:
     """The entities a bulk property job's draft created or changed that its search target matches
-    there (``draft_search.draft_matches``) — judged as the search's rule membership on the draft,
-    the view held to the job's own and its scope resolved as the job's export resolves it."""
+    there (``draft_search.draft_matches``; for an edge job, the relationships a Connections search
+    matches, ``edge_draft_matches``) — judged as the search's rule membership on the draft, the
+    view held to the job's own and its scope resolved as the job's export resolves it."""
     from backend.app.api.v1.endpoints import graph as graph_ep
     from backend.app.db.engine import get_async_session
-    from backend.app.providers.draft_search import draft_matches
+    from backend.app.providers.draft_search import draft_matches, edge_draft_matches
     from backend.app.services.advanced_search_service import AdvancedSearchService
     from backend.app.services.deep_search import SearchRunContext
     from backend.app.services.view_transfer.sources import engine_for
@@ -7811,9 +7812,9 @@ async def _property_draft_matches_from_job(job: dict) -> dict:
             finally:
                 await session.commit()                  # no transaction held between requests
 
-        return await draft_matches(engine.provider,
-                                   {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
-                                   target["predicate"], judge)
+        matches = edge_draft_matches if job.get("entityKind") == "edge" else draft_matches
+        return await matches(engine.provider, {"viewId": target["viewId"], "scopeMode": target["scopeMode"]},
+                             target["predicate"], judge)
 
 
 async def _property_write_context(job: dict) -> dict:
@@ -8181,8 +8182,8 @@ async def preview_property_job_sample(
                 (404, "view_not_found", "The view this search runs in isn't there, or you can't read it.")))
         keys = await _property_sample_matches(session, ws_id, meta.get("data_source_id"), branch_id, user.id,
                                               target, pj.SAMPLE_ROWS + 1)
-        if target.entity_kind == "node":
-            recheck = pj.predicate_recheck(target.predicate.model_dump(mode="json", by_alias=True))
+        recheck = (pj.edge_recheck if target.entity_kind == "edge" else pj.predicate_recheck)(
+            target.predicate.model_dump(mode="json", by_alias=True))
     rows = await pj.read_sample(graph_id, branch_id, body.op.wire(), keys[:pj.SAMPLE_ROWS],
                                 entity_kind=target.entity_kind, recheck=recheck)
     return {"rows": rows, "truncated": len(keys) > pj.SAMPLE_ROWS}

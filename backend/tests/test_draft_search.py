@@ -752,6 +752,120 @@ async def test_draft_matches_are_none_when_the_draft_cant_answer_for_them(monkey
     assert asked == []
 
 
+class _EdgeOverlay:
+    """A draft's patch set of relationships, for ``edge_draft_matches``: ``upsert`` (id → its
+    type, ends and properties), ``removed`` ids and the urns of the nodes it changed."""
+
+    def __init__(self, upsert, removed=(), nodes=(), fork=False, lineage=("FLOWS_TO",)):
+        from backend.common.models.graph import GraphEdge
+        self.edges = {eid: GraphEdge(id=eid, edgeType=t, sourceUrn=s, targetUrn=g, properties=props)
+                      for eid, (t, s, g, props) in upsert.items()}
+        self.removed, self.nodes, self.fork, self.lineage = set(removed), set(nodes), fork, lineage
+        self.loaded: List[List[str]] = []
+
+    def _searches_draft(self):
+        return not self.fork
+
+    def _get_containment_edge_types(self):
+        return ["CONTAINS"]
+
+    def _get_lineage_edge_types(self):
+        if self.lineage is None:
+            raise RuntimeError("no ontology")
+        return list(self.lineage)
+
+    async def _delta_(self):
+        async def edges(batch):
+            self.loaded.append([e.id for e in batch])
+            return batch
+        return SimpleNamespace(edge_upsert=self.edges, edge_remove={e: None for e in self.removed},
+                               node_modified={u: f"id-{u}" for u in self.nodes}, node_upsert={},
+                               node_remove=set(), shared={}, edges=edges)
+
+
+def _ends_judge(meets: Dict[str, set], asked=None, notes=(), refuse=False):
+    """Membership over ``meets`` (rule id → the urns it matches): what each end meets."""
+    from backend.app.services.advanced_search_service import ValidationError
+    from backend.common.models.search import SearchMembershipResult
+
+    async def judge(request):
+        if refuse:
+            raise ValidationError("not a rule")
+        if asked is not None:
+            asked.append((sorted(request.urns), [i.predicate.kind for i in request.items]))
+        return SearchMembershipResult(matches={i.id: [u for u in request.urns if u in meets.get(i.id, ())]
+                                               for i in request.items}, notes=list(notes))
+    return judge
+
+
+async def test_edge_draft_matches_are_the_relationships_the_draft_made_or_changed_that_match():
+    """Of the types the search takes — every link by default, never the hierarchy's or a roll-up —
+    filtered on the draft's values, with the source meeting From and the target To (or, either way
+    round, the other); one the draft removed is never asked."""
+    overlay = _EdgeOverlay({
+        "e1": ("FLOWS_TO", "a", "b", {"tier": "gold"}), "e2": ("FEEDS", "b", "a", {"tier": "gold"}),
+        "e3": ("CONTAINS", "a", "b", {"tier": "gold"}), "e4": ("AGGREGATED", "a", "b", {"tier": "gold"}),
+        "e5": ("FLOWS_TO", "a", "c", {"tier": "silver"}), "e6": ("FLOWS_TO", "a", "b", {})},
+        removed=["e6"], nodes=["b"])
+    asked = []
+    gold = {"kind": "edgeProperty", "key": "tier", "op": "eq", "value": "gold"}
+    from_a = {"kind": "edges", "edgePredicate": gold, "sourceWhere": {"kind": "is", "refs": [{"urn": "a"}]}}
+    out = await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, from_a,
+                                                _ends_judge({"from": {"a"}, "to": {"a", "b"}}, asked))
+    assert out == {"ids": ["e1"], "unsearched": "ends"}, "the draft changed b: an end may now match"
+    assert overlay.loaded == [["e1", "e2", "e5"]]
+    assert asked == [(["a", "b"], ["is", "all"])], "e5 filtered out first"
+    either = {**from_a, "direction": "either"}
+    out = await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, either,
+                                                _ends_judge({"from": {"a"}, "to": {"a", "b"}}))
+    assert out == {"ids": ["e1", "e2"], "unsearched": "ends"}
+    # A class, or named types; no end tested, so no note of the ends.
+    for predicate, ids in (({"kind": "edges", "edgeClass": "lineage"}, ["e1", "e5"]),
+                           ({"kind": "edges", "edgeClass": "containment"}, ["e3"]),
+                           ({"kind": "edges", "edgeClass": "any"}, ["e1", "e2", "e3", "e5"]),
+                           ({"kind": "edges", "edgeTypes": ["feeds"]}, ["e2"])):
+        out = await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, predicate,
+                                                    _ends_judge({"from": {"a", "b"}, "to": {"a", "b", "c"}}))
+        assert out == {"ids": ids}, predicate
+
+
+async def test_edge_draft_matches_are_none_when_the_draft_cant_answer_for_them(monkeypatch):
+    overlay = _EdgeOverlay({"e1": ("FLOWS_TO", "a", "b", {})})
+    edges = {"kind": "edges", "sourceWhere": {"kind": "isOrphan"}}
+    meets = {"from": {"a"}, "to": {"b"}}
+    for judge, why in ((_ends_judge(meets, notes=[draft_search.RELATIONSHIPS]), "inexact"),
+                       (_ends_judge(meets, refuse=True), "inexact"),
+                       (_ends_judge(meets, notes=[draft_search.MEMBERSHIP_NOT_DRAFT_AWARE]), "unread")):
+        assert await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, edges, judge) == \
+            {"unsearched": why}
+    assert await draft_search.edge_draft_matches(
+        _EdgeOverlay({}, fork=True), {"viewId": "v"}, edges, _ends_judge(meets)) == {"unsearched": "fork"}
+    assert await draft_search.edge_draft_matches(
+        _EdgeOverlay({}, lineage=None), {"viewId": "v"}, {"kind": "edges", "edgeClass": "lineage"},
+        _ends_judge(meets)) == {"unsearched": "inexact"}
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 0)
+    assert await draft_search.edge_draft_matches(
+        overlay, {"viewId": "v"}, edges, _ends_judge(meets)) == {"unsearched": "too_large"}
+
+
+def test_an_edge_filter_reads_its_own_fields_natively_and_its_properties_as_kept_in_json():
+    from backend.common.models.search import (
+        EdgeGroupPredicate, EdgeHasPropertyPredicate, EdgePropertyPredicate,
+    )
+    from backend.common.predicate_eval import edge_matches
+
+    edge = {"id": "e1", "confidence": 0.8, "properties": {"tier": "Gold", "rank": 5}}
+    assert edge_matches(edge, None)
+    assert edge_matches(edge, EdgePropertyPredicate(key="confidence", op="gt", value=0.5, valueType="number"))
+    assert edge_matches(edge, EdgePropertyPredicate(key="tier", op="eq", value="gold"))      # in any case
+    assert not edge_matches(edge, EdgePropertyPredicate(key="tier", op="eq", value="gold",
+                                                        caseSensitive=True))
+    assert edge_matches(edge, EdgePropertyPredicate(key="rank", op="in", value=[5.0], valueType="number"))
+    assert edge_matches(edge, EdgeGroupPredicate(op="not", children=[EdgeHasPropertyPredicate(key="owner")]))
+    assert not edge_matches(edge, EdgeGroupPredicate(op="and", children=[
+        EdgeHasPropertyPredicate(key="tier"), EdgeHasPropertyPredicate(key="confidence", negate=True)]))
+
+
 # ---------------------------------------------------------------------------
 # The shared evaluator: the FalkorDB compiler's meaning
 # ---------------------------------------------------------------------------

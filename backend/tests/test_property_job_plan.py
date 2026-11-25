@@ -499,7 +499,7 @@ async def test_the_drafts_own_matches_count_toward_the_most_a_job_edits(monkeypa
 
 async def test_without_draft_matches_the_note_says_why(monkeypatch):
     """None found, or none searched: no draft chunks, and the summary says why when they weren't —
-    a Connections search never asks."""
+    of a Connections search, in its relationships' words."""
     store = _Store()
     worker = _resolver(monkeypatch, store, ["urn:a"], {"unsearched": "too_large"},
                        pj.predicate_recheck({"kind": "hasProperty", "key": "owner"}))
@@ -511,12 +511,51 @@ async def test_without_draft_matches_the_note_says_why(monkeypatch):
     assert "more than 200,000 entities" in summary["recheck"]["note"]
     assert not (await store.stat(pj.extras_key("vjob_1"))).exists
 
-    asked = []
-    worker = _resolver(monkeypatch, store, ["E1"], {"ids": ["never"]})
-    worker._draft_matches = lambda job: asked.append(job)
+    worker = _resolver(monkeypatch, store, ["E1"], {"unsearched": "inexact"})
     await worker._resolve("vjob_2", {"target": {"kind": "predicate"}, "entityKind": "edge"})
-    assert asked == [] and worker._lease.beats[-1]["summary"]["recheck"] == {
-        "exact": False, "note": f"{pj.RECHECK_APPROXIMATE} {pj.DRAFT_UNSEARCHED['edges']}"}
+    assert worker._lease.beats[-1]["summary"]["recheck"] == {
+        "exact": False, "note": f"{pj.RECHECK_APPROXIMATE} {pj.EDGE_DRAFT_UNSEARCHED['inexact']}"}
+    assert "relationships new in your draft, or changed there to match, weren't searched" in \
+        pj.EDGE_DRAFT_UNSEARCHED["inexact"]
+
+
+async def test_a_connections_search_writes_the_drafts_own_relationships_first_by_their_ids(monkeypatch):
+    """An edge's own id names it — no ``gv:`` — and the relationships it didn't change, whose ends
+    it changed to match, are said not to be searched."""
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    store = _Store()
+    recheck = pj.edge_recheck({"kind": "edges", "sourceWhere": {"kind": "hasProperty", "key": "owner"}})
+    worker = _resolver(monkeypatch, store, ["E1", "urn:a|FLOWS_TO|urn:b"],
+                       {"ids": ["E5", "edge:E3", "E9"], "unsearched": "ends"}, recheck)
+    await worker._resolve("vjob_3", {"target": {"kind": "predicate"}, "entityKind": "edge"})
+    assert [await pj.read_lines(store, pj.targets_key("vjob_3", i)) for i in range(3)] == [
+        ["E5", "edge:E3"], ["E9"], ["E1", "urn:a|FLOWS_TO|urn:b"]]
+    assert await pj.read_lines(store, pj.extras_key("vjob_3")) == ["E5", "edge:E3", "E9"]
+    summary = worker._lease.beats[-1]["summary"]
+    assert (summary["chunks"], summary["draftChunks"]) == (3, 2)
+    assert summary["recheck"] == {"exact": True, "note": pj.EDGE_DRAFT_UNSEARCHED["ends"]}
+
+
+def test_a_connections_search_is_checked_again_on_the_edge_and_its_ends_as_the_draft_holds_them():
+    """Its filter on the edge's own values, From and To on its ends' — either way round when it
+    takes both — unless its ends' own values can't tell."""
+    gold = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}
+    recheck = pj.edge_recheck({"kind": "group", "op": "and", "children": [{
+        "kind": "edges", "sourceWhere": gold,
+        "edgePredicate": {"kind": "edgeProperty", "key": "w", "op": "eq", "value": 1, "valueType": "number"}}]})
+    assert recheck is not None and recheck.ends
+    edge = {"id": "E1", "confidence": None, "properties": {"w": 1}}
+    a, b = {"urn": "a", "tier": "gold"}, {"urn": "b", "tier": "silver"}
+    assert recheck(edge, a, b) and not recheck(edge, b, a), "outgoing: as stored"
+    assert not recheck({**edge, "properties": {"w": 2}}, a, b)
+    assert not recheck(edge, None, b), "an end not live matches nothing"
+    either = pj.edge_recheck({"kind": "edges", "sourceWhere": gold, "direction": "either"})
+    assert either(edge, b, a) and not either(edge, b, b)
+    only = pj.edge_recheck({"kind": "edges", "edgeTypes": ["FLOWS_TO"]})
+    assert not only.ends and only(edge, None, None), "its type is its own: as main matched it"
+    for relational in ({"kind": "isOrphan"}, {"kind": "descendantOf", "urns": ["urn:x"]},
+                       {"kind": "property", "key": "childCount", "op": "gt", "value": 1}):
+        assert pj.edge_recheck({"kind": "edges", "targetWhere": relational}) is None, relational
 
 
 def test_the_recheck_note_says_what_wasnt_judged_on_the_draft():
@@ -903,6 +942,13 @@ async def test_a_search_targets_draft_matches_are_its_membership_on_the_draft(mo
     monkeypatch.setattr(draft_search, "draft_matches", draft_matches)
     out = await V._property_draft_matches_from_job(_SEARCH_JOB)
     assert out == {"ids": ["N9"], "answer": "answer"}
+
+    async def edge_draft_matches(provider, scope, predicate, judge):
+        return {"ids": ["E5"], "edges": predicate}
+    monkeypatch.setattr(draft_search, "edge_draft_matches", edge_draft_matches)
+    edges = {"kind": "edges", "edgeTypes": ["FLOWS_TO"]}
+    job = {**_SEARCH_JOB, "entityKind": "edge", "target": {**_SEARCH_JOB["target"], "predicate": edges}}
+    assert await V._property_draft_matches_from_job(job) == {"ids": ["E5"], "edges": edges}
     assert seen["draft"] == ("the draft's overlay", {"viewId": "v1", "scopeMode": "view"},
                              {"kind": "hasProperty", "key": "owner"})
     assert seen["membership"] == [("request", "dv1")] and seen["commits"] == 1

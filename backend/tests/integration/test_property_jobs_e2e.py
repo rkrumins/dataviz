@@ -16,8 +16,10 @@ checkpoint — and never on main.
 * The routes: preview, create, follow, cancel, the refused rows as CSV.
 * Relationships (an edge job): named by id — ``edge:<id>`` re-keyed ones by the id the graph calls
   them — or as a Connections search names one without (``source|TYPE|target``); deleted in the
-  draft, a roll-up (refused ``derived``); a Connections search target; their routes, and the read
-  the relationship drawer compares several relationships by.
+  draft, a roll-up (refused ``derived``); a Connections search target — reaching what the draft
+  added or changed to match, and checked again on the draft's values; their clean-ups, previewed
+  from the values they hold; their routes, and the read the relationship drawer compares several
+  relationships by.
 * An undo puts back what a job's windows wrote, newest window first, from the draft's history — a
   rename's both keys, a clean-up's values in the kind they were, a relationship's properties, what
   a draft that pulled since held then; leaves one changed since alone (``changed_since``), listed;
@@ -850,6 +852,126 @@ def test_a_connections_search_target_edits_every_relationship_it_matches(monkeyp
     asyncio.run(_edge_search(monkeypatch))
 
 
+async def _edge_gold_draft(main_matches):
+    """Main: N0, N1, N3 gold, N2 silver; FLOWS_TO E1 N0→N1 and E2 N1→N2 gold, E3 N2→N3 silver,
+    E7 N2→N0 gold, FEEDS E4 N0→N3 gold. The draft: N1 silver, N2 gold; E1 changed but still gold,
+    E2 silver, E3 gold, E5 N1→N3 FLOWS_TO created gold, E6 N0→N2 FEEDS created gold. Main's export
+    of a search finds ``main_matches`` (``targets``); the draft's own matches are judged as the job
+    judges them — the draft's patch set, read from Postgres, over the stub provider holding main
+    (``draft_matches``)."""
+    from types import SimpleNamespace
+
+    from backend.app.providers import draft_search
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.view_scope import EffectiveViewScope
+    from backend.tests.integration.test_draft_search_e2e import CONTEXT, _stub
+    from backend.tests.test_draft_search import Main
+
+    svc, ds, gid, draft = await _draft(nodes=[
+        _node(0, tier="gold"), _node(1, tier="gold"), _node(2, tier="silver"), _node(3, tier="gold"),
+        _edge("E1", "N0", "N1", tier="gold", code="x"), _edge("E2", "N1", "N2", tier="gold", code="x"),
+        _edge("E3", "N2", "N3", tier="silver", code="x"), _edge("E7", "N2", "N0", tier="gold", code="x"),
+        _edge("E4", "N0", "N3", "FEEDS", tier="gold", code="x")])
+    main = await svc.main_branch_id(gid)
+
+    def update(kind, eid, **props):
+        return {"op": "update", "entity_kind": kind, "entity_id": eid, "payload": {"properties": props}}
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="draft edits", ops=[
+        update("node", "N1", tier="silver"), update("node", "N2", tier="gold"),
+        update("edge", "E1", note="y"), update("edge", "E2", tier="silver"), update("edge", "E3", tier="gold"),
+        _edge("E5", "N1", "N3", tier="gold", code="x"), _edge("E6", "N0", "N2", "FEEDS", tier="gold", code="x")])
+    store = await _stub(svc, gid, main, Main)
+    asked = []
+
+    async def targets(job):
+        for key in main_matches:
+            yield key
+
+    async def draft_matches(job):
+        asked.append((job["entityKind"], job["target"]["predicate"]))
+        overlay = DraftOverlayProvider(store, svc=svc, graph_id=gid, branch_id=draft)
+        search = AdvancedSearchService(SimpleNamespace(provider=overlay), session=None, workspace_id="ws1")
+
+        async def resolve(requested):
+            return EffectiveViewScope(
+                view_id="v1", workspace_id="ws1", data_source_id=ds, canvas_kind="graph", root_urns=(),
+                entity_type_allow_list=frozenset(), layer_allow_list=frozenset(), max_depth=12,
+                scope_hash="scope-v1")
+
+        async def guard(scope):
+            return None
+
+        search._resolve_scope, search._guard_view_data_source = resolve, guard
+        target = job["target"]
+        return await draft_search.edge_draft_matches(
+            overlay, {"viewId": target["viewId"], "scopeMode": target["scopeMode"]}, target["predicate"],
+            lambda request: search.membership(request, run_context=CONTEXT))
+
+    ie = ImportExportService(versioning=svc, property_targets=targets, property_draft_matches=draft_matches)
+    return svc, ds, gid, draft, ie, asked
+
+
+async def _edge_draft_matches(monkeypatch) -> None:
+    """A Connections search's job reaches the relationships the draft added or changed to match —
+    each once, a relationship main matched too — and leaves alone one the draft changed out of it
+    (``no_longer_matches``), its own values or its ends': as a search of entities does."""
+    from backend.app.services.versioning.import_export import property_job
+
+    monkeypatch.setattr(config, "PROPERTY_JOB_WINDOW", 2)
+    svc, ds, gid, draft, ie, asked = await _edge_gold_draft(["E1", "E2", "E7"])
+    gold = {"kind": "edges", "edgeTypes": ["FLOWS_TO"],
+            "edgePredicate": {"kind": "edgeProperty", "key": "tier", "op": "eq", "value": "gold"}}
+
+    async def run(op, predicate, key):
+        job_id = (await ie.create_property_job(
+            workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=draft, actor="alice", op=op,
+            target={"viewId": "v1", "scopeMode": "view", "predicate": predicate}, message=None, key=key,
+            entity_kind="edge"))["job_id"]
+        await TransferRunner(lambda: ie).run_job(await lease_job(job_id))
+        return job_id, await ie.get_property_job(job_id)
+
+    job_id, job = await run(DOUBLE_X, gold, "key-edge-draft-01")
+    assert job["status"] == "completed" and asked == [("edge", gold)], job
+    # The draft's own matches first (E1 still gold, E3 changed to gold, E5 created), then main's:
+    # E2 changed out of the search left alone, E1 — matched by both — replaced ONCE; E6 isn't FLOWS_TO.
+    assert _codes([await _props(svc, gid, draft, e) for e in ("E1", "E2", "E3", "E4", "E5", "E6", "E7")]) == \
+        ["xx", "x", "xx", "x", "xx", "x", "xx"]
+    summary = job["summary"]
+    assert (summary["changed"], summary["noLongerMatches"], summary["commits"], job["total"]) == (4, 1, 3, 6)
+    assert summary["recheck"] == {"exact": True, "note": None}
+    assert await _csv(ie, job_id) == ["urn,entityId,reason,detail",
+                                      "E2,E2,no_longer_matches,In this draft it no longer matches the search."]
+    assert _codes([await _props(svc, gid, None, e) for e in ("E1", "E3")]) == ["x", "x"]      # main untouched
+
+    # From a gold entity: judged on the draft's values of the ends. E2's source is silver now; E3's
+    # is gold now, and E3 changed — reached; E7's is gold now, but E7 is as it was: not searched, said.
+    svc, ds, gid, draft, ie, asked = await _edge_gold_draft(["E1", "E2"])
+    from_gold = {"kind": "edges", "edgeTypes": ["FLOWS_TO"], "sourceWhere": GOLD}
+    job_id, job = await run({"kind": "set", "key": "flag", "value": "y", "onConflict": "skip"}, from_gold,
+                            "key-edge-draft-02")
+    assert job["status"] == "completed", job
+    assert [(await _props(svc, gid, draft, e)).get("flag") for e in ("E1", "E2", "E3", "E5", "E7")] == \
+        ["y", None, "y", None, None]
+    summary = job["summary"]
+    assert (summary["changed"], summary["noLongerMatches"]) == (2, 1), summary
+    assert summary["recheck"] == {"exact": True, "note": property_job.EDGE_DRAFT_UNSEARCHED["ends"]}
+
+    # Its ends tested by a relationship of theirs: main's matches as they match there, said so.
+    svc, ds, gid, draft, ie, asked = await _edge_gold_draft(["E1", "E2"])
+    orphan = {"kind": "edges", "edgeTypes": ["FLOWS_TO"], "sourceWhere": {"kind": "isOrphan"}}
+    _job_id, job = await run({"kind": "set", "key": "flag", "value": "z", "onConflict": "skip"}, orphan,
+                             "key-edge-draft-03")
+    assert job["summary"]["recheck"] == {"exact": False, "note": (
+        f"{property_job.RECHECK_APPROXIMATE} {property_job.EDGE_DRAFT_UNSEARCHED['inexact']}")}
+    assert (job["summary"]["changed"], job["total"]) == (2, 2)
+    await db.dispose_engine()
+
+
+def test_a_connections_search_reaches_what_the_draft_added_or_changed_to_match_each_once(monkeypatch):
+    asyncio.run(_edge_draft_matches(monkeypatch))
+
+
 async def _edge_routes() -> None:
     from httpx import ASGITransport, AsyncClient
     from backend.app.api.v1.endpoints.versioning import get_import_export_service
@@ -1036,6 +1158,14 @@ async def _edge_sample(monkeypatch) -> None:
         assert [(row["id"], row["outcome"]) for row in r.json()["rows"]] == [("E1", "change"), ("R1", "skip")]
         # A page of edges: the search fills in its own result shape.
         assert asked[0].options.page_size == 9 and "results" not in asked[0].options.model_fields_set
+
+        # Each checked again on the draft's values, as a window checks it: E2 doesn't hold owner a.
+        _sample_search(monkeypatch, edges=["E1", "E2"])
+        owned = {**search, "predicate": {"kind": "edges", "edgePredicate": {
+            "kind": "edgeProperty", "key": "owner", "op": "eq", "value": "a"}}}
+        r = await c.post(sample, json={"op": RENAME, "target": owned}, headers=PAT)
+        assert [(row["id"], row["outcome"], row.get("reason")) for row in r.json()["rows"]] == [
+            ("E1", "change", None), ("E2", "skip", "no_longer_matches")], r.text
     await db.dispose_engine()
 
 

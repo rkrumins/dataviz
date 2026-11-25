@@ -708,6 +708,96 @@ async def draft_matches(overlay, scope: Mapping[str, Any], predicate: Any, judge
     return {"ids": sorted(set(ids))}
 
 
+#: The rules a Connections search's ends are judged as, by :func:`edge_draft_matches`.
+_FROM, _TO = "from", "to"
+
+
+async def edge_draft_matches(overlay, scope: Mapping[str, Any], predicate: Any, judge) -> Dict[str, Any]:
+    """:func:`draft_matches` for a Connections search: which of the relationships a draft added or
+    changed — the edges its patch set names, less what it removed, in one order — the search
+    matches there, as their entity ids, sorted: ``{"ids": [...]}``. What a search of the published
+    graph can't name: a relationship new in the draft, or changed there to match.
+
+    Its own values are tested on the draft's: its type, one the search names (or of its class,
+    never a roll-up), and its filter (``predicate_eval.edge_matches``). Its ends are judged
+    ``BATCH`` urns at a time as rule membership on the draft (``judge``, as :func:`draft_matches`
+    judges): both in ``scope``, the source meeting From and the target To — or, ``either``, the
+    other way round. ``{"unsearched": why}`` as :func:`draft_matches` says it, ``inexact`` too
+    when the class's types can't be read; and ``ends`` beside the ids when the search tests its
+    ends and the draft changed entities — a relationship it didn't change, whose end it changed to
+    match, isn't among them."""
+    from pydantic import TypeAdapter
+
+    from backend.app.services.advanced_search_service import ValidationError
+    from backend.common.derived_artifacts import is_derived_edge_type
+    from backend.common.models.search import Predicate, SearchMembershipRequest, unwrap_edges
+    from backend.common.predicate_eval import edge_matches
+
+    searches = getattr(overlay, "_searches_draft", None)
+    if searches is None or not searches():
+        return {"unsearched": "fork"}
+    p = unwrap_edges(TypeAdapter(Predicate).validate_python(predicate))
+    named = {t.upper() for t in p.edge_types or ()}
+    edge_class = p.edge_class or "links"
+    if named or edge_class == "any":
+        kept = None
+    else:
+        try:
+            kept = {t.upper() for t in (overlay._get_lineage_edge_types() if edge_class == "lineage"
+                                        else overlay._get_containment_edge_types())}
+        except Exception:                   # the class's types unknown: what it takes can't be told
+            return {"unsearched": "inexact"}
+
+    def typed(edge_type: Optional[str]) -> bool:
+        t = (edge_type or "").upper()
+        if is_derived_edge_type(t):
+            return False
+        if named:
+            return t in named
+        if kept is None:                    # any
+            return True
+        if edge_class == "links":           # every type but the hierarchy's
+            return t not in kept
+        return t in kept
+
+    d = await overlay._delta_()
+    if len(d.edge_upsert) > vconfig.DRAFT_SEARCH_MAX_DELTA:
+        return {"unsearched": "too_large"}
+    live = [e for e in sorted(d.edge_upsert.values(), key=lambda e: e.id)
+            if e.id not in d.edge_remove and typed(e.edge_type)]
+    every = {"kind": "all"}
+    items = [{"id": _FROM, "predicate": p.source_where.model_dump(mode="json", by_alias=True)
+              if p.source_where is not None else every},
+             {"id": _TO, "predicate": p.target_where.model_dump(mode="json", by_alias=True)
+              if p.target_where is not None else every}]
+    ids: List[str] = []
+    for at in range(0, len(live), BATCH // 2):          # two ends an edge: a statement's urns
+        batch = live[at:at + BATCH // 2]
+        if p.edge_predicate is not None:
+            batch = [e for e in await d.edges(batch) if edge_matches(
+                {"id": e.id, "confidence": e.confidence, "properties": e.properties}, p.edge_predicate)]
+        if not batch:
+            continue
+        request = SearchMembershipRequest.model_validate({
+            "scope": scope, "items": items,
+            "urns": list(dict.fromkeys(u for e in batch for u in (e.source_urn, e.target_urn)))})
+        try:
+            out = await judge(request)
+        except ValidationError:
+            return {"unsearched": "inexact"}
+        if MEMBERSHIP_NOT_DRAFT_AWARE in out.notes:
+            return {"unsearched": "unread"}
+        if out.notes or _FROM in out.errors or _TO in out.errors:
+            return {"unsearched": "inexact"}
+        meets = {rule: set(out.matches.get(rule) or ()) for rule in (_FROM, _TO)}
+        ids += [e.id for e in batch
+                if (e.source_urn in meets[_FROM] and e.target_urn in meets[_TO])
+                or (p.direction == "either" and e.source_urn in meets[_TO] and e.target_urn in meets[_FROM])]
+    ends = p.source_where is not None or p.target_where is not None
+    changed = ends and bool(await asyncio.to_thread(changed_set, d))
+    return {"ids": sorted(set(ids)), **({"unsearched": "ends"} if changed else {})}
+
+
 def _too_large(state: Dict[str, Any]) -> bool:
     """A correction that would read more of ``D`` afresh than a request may: main answers."""
     return state["mode"] == "full" and state["total"] > vconfig.DRAFT_SEARCH_MAX_DELTA

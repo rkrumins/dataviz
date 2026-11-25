@@ -1200,7 +1200,7 @@ class ImportExportService:
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         derived: Dict[str, str] = {}
         if entity_kind == "edge":
-            found, deleted, missing, derived = await property_job.read_edge_targets(snap, ids)
+            found, deleted, missing, derived, _stale = await property_job.read_edge_targets(snap, ids)
         else:
             found, deleted, missing, _stale = await property_job.read_targets(snap, ids)
         props = {eid: p for eid, p, _urn in found.values()}

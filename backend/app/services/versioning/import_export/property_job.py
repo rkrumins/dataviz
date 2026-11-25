@@ -14,14 +14,16 @@ the plan compares what is stored with that, so it counts as changed only what a 
 
 An EDGE job (``entityKind`` ``edge``) is the same over relationships: named by id (an edge's own,
 or ``source|TYPE|target`` as a Connections search names one without), or every edge a Connections
-search matches (:func:`read_edge_targets`). A roll-up is never edited: it is refused ``derived``.
+search matches (:func:`read_edge_targets`) — the draft's own matches among them
+(``draft_search.edge_draft_matches``), and main's checked again (:func:`edge_recheck`). A roll-up
+is never edited: it is refused ``derived``.
 
 Its targets are kept as chunk files in the object store, ``property-jobs/{job}/targets/{i}.ndjson``,
 ``PROPERTY_JOB_WINDOW`` keys each: an id target's are written when the job is made; a search
 target's by the job itself, from an export of the search (the injected ``targets`` hook) — after
 the draft's own matches, which that export of the published graph can't name: the entities new in
-the draft or changed there to match (the ``draft_matches`` hook), which main's windows then skip,
-so none is written twice. Each chunk
+the draft or changed there to match (the ``draft_matches`` hook: as ``gv:<entity id>``, an edge's
+by its id), which main's windows then skip, so none is written twice. Each chunk
 is then one WINDOW: its entities read from the draft as they stand, a properties patch planned for
 each (:func:`plan_patch`), and the patches written as ONE commit — with the job's checkpoint (its
 cursor, progress and running summary) in the same transaction, as an import window is. So the job
@@ -38,7 +40,8 @@ held already, skipped), ``unconvertible`` (a ``convert`` whose value is not of t
 left as it is — with ``onFail: remove`` it is removed, and counted but not refused),
 ``write_refused`` (the write gate turned it away; the window's other entities are written, as an
 import's are), ``no_longer_matches`` (a search target's entity the draft has changed so that the
-search no longer matches it, :func:`predicate_recheck`) and, for an edge job, ``derived`` (a roll-up).
+search no longer matches it, :func:`predicate_recheck` — a relationship, :func:`edge_recheck`) and,
+for an edge job, ``derived`` (a roll-up).
 
 When the draft is published, the jobs that wrote to it are listed in the publish's commit
 (``stats.propertyJobs``, :func:`audit_entry`) and its activity event, and stamped with that commit
@@ -60,6 +63,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
@@ -661,8 +665,18 @@ DRAFT_UNSEARCHED = {
     "inexact": "This search can't be answered on your draft's values alone, so " + _UNREACHED + ".",
     "unread": "Your draft's changes couldn't be read just now, so " + _UNREACHED + ".",
     "fork": "This draft is on a fork, so " + _UNREACHED + ".",
-    "edges": ("Relationships new in your draft, or changed there to match, aren't searched — "
-              "select them on the canvas to change them."),
+}
+_UNREACHED_EDGES = ("relationships new in your draft, or changed there to match, weren't searched — "
+                    "select them on the canvas to change them")
+#: The same of a Connections search's relationships (``draft_search.edge_draft_matches``) — and,
+#: ``ends``, of those the draft didn't change whose ends it changed to match.
+EDGE_DRAFT_UNSEARCHED = {
+    "too_large": "Your draft changed more than {n:,} relationships, so " + _UNREACHED_EDGES + ".",
+    "inexact": "This search can't be answered on your draft's values alone, so " + _UNREACHED_EDGES + ".",
+    "unread": "Your draft's changes couldn't be read just now, so " + _UNREACHED_EDGES + ".",
+    "fork": "This draft is on a fork, so " + _UNREACHED_EDGES + ".",
+    "ends": ("Relationships your draft didn't change, but whose ends it changed to match, weren't "
+             "searched — select them on the canvas to change them."),
 }
 
 
@@ -696,13 +710,61 @@ def _own_values(p) -> bool:
     return p.kind != "is" or all(ref.urn for ref in p.refs)
 
 
-def recheck_summary(recheck, unsearched: Optional[str] = None) -> Dict[str, Any]:
+@dataclass(frozen=True)
+class EdgeRecheck:
+    """A test of whether a relationship still matches a Connections search as the draft holds it
+    (:func:`edge_recheck`): its filter on the edge's own values, From and To on its ends'."""
+    edge_filter: Any
+    source_where: Any
+    target_where: Any
+    either: bool
+
+    @property
+    def ends(self) -> bool:
+        """Whether it reads the edge's ends."""
+        return self.source_where is not None or self.target_where is not None
+
+    def __call__(self, edge: Dict[str, Any], source: Optional[Dict[str, Any]],
+                 target: Optional[Dict[str, Any]]) -> bool:
+        """``edge`` (``{id, confidence, properties}``) between the node dicts ``source`` and
+        ``target`` (``draft_search.node_dict``; None: not read, or not live)."""
+        from backend.common.predicate_eval import edge_matches, matches
+
+        def meets(node, where) -> bool:
+            return where is None or (node is not None and matches(node, where))
+
+        return edge_matches(edge, self.edge_filter) and (
+            (meets(source, self.source_where) and meets(target, self.target_where))
+            or (self.either and meets(source, self.target_where) and meets(target, self.source_where)))
+
+
+def edge_recheck(predicate: Any) -> Optional[EdgeRecheck]:
+    """:func:`predicate_recheck` for a Connections search: a test of whether one of its matches
+    still matches as the draft holds it — or None when its ends' own values can't tell: From or To
+    follows relationships, tests the view's layers or where an entity sits, reads a field only the
+    platform keeps, or names an entity by its path. Its type is not tested again: it is the edge's
+    own, as main matched it."""
+    from pydantic import TypeAdapter
+
+    from backend.app.providers.draft_search import inexact
+    from backend.common.models.search import Predicate, unwrap_edges
+
+    p = unwrap_edges(TypeAdapter(Predicate).validate_python(predicate))
+    for where in (p.source_where, p.target_where):
+        if where is not None and (inexact(where, set()) is not None or not _own_values(where)):
+            return None
+    return EdgeRecheck(p.edge_predicate, p.source_where, p.target_where, p.direction == "either")
+
+
+def recheck_summary(recheck, unsearched: Optional[str] = None, edges: bool = False) -> Dict[str, Any]:
     """A search target's ``summary.recheck``: whether its matches are checked again on the draft's
     values (``exact``), and ``note``: why they can't be, and why the entities the draft created or
-    changed weren't searched on it (``unsearched``, :data:`DRAFT_UNSEARCHED`) — None when the job
-    matches on the draft, its new entities included."""
+    changed weren't searched on it (``unsearched``, :data:`DRAFT_UNSEARCHED` — ``edges``: a
+    Connections search's relationships, :data:`EDGE_DRAFT_UNSEARCHED`) — None when the job matches
+    on the draft, its new entities included."""
+    unreached = EDGE_DRAFT_UNSEARCHED if edges else DRAFT_UNSEARCHED
     notes = [RECHECK_APPROXIMATE if recheck is None else None,
-             DRAFT_UNSEARCHED[unsearched].format(n=config.DRAFT_SEARCH_MAX_DELTA) if unsearched else None]
+             unreached[unsearched].format(n=config.DRAFT_SEARCH_MAX_DELTA) if unsearched else None]
     return {"exact": recheck is not None, "note": " ".join(n for n in notes if n) or None}
 
 
@@ -823,44 +885,68 @@ async def edge_winners(snap: Snapshot, keys: Iterable[str]):
     return found, deleted, missing
 
 
-async def read_edge_targets(snap: Snapshot, keys: Iterable[str]):
+async def read_edge_targets(snap: Snapshot, keys: Iterable[str], recheck: Optional[EdgeRecheck] = None):
     """:func:`read_targets` for an edge job: ``key -> (entity id, properties, None)`` for the edges
-    live in the draft, those it deleted, the keys that name none — and ``key -> entity id`` for
-    the roll-ups among them (``derived``: a summary the aggregation job computes, never edited)."""
+    live in the draft, those it deleted, the keys that name none, ``key -> entity id`` for the
+    roll-ups among them (``derived``: a summary the aggregation job computes, never edited) — and,
+    given a Connections search's ``recheck`` (:func:`edge_recheck`), ``key -> entity id`` apart
+    for those it no longer matches, tested on the edge and its ends as the draft holds them."""
+    from backend.app.providers.draft_search import node_dict
+    from backend.common.models.graph import GraphNode
+    from ..service import _graphnode_dict
+
     winners, deleted, missing = await edge_winners(snap, keys)
+    ends = {}
+    if recheck is not None and recheck.ends:
+        ends = await snap.lookup_live(
+            "node", {i for w in winners.values() for i in (w.source_id, w.target_id) if i}, payload=True)
 
     def parse():
+        nodes = {}
+        for eid, w in ends.items():
+            payload = json.loads(w.payload) if w.payload else {}
+            urn = w.urn or payload.get("urn") or eid
+            nodes[eid] = node_dict(GraphNode(**_graphnode_dict(eid, urn, payload)))
         found: Dict[str, Tuple[str, Dict[str, Any], Optional[str]]] = {}
         derived: Dict[str, str] = {}
+        stale: Dict[str, str] = {}
         for k, w in winners.items():
             if is_derived_edge_type(w.edge_type or ""):
                 derived[k] = w.entity_id
                 continue
             payload = json.loads(w.payload) if w.payload else {}
-            found[k] = (w.entity_id, dict(payload.get("properties") or {}), None)
-        return found, derived
+            props = dict(payload.get("properties") or {})
+            if recheck is not None and not recheck(
+                    {"id": w.entity_id, "confidence": payload.get("confidence"), "properties": props},
+                    nodes.get(w.source_id), nodes.get(w.target_id)):
+                stale[k] = w.entity_id
+                continue
+            found[k] = (w.entity_id, props, None)
+        return found, derived, stale
 
-    found, derived = await asyncio.to_thread(parse)
-    return found, deleted, missing, derived
+    found, derived, stale = await asyncio.to_thread(parse)
+    return found, deleted, missing, derived, stale
 
 
 async def read_sample(graph_id: str, branch_id: str, op: Mapping[str, Any], keys: Iterable[str], *,
                       entity_kind: str = "node", recheck=None) -> List[Dict[str, Any]]:
     """A preview's sample: each of ``keys`` (an id target's first few, or a search's first page)
     read on the draft as a window reads it — :func:`read_targets` with a search target's
-    ``recheck``, or :func:`read_edge_targets` — in their order, one row an entity:
+    ``recheck``, or :func:`read_edge_targets` with a Connections search's — in their order, one row
+    an entity:
     ``{id, urn?, name, type, …}`` and :func:`sample_row`. ``id`` is its entity id; a key that names
     nothing in the draft (or one the draft deleted) is a row of its own, ``missing``, by the key.
     Its name and type are read from its payload, apart from what the window reads: a node's display
     name and entity type; an edge's type, and its ends by their names."""
     snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
     keys = list(dict.fromkeys(k for k in keys if k))
+    derived: Dict[str, str] = {}
     if entity_kind == "edge":
-        found, _deleted, _missing, derived = await read_edge_targets(snap, keys)
-        skipped = {k: (eid, "derived") for k, eid in derived.items()}
+        found, _deleted, _missing, derived, stale = await read_edge_targets(snap, keys, recheck)
     else:
         found, _deleted, _missing, stale = await read_targets(snap, keys, recheck)
-        skipped = {k: (eid, "no_longer_matches") for k, eid in stale.items()}
+    skipped = {**{k: (eid, "no_longer_matches") for k, eid in stale.items()},
+               **{k: (eid, "derived") for k, eid in derived.items()}}
     winners = await snap.lookup_live(entity_kind, {f[0] for f in found.values()}
                                      | {s[0] for s in skipped.values()}, payload=True)
     ends = (await snap.lookup_live("node", {i for w in winners.values() for i in (w.source_id, w.target_id) if i},
@@ -1089,7 +1175,8 @@ class PropertyJobWorker:
 
     ``targets(job)`` — an async iterator of the keys a search target matches (injected at the API
     layer, which runs the search); ``draft_matches(job)`` — the entities the draft created or
-    changed that it matches there (``draft_search.draft_matches``' answer), injected the same way;
+    changed that it matches there (``draft_search.draft_matches``' answer; for an edge job,
+    ``edge_draft_matches``'), injected the same way;
     ``write_context(job)`` — ``{ontology_rules, containment, node_identity}`` its windows are
     written with, as a save is."""
 
@@ -1110,8 +1197,9 @@ class PropertyJobWorker:
         self._lease = lease
         job = await self._job(job_id)
         target = job.get("target") or {}
-        if target.get("kind") == "predicate" and (job.get("entityKind") or "node") == "node":
-            self._recheck = predicate_recheck(target["predicate"])
+        if target.get("kind") == "predicate":
+            self._recheck = (edge_recheck if job.get("entityKind") == "edge" else predicate_recheck)(
+                target["predicate"])
         context = (await lease.retry_transient(lambda: self._write_context(job))
                    if self._write_context is not None else {})
         if (await self._position(job_id)).cursor is None:
@@ -1175,15 +1263,14 @@ class PropertyJobWorker:
         if pos.cursor is not None:
             return
         cap = config.PROPERTY_JOB_MAX_TARGETS
-        if (job.get("entityKind") or "node") == "edge":
-            draft: Dict[str, Any] = {"unsearched": "edges"}
-        else:
-            draft = await self._draft_matches(job) if self._draft_matches is not None else {}
+        edges = job.get("entityKind") == "edge"
+        draft = await self._draft_matches(job) if self._draft_matches is not None else {}
         extras = list(draft.get("ids") or ())
         total = len(extras)
         if total > cap:
             raise too_many_targets(cap)
-        draft_chunks = chunks = await write_targets(self._store, job_id, [f"gv:{e}" for e in extras])
+        draft_chunks = chunks = await write_targets(self._store, job_id,
+                                                    extras if edges else [f"gv:{e}" for e in extras])
         if extras:
             await write_lines(self._store, extras_key(job_id), extras)
             self._lease.check()
@@ -1210,7 +1297,7 @@ class PropertyJobWorker:
                                          summary={**pos.summary, "chunks": chunks,
                                                   "draftChunks": draft_chunks,
                                                   "recheck": recheck_summary(
-                                                      self._recheck, draft.get("unsearched"))})
+                                                      self._recheck, draft.get("unsearched"), edges)})
 
     async def _next_window(self, job_id: str, job: Dict[str, Any], context: Dict[str, Any]) -> bool:
         """Write the window after the job's cursor; False once none is left."""
@@ -1236,17 +1323,16 @@ class PropertyJobWorker:
             n = len(rows)
         else:
             keys = await read_lines(self._store, targets_key(job_id, i))
-            stale: Dict[str, str] = {}
             if kind == "edge":
-                found, deleted, missing, derived = await read_edge_targets(snap, keys)
+                found, deleted, missing, derived, stale = await read_edge_targets(snap, keys, self._recheck)
             else:
                 (found, deleted, missing, stale), derived = await read_targets(snap, keys, self._recheck), {}
-                draft_chunks = int(pos.summary.get("draftChunks") or 0)
-                if draft_chunks and i >= draft_chunks:
-                    # Main's matches: those the draft's own windows reached are written once.
-                    if self._reached is None:
-                        self._reached = set(await read_lines(self._store, extras_key(job_id)))
-                    found, deleted, stale = skip_reached(self._reached, found, deleted, stale)
+            draft_chunks = int(pos.summary.get("draftChunks") or 0)
+            if draft_chunks and i >= draft_chunks:
+                # Main's matches: those the draft's own windows reached are written once.
+                if self._reached is None:
+                    self._reached = set(await read_lines(self._store, extras_key(job_id)))
+                found, deleted, stale = skip_reached(self._reached, found, deleted, stale)
             ops, counts, refused = await asyncio.to_thread(plan_window, op, found, kind)
             counts["missing"] += len(missing)
             counts["deletedInDraft"] += len(deleted)
