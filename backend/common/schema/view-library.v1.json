@@ -219,6 +219,16 @@
             }
           ],
           "default": null
+        },
+        "target": {
+          "default": "entities",
+          "description": "``entities``: the rule tags the entities its predicate matches. ``relationships``: its predicate is a Connections search, and the rule styles the lines of the relationships it matches.",
+          "enum": [
+            "entities",
+            "relationships"
+          ],
+          "title": "Target",
+          "type": "string"
         }
       },
       "required": [
@@ -230,13 +240,31 @@
       "type": "object"
     },
     "DisplayRuleStyle": {
-      "description": "How a rule paints the entities it matches, beside (or instead of) its chip. A rule with\nno style shows its chip and nothing else. Where two rules paint one card, the one first in\nthe view's list wins; chips are never contested — every matching rule adds its own.",
+      "description": "How a rule paints what it matches, beside (or instead of) its chip. A rule with no style\nshows its chip and nothing else — a relationship rule its chip on a line drawn in its colour.\nWhere two rules paint one card or line, the one first in the view's list wins; chips are never\ncontested — every matching rule adds its own. ``fill`` and ``frame`` paint an entity's card;\n``dash`` and ``width`` a relationship's line.",
       "properties": {
         "chip": {
           "default": true,
-          "description": "Show the rule's tag chip on each entity it matches.",
+          "description": "Show the rule's tag chip on each entity or line it matches.",
           "title": "Chip",
           "type": "boolean"
+        },
+        "dash": {
+          "anyOf": [
+            {
+              "enum": [
+                "solid",
+                "dashed",
+                "dotted"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draw each matching line solid (left out), dashed or dotted.",
+          "title": "Dash"
         },
         "fill": {
           "default": false,
@@ -260,6 +288,21 @@
           "default": null,
           "description": "Draw a box round each matching card, in the rule's colour.",
           "title": "Frame"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "maximum": 6,
+              "minimum": 1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Each matching line's width, in pixels. Left out: 2.5.",
+          "title": "Width"
         }
       },
       "title": "DisplayRuleStyle",

@@ -198,16 +198,12 @@ def _path_ends(predicate):
 
 
 def _validate_edges(p: EdgesPredicate, *, depth: int, path: str, rule: bool) -> int:
-    """A Connections search is the whole query, and never a display rule's
-    (a rule tags entities; this returns edges). Its From and To are each
+    """A Connections search is the whole query. Its From and To are each
     held to a top-level condition's caps — inside a container included —
     but follow no route (``withinHops``, a path) and trace nothing: the
-    engine tests one end per entity and the other per edge."""
-    if rule:
-        raise ValidationError(
-            f"A display rule tags entities, and the Connections search at {path} returns "
-            "edges — make the rule from its From or To condition instead"
-        )
+    engine tests one end per entity and the other per edge. ``rule``: a
+    display rule that styles relationships — asked of every relationship on
+    the canvas, so its ends follow lineage one hop, as an entity rule does."""
     if depth > 1:
         raise ValidationError(
             f"The Connections search at {path} must be the whole query — not beside other "
@@ -216,7 +212,8 @@ def _validate_edges(p: EdgesPredicate, *, depth: int, path: str, rule: bool) -> 
     if p.edge_predicate is not None:
         _validate_edge_filter(p.edge_predicate, f"{path}.edgePredicate")
     return 1 + sum(
-        _validate_predicate(where, depth=depth + 1, path=f"{path}.{alias}", top=False, end=True)
+        _validate_predicate(where, depth=depth + 1, path=f"{path}.{alias}", rule=rule,
+                            top=False, end=True)
         for where, alias in _path_ends(p) if where is not None)
 
 
