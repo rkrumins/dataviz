@@ -66,9 +66,10 @@ type Target =
 /** Whose types the field is made on. */
 type Of = 'entity' | 'relationship'
 
-const WORDS: Record<Of, { plural: string; type: string; types: string; defs: 'entityTypeDefinitions' | 'relationshipTypeDefinitions' }> = {
-  entity: { plural: 'entities', type: 'entity type', types: 'entity types', defs: 'entityTypeDefinitions' },
-  relationship: { plural: 'relationships', type: 'relationship type', types: 'relationship types', defs: 'relationshipTypeDefinitions' },
+/** Their types as the dialog names them, and where the semantic layer keeps them. */
+const WORDS: Record<Of, { type: string; types: string; defs: 'entityTypeDefinitions' | 'relationshipTypeDefinitions' }> = {
+  entity: { type: 'entity type', types: 'entity types', defs: 'entityTypeDefinitions' },
+  relationship: { type: 'relationship type', types: 'relationship types', defs: 'relationshipTypeDefinitions' },
 }
 
 /** The property made a field, and what is known of it. */

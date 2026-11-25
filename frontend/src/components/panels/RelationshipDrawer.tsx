@@ -19,7 +19,9 @@
  * is made, and one deleted in the draft is restored from here. Edited, the
  * fields its type defines are held up as an entity's are: each typed as it is
  * defined, their allowed values a click away, a value publishing would refuse
- * said where it is, and a required one it has no value for a row to add.
+ * said where it is, and a required one it has no value for a row to add. A
+ * property its type has no field for is made one from its row ("Make this a
+ * field", `PromoteRelationshipFieldDialog`), by who may edit the semantic layer.
  *
  * Details come from the drawer's own read (`useRelationshipRecord`), never the
  * canvas copy: canvas edges carry no properties and, from a trace, not even the
