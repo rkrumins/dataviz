@@ -77,8 +77,9 @@ def test_its_tables_are_the_orms_and_it_runs_again_on_what_create_all_built(conn
         _run(built, "upgrade")                                # the baseline already holds it all
         assert _shape(built) == orm
     baseline.dispose()
+    later = {"graph_watches": {"entity_kind"}}                # ``20261203_1000_watch_edges``'s
     for table in ("graph_seen", "graph_watches"):
-        assert set(orm[table][0]) == set(migrated[table][0]), table
+        assert set(orm[table][0]) - later.get(table, set()) == set(migrated[table][0]), table
         assert orm[table][1:] == migrated[table][1:], table
 
 

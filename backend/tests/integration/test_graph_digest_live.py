@@ -8,8 +8,11 @@
   (``digest.tell_pending``) tells each watcher who reads the graph once — the graph's or an
   entity's watcher — never the author, whose caught-up marker moves with the commit; nothing of one
   rolled back; nobody a second time while one is still unread; a pass that fails tells again.
+* A relationship is watched by its id and told of, and listed, by its type and its ends by name;
+  a removed one as it was before, its ends by the names they have now.
 * Hundreds watching: two passes at once tell each of them once, a batch at a time.
-* A fork has a digest, a marker and watchers of its own.
+* A fork has a digest, a marker and watchers of its own; a relationship it removed is described
+  from its parent's rows, which the fork doesn't copy.
 * Every query the digest and a publish make is served by an index.
 
 Needs ``GRAPHVER_E2E=1`` and a live Postgres holding both schemas (``MANAGEMENT_DB_URL``).
@@ -104,6 +107,27 @@ async def _ids(gid: str) -> dict:
             NodeVersionORM.graph_id == gid, NodeVersionORM.urn.is_not(None)).distinct())).all())
 
 
+async def _edge_id(gid: str) -> str:
+    """The id of ``gid``'s one relationship (the import's root → child): it has no urn."""
+    from sqlalchemy import select
+    from backend.app.services.versioning.models import EdgeVersionORM
+
+    async with db.graphver_session() as s:
+        return (await s.execute(select(EdgeVersionORM.entity_id).where(
+            EdgeVersionORM.graph_id == gid).distinct())).scalar_one()
+
+
+def _edge_note(eid: str, root: str, child: str) -> dict:
+    """A note on the import's relationship, as a draft stages it."""
+    return {"op": "update", "entityKind": "edge", "entityId": eid,
+            "payload": {"edgeType": "CONTAINS", "sourceEntityId": root, "targetEntityId": child,
+                        "properties": {"note": "Checked"}}}
+
+
+def _edge_gone(eid: str) -> dict:
+    return {"op": "delete", "entityKind": "edge", "entityId": eid}
+
+
 class _Harness:
     def __init__(self, c, gid):
         self.c, self.gid = c, gid
@@ -119,18 +143,24 @@ class _Harness:
         assert r.status_code == 200, r.text
         return r.json()
 
-    async def watch(self, user, urn=None):
-        r = await self.c.put(f"{self.g}/watch", json={"entityUrn": urn} if urn else {}, headers=h(user))
+    async def watch(self, user, urn=None, edge=None):
+        body = {"entityUrn": urn} if urn else {"edgeId": edge} if edge else {}
+        r = await self.c.put(f"{self.g}/watch", json=body, headers=h(user))
         assert r.status_code == 200, r.text
+        return r.json()
 
-    async def draft(self, user, *changes, name="Fixes"):
-        """A public draft of ``user``'s with each of ``changes`` (``(entity id, fields)``) saved."""
+    async def draft(self, user, *changes, name="Fixes", ops=()):
+        """A public draft of ``user``'s with each of ``changes`` (``(entity id, fields)``) saved,
+        and ``ops`` as they are."""
         b = f"{self.g}/branches"
         r = await self.c.post(b, json={"visibility": "public", "name": name}, headers=h(user))
         assert r.status_code == 201, r.text
         d = r.json()["branchId"]
         for eid, fields in changes:
             r = await self.c.post(f"{b}/{d}/changes", json=_stage(eid, **fields), headers=h(user))
+            assert r.status_code == 200, r.text
+        if ops:
+            r = await self.c.post(f"{b}/{d}/changes", json={"ops": list(ops)}, headers=h(user))
             assert r.status_code == 200, r.text
         r = await self.c.post(f"{b}/{d}/commit", json={}, headers=h(user))
         assert r.status_code == 200, r.text
@@ -326,6 +356,74 @@ def test_the_digest_and_what_a_publish_tells_its_watchers(data_sources, monkeypa
     asyncio.run(_digest_run(monkeypatch))
 
 
+def _said(w: dict) -> tuple:
+    """A watched relationship's digest row, as a reader is shown it."""
+    return (w["kind"], w["edgeType"], w["source"]["name"], w["target"]["name"], w["change"], w["seq"])
+
+
+async def _relationship_run(monkeypatch) -> None:
+    from backend.app.api.v1.endpoints.versioning import get_versioning_service
+
+    run = os.urandom(3).hex()
+    alice, bob, carol = (f"{n}_{run}" for n in ("alice", "bob", "carol"))
+    ds = await _seed(run, (alice, bob, carol), readers=(alice, bob, carol))
+    svc = get_versioning_service()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id=WS, actor=alice))["graph_id"]
+    label = f"Ledger {run}"
+    link = f"/workspaces/{WS}?ds={ds}&dstab=versioning&whatsnew=1"
+    try:
+        async with await _harness(monkeypatch) as c:
+            x = _Harness(c, gid)
+            r = await c.post(f"{x.g}/bulk-ingest", content=_IMPORT_NDJSON, headers=h(alice))
+            assert r.status_code == 200, r.text
+            ids = await _ids(gid)
+            root, child, edge = ids["urn:t:root"], ids["urn:t:child"], await _edge_id(gid)
+            for who in (bob, carol):
+                await x.seen(who, 2)
+            got = await x.watch(carol, edge=edge)                  # by its id: it has no urn
+            assert ([e["id"] for e in got["edges"]], got["entities"]) == ([edge], [])
+            await x.watch(bob, "urn:t:root")                       # one of its ends, left alone
+
+            # A change to the relationship tells its watcher, by its type and its ends.
+            d = await x.draft(alice, ops=[_edge_note(edge, root, child)])
+            r = await x.publish(alice, d, "Edge note")
+            assert r.status_code == 200, r.text
+            assert await digest.tell_pending() == 1
+            assert await _told(ds) == {carol: [(
+                f"The “contains” relationship from “Imported Root” to “Imported Child” changed in “{label}”",
+                "Version #3: “Edge note”. 1 changed.", link, alice)]}
+            [w] = (await x.digest(carol))["watchedChanged"]
+            assert _said(w) == ("edge", "CONTAINS", "Imported Root", "Imported Child", "changed", 3)
+            assert (w["entityId"], w["source"]["entityId"], w["target"]["entityId"]) == (edge, root, child)
+            assert w["at"] and (await x.digest(bob))["watchedChanged"] == []
+
+            # Removed — its removal records no type and no ends — it is told of as it was, its
+            # ends by the names they have now.
+            await _read(ds, carol)
+            d = await x.draft(alice, (child, {"displayName": "Renamed Child"}), name="Retire",
+                              ops=[_edge_gone(edge)])
+            r = await x.publish(alice, d, "Retire")
+            assert r.status_code == 200, r.text
+            assert await digest.tell_pending() == 1
+            told = await _told(ds)
+            assert told[carol][-1][:2] == (
+                f"The “contains” relationship from “Imported Root” to “Renamed Child” changed in “{label}”",
+                "Version #4: “Retire”. 1 changed, 1 removed.")
+            assert bob not in told
+            [w] = (await x.digest(carol))["watchedChanged"]        # since her marker, at 2
+            assert _said(w) == ("edge", "CONTAINS", "Imported Root", "Renamed Child", "removed", 4)
+
+            r = await c.delete(f"{x.g}/watch", params={"edgeId": edge}, headers=h(carol))
+            assert r.status_code == 200 and r.json()["edges"] == [], r.text
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_relationship_is_watched_and_told_of_by_its_type_and_ends(data_sources, monkeypatch):
+    asyncio.run(_relationship_run(monkeypatch))
+
+
 async def _fork_run(monkeypatch) -> None:
     from backend.app.api.v1.endpoints.versioning import get_versioning_service
 
@@ -340,25 +438,32 @@ async def _fork_run(monkeypatch) -> None:
             r = await c.post(f"{parent.g}/bulk-ingest", content=_IMPORT_NDJSON, headers=h(alice))
             assert r.status_code == 200, r.text
             child = (await _ids(gid))["urn:t:child"]
+            edge = await _edge_id(gid)
             fork = await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor=alice,
                                         data_source_id=f"dsfork_dg_{run}")
             x = _Harness(c, fork["graph_id"])
             await parent.seen(bob, 2)
             await x.watch(bob)
+            await x.watch(bob, edge=edge)
             got = await x.digest(bob)
             # The fork begins at its parent's head, and its beginning recorded nothing.
             assert [(v["seq"], v["kind"], v["counts"]) for v in got["versions"]] == [(2, "genesis", None)]
             assert got["since"] is None                         # the parent's marker is not its own
             assert (await x.seen(bob, 2))["seq"] == 2
-            d = await x.draft(alice, (child, {"description": "Fork only"}))
+            d = await x.draft(alice, (child, {"description": "Fork only"}), ops=[_edge_gone(edge)])
             r = await x.publish(alice, d, "In the fork")
             assert r.status_code == 200, r.text
             got = await x.digest(bob)
             assert [(v["seq"], v["message"]) for v in got["versions"]] == [(3, "In the fork")]
+            # Removed in the fork: as it was, and its ends by name, read from the parent's rows.
+            assert [_said(w) for w in got["watchedChanged"]] == [
+                ("edge", "CONTAINS", "Imported Root", "Imported Child", "removed", 3)]
             assert (await parent.digest(bob))["versions"] == []
             assert await digest.tell_pending() == 1
             told = await _told(f"dsfork_dg_{run}")
             assert [t[0] for t in told[bob]] == ["New version of “this graph”"]   # no row of its own
+            assert told[bob][0][1].endswith("It changed the “contains” relationship from “Imported "
+                                            "Root” to “Imported Child”, which you watch.")
             assert await _told(ds) == {}
     finally:
         await db.dispose_engine()
@@ -369,8 +474,9 @@ def test_a_fork_has_a_digest_marker_and_watchers_of_its_own(data_sources, monkey
     asyncio.run(_fork_run(monkeypatch))
 
 
-_PLANNED = ("commits", "node_versions", "merge_requests", "graph_seen", "graph_watches",
-            "graph_watch_told", "graphver.graphs", "notifications", "role_bindings", "group_members")
+_PLANNED = ("commits", "node_versions", "edge_versions", "merge_requests", "graph_seen",
+            "graph_watches", "graph_watch_told", "graphver.graphs", "notifications", "role_bindings",
+            "group_members")
 
 
 async def _plans_run(monkeypatch) -> None:
@@ -395,11 +501,14 @@ async def _plans_run(monkeypatch) -> None:
             x = _Harness(c, gid)
             r = await c.post(f"{x.g}/bulk-ingest", content=_IMPORT_NDJSON, headers=h(alice))
             assert r.status_code == 200, r.text
-            child = (await _ids(gid))["urn:t:child"]
+            ids = await _ids(gid)
+            root, child, edge = ids["urn:t:root"], ids["urn:t:child"], await _edge_id(gid)
             await x.watch(bob)
             await x.watch(bob, "urn:t:child")
+            await x.watch(bob, edge=edge)
             await x.seen(bob, 1)
-            d = await x.draft(alice, (child, {"description": "Planned"}))
+            d = await x.draft(alice, (child, {"description": "Planned"}),
+                              ops=[_edge_note(edge, root, child)])
             r = await c.post(f"{x.g}/branches/{d}/merge-requests", json={"reviewers": [bob]},
                              headers=h(alice))
             assert r.status_code == 201, r.text

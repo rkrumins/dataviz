@@ -157,6 +157,7 @@ tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
+tests/test_graph_watch_edges_migration.py
 tests/test_graph_watch_migration.py
 tests/test_graph_watch_told_migration.py
 tests/test_heal_native_leftovers.py
