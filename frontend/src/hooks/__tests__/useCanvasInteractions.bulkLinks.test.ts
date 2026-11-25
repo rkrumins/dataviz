@@ -161,6 +161,28 @@ describe('reverseEdge', () => {
     expect(change.after).toMatchObject({ properties: { owner: 'bo' }, confidence: 0.6 })
   })
 
+  it('reverses nothing onto a relationship of that type already there the other way', async () => {
+    useCanvasStore.setState({ edges: [
+      ...useCanvasStore.getState().edges,
+      { id: 'e1', source: 'r1', target: 't2', type: 'lineage', data: { edgeType: 'flows_to' } },
+    ] } as never)
+    const { result } = renderHook(() => useCanvasInteractions())
+    await act(async () => { await result.current.reverseEdge('e0', {}) })
+    expect(useStagedChangesStore.getState().changes).toEqual([])
+    expect(useCanvasStore.getState().edges.map((e) => e.id)).toEqual(['e0', 'e1'])
+    expect(notify).toHaveBeenCalledWith('error', 'These entities are already connected by this relationship.')
+  })
+
+  it('reverses one when the other way holds a relationship of another type', async () => {
+    useCanvasStore.setState({ edges: [
+      ...useCanvasStore.getState().edges,
+      { id: 'e1', source: 'r1', target: 't2', type: 'lineage', data: { edgeType: 'DEPENDS_ON' } },
+    ] } as never)
+    const { result } = renderHook(() => useCanvasInteractions())
+    await act(async () => { await result.current.reverseEdge('e0', {}) })
+    expect(useStagedChangesStore.getState().changes.map((c) => c.type)).toEqual(['reverse_edge'])
+  })
+
   it('reverses nothing when what it holds can’t be read — its properties would be lost', async () => {
     provider.current = { getEdges: vi.fn(async () => { throw new Error('offline') }) }
     const { result } = renderHook(() => useCanvasInteractions())

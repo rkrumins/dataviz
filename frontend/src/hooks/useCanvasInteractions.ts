@@ -17,7 +17,7 @@ import { useBranchStore } from '@/store/branchStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
 import { mapWithConcurrency } from '@/lib/concurrency'
-import { validateDrawnEdge } from '@/services/ontologyPreflightService'
+import { connectedEdgeTypes, validateDrawnEdge } from '@/services/ontologyPreflightService'
 import { judgePairs, type LinkPair, type PairVerdict } from '@/lib/bulkLinks'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import { stagedIndexOf } from '@/store/stagedIndex'
@@ -517,6 +517,12 @@ export function useCanvasInteractions(
         const edgeTypeUpper = (edge.data?.edgeType ?? edge.data?.relationship ?? '').toUpperCase()
         if (containmentEdgeTypes.some(c => c.toUpperCase() === edgeTypeUpper)) {
             notify('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
+            return
+        }
+        // One relationship of a type between two entities each way, as drawing one keeps it: the
+        // other way already holding this type, the save would refuse the reversed one.
+        if (connectedEdgeTypes(useCanvasStore.getState().edges, edge.target, edge.source).has(edgeTypeUpper)) {
+            notify('error', 'These entities are already connected by this relationship.')
             return
         }
 
