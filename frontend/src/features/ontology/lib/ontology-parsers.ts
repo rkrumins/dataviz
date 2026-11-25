@@ -99,8 +99,8 @@ function fieldDefToSchema(f: Record<string, unknown>): Field {
   }
 }
 
-/** A field as the ontology stores it. */
-function fieldSchemaToBackend(f: Field): Record<string, unknown> {
+/** A field as the ontology stores it — an entity type's or a relationship type's. */
+export function fieldSchemaToBackend(f: Field): Record<string, unknown> {
   return {
     id: f.id,
     name: f.name,

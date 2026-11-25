@@ -61,6 +61,10 @@ export const EDGE_RESERVED_KEYS: ReadonlySet<string> = new Set([
   'sourceDepth', 'targetDepth', 'levelDigest', 'gvSeq', 'latestUpdate',
 ])
 
+/** A relationship's envelope — what every relationship is, never a property it carries, so never a
+ *  field of its type: the mirror of `_EDGE_ENVELOPE_KEYS` in `backend/app/providers/falkordb_provider.py`. */
+export const EDGE_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['id', 'confidence', 'properties', 'gvHash'])
+
 /** Structural targets name at most this many containers: the search's limit on one OR. */
 export const MAX_CONTAINERS = 24
 /** A selection is sent as its ids — at most this many. */
