@@ -60,4 +60,11 @@ describe('useAllValues', () => {
     expect(result.current.error).toBeNull()
     expect(follow).toHaveBeenCalledTimes(2)
   })
+
+  it("reads a relationship property's values from the relationships' catalog", async () => {
+    follow.mockResolvedValueOnce(answer('weight'))
+    const { result } = renderHook(() => useAllValues('v1', 'weight', true, 'relationships'))
+    await waitFor(() => expect(result.current.values).toEqual([FINANCE]))
+    expect(follow.mock.calls[0][2]).toMatchObject({ subject: 'relationships', valuesFor: 'weight' })
+  })
 })

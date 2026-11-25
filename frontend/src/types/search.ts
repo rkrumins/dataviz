@@ -266,6 +266,8 @@ export type SearchAncestorCountsResult = Omit<GenSearchAncestorCountsResult, 'co
     counts: Record<string, SearchAncestorCount>
 }
 export type SearchCatalogRequest = GenSearchCatalogRequest
+/** Whose properties a catalog lists: the view's entities, or the relationships between them. */
+export type CatalogSubject = NonNullable<GenSearchCatalogRequest['subject']>
 export type SearchCatalogValue = GenSearchCatalogValue
 export type SearchCatalogTag = GenSearchCatalogTag
 export type SearchCatalogProperty = RequireKeys<

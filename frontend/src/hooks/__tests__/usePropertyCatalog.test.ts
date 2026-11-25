@@ -137,6 +137,25 @@ describe('usePropertyCatalog', () => {
         expect(signal().aborted).toBe(true)
     })
 
+    it("reads the relationships' catalog apart from the entities': asked for by subject, kept on its own", async () => {
+        searchCatalog.mockImplementation(async (body: SearchCatalogRequest) => (body.subject === 'relationships'
+            ? answer({ subject: 'relationships', entities: 31_200 }) : answer({ entities: 12_400 })))
+        const entities = renderHook(() => usePropertyCatalog('view-1'))
+        const relationships = renderHook(() => usePropertyCatalog('view-1', 'relationships'))
+        await waitFor(() => expect(relationships.result.current.catalog?.entities).toBe(31_200))
+        expect(entities.result.current.catalog?.entities).toBe(12_400)
+        // Two reads, one each — the entities' asked for as it always was, without a subject.
+        const bodies = searchCatalog.mock.calls.map(([body]) => body as SearchCatalogRequest)
+        expect(bodies.map((b) => b.subject)).toEqual([undefined, 'relationships'])
+        entities.unmount()
+        relationships.unmount()
+
+        // Each is remembered under its own subject: opened again, neither shows the other's.
+        searchCatalog.mockImplementation(() => new Promise(() => {}))
+        expect(renderHook(() => usePropertyCatalog('view-1', 'relationships')).result.current.catalog?.entities).toBe(31_200)
+        expect(renderHook(() => usePropertyCatalog('view-1')).result.current.catalog?.entities).toBe(12_400)
+    })
+
     it("shows a view's last complete catalog at once when it is opened again", async () => {
         searchCatalog.mockResolvedValueOnce(answer({ entities: 100 }))
         const first = renderHook(() => usePropertyCatalog('view-1'))
