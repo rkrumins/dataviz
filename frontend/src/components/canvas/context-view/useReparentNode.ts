@@ -56,7 +56,7 @@ import {
   normalizeEdgeType,
   isContainmentEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, setHasId, isClosedToNesting, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, setHasId, hierarchyDeclared, isClosedToNesting, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
 
 /** What a move replaced, for discard: the parent links the canvas showed, and the moved entity's
  *  own placement in the view (null: it had none) — only that, so a layout edit made since stays. */
@@ -416,8 +416,9 @@ export function useReparentNode() {
 
     const childType = dragged.data?.type as string
     const parentType = newParent.data?.type as string
-    // A type that holds nothing takes nothing — as a row offers no "+" for a child (isClosedToNesting).
-    if (isClosedToNesting(parentType, entityTypes, hierarchyMap)) {
+    // A type that holds nothing takes nothing — as a row offers no "+" for a child (isClosedToNesting)
+    // — where the ontology says what holds what; one that declares no hierarchy leaves it open.
+    if (hierarchyDeclared(entityTypes, hierarchyMap) && isClosedToNesting(parentType, entityTypes, hierarchyMap)) {
       const p = typeName(parentType)
       return refused({ hint: `${p[0].toUpperCase()}${p.slice(1)} holds nothing`, message: `A ${parentType} can't contain other entities.` }, 'error')
     }

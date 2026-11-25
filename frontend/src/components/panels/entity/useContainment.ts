@@ -16,7 +16,7 @@ import {
   useRootEntityTypes,
   normalizeEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, deriveContainmentEdges, isClosedToNesting, setHasId } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, deriveContainmentEdges, hierarchyDeclared, isClosedToNesting, setHasId } from '@/services/ontologyPreflightService'
 import { childrenOf, containmentIndexOf, nodeIndexOf } from '@/lib/storeIndex'
 import { moveHost } from '@/store/canvasLayoutBridge'
 import { useEndpoints } from '../relationship/useEndpoints'
@@ -84,6 +84,8 @@ export function useMoveTargets(nodeId: string, enabled: boolean): MoveTarget[] {
     }
     // One allowed-children answer per candidate TYPE, not per node.
     const canContain = new Map<string, boolean>()
+    // A type left empty is a leaf only where the ontology declares a hierarchy (as for a drop).
+    const declared = hierarchyDeclared(entityTypes, hierarchyMap)
     const out: MoveTarget[] = []
     const drawn = moveHost()?.isDrawn
     for (const n of nodes) {
@@ -92,7 +94,7 @@ export function useMoveTargets(nodeId: string, enabled: boolean): MoveTarget[] {
       const type = n.data.type as string
       let ok = canContain.get(type)
       if (ok === undefined) {
-        ok = !isClosedToNesting(type, entityTypes, hierarchyMap)
+        ok = !(declared && isClosedToNesting(type, entityTypes, hierarchyMap))
           && setHasId(allowedChildTypeIds(type, entityTypes, rootEntityTypes, hierarchyMap), childType)
         canContain.set(type, ok)
       }
