@@ -104,10 +104,10 @@ interface GalleryTemplate {
     entityScope?: 'all' | 'curated'
 }
 
-/** "2 layers: Domains, Teams" — a long list trimmed so the card stays a card. */
+/** "2 layers: Domains, Teams." — a long list trimmed so the card stays a card. */
 function describeList(count: number, noun: string, names: string[], shown = 4): string {
     const listed = names.slice(0, shown).join(', ')
-    return `${count} ${noun}${count === 1 ? '' : 's'}: ${listed}${count > shown ? ', …' : ''}`
+    return `${count} ${noun}${count === 1 ? '' : 's'}: ${listed}${count > shown ? ', …' : '.'}`
 }
 
 /** Gallery of Quick Start templates — one card per template with a mini preview,
@@ -316,7 +316,7 @@ function PerTypeCard({ candidates, options, recommended, active, onCreate }: {
         >
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-snug mb-2.5">
                 {chosen.length > 0
-                    ? `${describeList(chosen.length, 'layer', chosen.map(c => c.label))}. Each holds everything its entities contain.`
+                    ? `${describeList(chosen.length, 'layer', chosen.map(c => c.label))} Each holds everything its entities contain.`
                     : 'Choose the top-level types to make layers for.'}
             </p>
             <TypeChips label="Top-level types" options={options} selected={selected} onToggle={toggle} />
@@ -384,13 +384,13 @@ function PerEntityCard({ types, initialType, recommended, active, onCreate }: {
                 {chosenTypes.length === 0 ? 'Choose the top-level types whose entities become columns.'
                     : over ? `More than ${ENTITY_COLUMNS_MAX} columns are too many to read side by side. Choose fewer types, or use one layer per top-level type.`
                         : total === 1 ? `One column, holding everything ${entities[0]?.name} contains.`
-                            : `${describeList(total, 'column', entities.map(e => e.name), 3)}. Each holds everything its entity contains.`}
+                            : `${describeList(total, 'column', entities.map(e => e.name), 3)} Each holds everything its entity contains.`}
             </p>
             <TypeChips label="Top-level types" options={types} selected={selected} onToggle={toggle} />
             {step === 'choose' ? (
                 <>
                     <div className="mt-3">
-                        <TemplatePreview layers={entities.slice(0, 6).map(e => ({ id: e.urn, name: e.name }))} active={active} />
+                        <TemplatePreview layers={layersForTopLevelEntities(entities).layers} active={active} />
                     </div>
                     {!over && total > 0 && (
                         <div className="flex justify-end mt-3">
@@ -1097,7 +1097,7 @@ export function LayoutStep({
                         exit={{ opacity: 0, height: 0 }}
                         className="space-y-4 pt-6 border-t border-slate-200 dark:border-slate-700"
                     >
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
                             <div>
                                 <h4 className="font-bold text-slate-900 dark:text-white">
                                     {showGallery ? 'Choose a starting template' : 'Configure Layers'}
@@ -1110,13 +1110,13 @@ export function LayoutStep({
                                             : 'Define the horizontal layers for your context view'}
                                 </p>
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
                                 {showLayerList && fitTarget && (
                                     <button
                                         type="button"
                                         onClick={() => setReviewing(reviewing ? null : new Set(Object.keys(offers)))}
                                         aria-expanded={!!reviewing}
-                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
                                     >
                                         <Wand2 className="w-4 h-4" />
                                         Suggest from your graph
@@ -1126,7 +1126,7 @@ export function LayoutStep({
                                     <button
                                         type="button"
                                         onClick={() => setSavingAsTemplate(true)}
-                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                     >
                                         <Save className="w-4 h-4" />
                                         Save as template
@@ -1135,7 +1135,7 @@ export function LayoutStep({
                                 {!showGallery && !imported && (
                                     <button
                                         onClick={handleSwitchTemplate}
-                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                     >
                                         <Repeat className="w-4 h-4" />
                                         Switch template
@@ -1147,7 +1147,7 @@ export function LayoutStep({
                                 {(!showGallery || !blank) && (
                                     <button
                                         onClick={handleAddLayer}
-                                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
                                     >
                                         <Plus className="w-4 h-4" />
                                         Add Layer
