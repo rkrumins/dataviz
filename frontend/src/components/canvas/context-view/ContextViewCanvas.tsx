@@ -398,6 +398,8 @@ import { useCanvasPropertyJobs } from '@/features/versioning/canvas/useCanvasPro
 import { usePropertyJobsStore } from '@/store/propertyJobsStore'
 import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
+import { memberRuleLooks, type MemberLine } from '../ruleLines'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
 import { Kbd } from '@/components/ui/Kbd'
@@ -1649,7 +1651,8 @@ export function ContextViewCanvas({
   // Orphaned entities (Display menu → Advanced): a power-user panel, closed by default.
   const [orphansOpen, setOrphansOpen] = useState(false)
   // Display rules match through search, which reads the graph as it is now: off at a past revision.
-  useDisplayRuleEngine(atRevision ? null : activeView?.id ?? null)
+  // Those that style relationships paint the lines this canvas draws (`ruleLooks` below).
+  useDisplayRuleEngine(atRevision ? null : activeView?.id ?? null, { lines: true })
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   useViewLibrary(activeView?.id ?? null, effectiveBranchId)
 
@@ -7614,6 +7617,15 @@ export function ContextViewCanvas({
     () => (connectionHighlight ? new Set(connectionHighlight) : searchLit ? searchLineIds : mergedHighlightEdges),
     [connectionHighlight, searchLit, searchLineIds, mergedHighlightEdges]
   )
+  // The lines the view's relationship display rules paint, and how (ruleLines.ts): a line is
+  // painted for any relationship it stands for that a rule matches. Not in a trace, whose wires
+  // stand for no relationships of their own.
+  const ruleMeta = useDisplayRuleMatchStore((s) => s.ruleMeta)
+  const ruleEdgeMatches = useDisplayRuleMatchStore((s) => s.matchEdgesByRule)
+  const ruleLooks = useMemo(() => (overlay.active ? undefined
+    : memberRuleLooks(ruleMeta, ruleEdgeMatches, browseVisibleLineageEdges as MemberLine[])),
+  [overlay.active, ruleMeta, ruleEdgeMatches, browseVisibleLineageEdges])
+
   // A lit line's badge: how many matches it draws, at least, while pages of
   // them remain.
   const searchCountLabels = useMemo(() => (searchLit
@@ -8694,6 +8706,7 @@ export function ContextViewCanvas({
               highlightedEdges={overlayHighlightEdges}
               isHighlightActive={connectionHighlight !== null || isHighlightActive || searchLit}
               countLabels={searchCountLabels}
+              ruleLooks={ruleLooks}
               resolveEdgeColor={resolveEdgeColor}
               resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}

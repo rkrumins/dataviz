@@ -296,6 +296,29 @@ describe('useDisplayRuleEngine', () => {
         useSchemaStore.setState({ schema: null })
     })
 
+    it('clears a note the relationships were answered with once their rules change', async () => {
+        const note = '1 of your rules shows the published graph’s answer for what your draft changed.'
+        useReferenceModelStore.setState({ displayRules: [
+            rule('feeds', { target: 'relationships', predicate: { kind: 'edges', edgeTypes: ['FEEDS'] } }),
+        ] })
+        useCanvasStore.setState({ nodes: nodes(2), edges: [edge('e-1', 'urn:n0', 'urn:n1', 'FEEDS')] })
+        membership().mockImplementation(async (): Promise<SearchMembershipResult> => (
+            { matches: {}, edgeMatches: { feeds: [] }, errors: {}, notes: [note] }))
+        const { rerender } = renderHook(() => useDisplayRuleEngine('view-1', { lines: true }))
+        await waitFor(() => expect(useDisplayRuleMatchStore.getState().membershipNote).toBe(note))
+
+        membership().mockImplementation(async (): Promise<SearchMembershipResult> => (
+            { matches: {}, edgeMatches: { feeds: ['e-1'] }, errors: {} }))
+        act(() => {
+            useReferenceModelStore.setState({ displayRules: [
+                rule('feeds', { target: 'relationships', predicate: { kind: 'edges', edgeTypes: ['USES'] } }),
+            ] })
+        })
+        rerender()
+        await waitFor(() => expect(membership()).toHaveBeenCalledTimes(2))
+        expect(useDisplayRuleMatchStore.getState().membershipNote).toBeNull()
+    })
+
     it('never asks about relationships on a canvas that does not draw them', async () => {
         useReferenceModelStore.setState({ displayRules: [
             rule('feeds', { target: 'relationships', predicate: { kind: 'edges' } }),
