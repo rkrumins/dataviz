@@ -232,15 +232,18 @@ describe('a column whose entity is no longer in this source', () => {
     expect(layerOf('lost')?.anchorUrn).toBe('Vanished')
   }, 30000)
 
-  it('"Delete the column" takes its entity’s placement with it, and undoes', async () => {
+  it('"Delete the column" asks first — there is nothing in it — and takes its entity’s placement with it, and undoes', async () => {
     const h = await open()
     await loaded(h)
     await click(h, within(bodyOf('lost')).getByRole('button', { name: 'Delete the column' }))
+    // The same dialog as every column's delete: its gone entity is not counted as a hand placement.
+    const dialog = screen.getByRole('dialog', { name: /Delete the Vanished column/ })
+    expect(dialog).toHaveTextContent('Nothing is in it — only the column goes.')
+    await click(h, within(dialog).getByRole('button', { name: 'Delete column' }))
     expect(layerOf('lost')).toBeUndefined()
     // Nothing is left to show of it: its placement is not moved into another column.
     expect(layout().assignments.Vanished).toBeUndefined()
-    const done = notice(/^Deleted layer “Vanished”/)!
-    expect(done.message).toBe('Deleted layer “Vanished”.')
+    const done = notice(/^Removed the Vanished column/)!
     await press(h, done, 'Undo')
     expect(layerOf('lost')?.anchorUrn).toBe('Vanished')
     expect(layout().assignments.Vanished).toMatchObject({ layerId: 'lost' })
