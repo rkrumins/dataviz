@@ -59,6 +59,8 @@ Every new capability ships behind its own switch, off by default.
   contacts about it, openly or privately, about one node or the whole view; @mentions, accepted
   answers, watching, Inbox notices, question marks on the canvas, question counts on cards, people's
   profiles with your own conversations, reminders after 3 days and escalation after 7.
+  A question about one node names it by its name, after the things it sits in, with its ID; hovering
+  it shows its type, its whole path and its whole ID.
 - **Data source details** (`dataSourceMetadataEnabled`): a description, links and tags; sensitivity
   and Certified / In review / Deprecated status, set by the source's named Owner and Stewards or
   workspace admins, shown on the source, its card and every view built on it; how it was onboarded;

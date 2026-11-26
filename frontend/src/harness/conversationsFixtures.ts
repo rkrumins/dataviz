@@ -92,10 +92,13 @@ export const THREADS: Record<string, ThreadDetail> = {
     }),
     th_anchored: detail({
         id: 'th_anchored', askedBy: 'usr_eli', messages: [q4, r4a], entityId: 'urn:fin:gl_balances', entityLabel: 'gl_balances',
+        entityPath: ['FIN_DB', 'MARTS'], entityType: 'table',
         access: { ...ACCESS, canAnswer: false },
     }),
     th_deleted: detail({ id: 'th_deleted', askedBy: 'usr_gone', messages: [q5, r5a, r5b], access: { ...ACCESS, canAnswer: false, canClose: false } }),
-    th_closed: detail({ id: 'th_closed', askedBy: 'usr_cy', messages: [q6, r6a], status: 'closed', access: { ...ACCESS, canAnswer: false } }),
+    // Asked before a question kept its entity's name: its id stood in for one.
+    th_closed: detail({ id: 'th_closed', askedBy: 'usr_cy', messages: [q6, r6a], status: 'closed', access: { ...ACCESS, canAnswer: false },
+        entityId: 'urn:fin:fx_rates', entityLabel: 'urn:fin:fx_rates' }),
 }
 
 // ── A data source's Questions tab ─────────────────────────────────────

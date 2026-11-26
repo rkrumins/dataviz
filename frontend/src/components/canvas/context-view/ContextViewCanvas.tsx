@@ -9188,7 +9188,7 @@ export function ContextViewCanvas({
         // During a trace, "Trace from here" leads the menu instead (`trace`).
         onTraceNode={traceActive ? undefined : (id) => startCanvasTrace(id)}
         onFocusConnections={openLens}
-        onAskAboutNode={useAskAboutNode()}
+        onAskAboutNode={useAskAboutNode(resolveTraceNode)}
         onExportNode={exportWithChildren ? (id) => {
           // The selection it is part of, or the entity right-clicked alone.
           const selection = selectedNodeIds.filter(isSelectableNode)

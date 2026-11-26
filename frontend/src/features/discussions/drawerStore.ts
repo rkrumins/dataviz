@@ -13,8 +13,14 @@ import type { SubjectKey } from '@/services/discussionsService'
 
 /** A node on the canvas a question is about. */
 export interface DrawerEntity {
+    /** Its urn. */
     id: string
+    /** Its name. */
     label: string
+    /** The containers it sits in, top first; empty or absent at the top. */
+    path?: string[]
+    /** Its entity type. */
+    type?: string | null
 }
 
 export interface DrawerSubject extends SubjectKey {

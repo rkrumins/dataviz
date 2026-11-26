@@ -100,6 +100,7 @@ tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_discussion_counts.py
 tests/test_discussion_housekeeping.py
+tests/test_discussion_path_migration.py
 tests/test_discussions.py
 tests/test_discussions_access.py
 tests/test_discussions_scale.py
