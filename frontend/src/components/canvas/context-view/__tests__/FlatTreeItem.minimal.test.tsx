@@ -173,4 +173,14 @@ describe('Spacious, for the same rows', () => {
     renderColumn('spacious', [GROUP], groupCallbacks())
     expect(within(row('logical:g1')).getByText('Drop entities or groups here')).toBeInTheDocument()
   })
+
+  it("says a group's moves only change this view", () => {
+    renderColumn('spacious', [GROUP], groupCallbacks())
+    for (const open of ['Move group Finance', 'Move the contents of Finance']) {
+      fireEvent.click(within(row('logical:g1')).getByRole('button', { name: open }))
+      expect(row('logical:g1').querySelector('[data-change-tag="view"]')).toHaveTextContent('Only this view')
+      expect(row('logical:g1')).toHaveTextContent('Groups organise this view — the data doesn’t change.')
+      fireEvent.keyDown(within(row('logical:g1')).getByRole('combobox'), { key: 'Escape' })
+    }
+  })
 })

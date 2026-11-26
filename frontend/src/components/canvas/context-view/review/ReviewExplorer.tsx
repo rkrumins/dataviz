@@ -48,6 +48,8 @@ import { useExpandableRows, type RowLevel } from '@/hooks/useExpandableRows'
 import { ExportMenu, type ExportDetail } from '@/features/versioning/components/ExportMenu'
 import { TreeView, type TreeRowFrame } from '@/features/versioning/components/TreeView'
 import { useChangeListLayout } from '@/features/versioning/hooks/useChangeListLayout'
+import { ChangeKindTag } from '../DropHint'
+import { NO_REACH, ONLY_THIS_VIEW, dataTagText, type DataReach } from '../changeKind'
 import { useReviewTree } from '@/features/versioning/hooks/useReviewTree'
 import { pathOf, treeIdOf } from '@/features/versioning/model/reviewTree'
 import type { ChangeTreeItem } from '@/services/versioningApiService'
@@ -205,7 +207,7 @@ export function ReviewFilterBar({ index, filter, onChange, shown, attention, onD
 
 const domId = (key: string) => `review-row-${key}`
 
-export function ReviewExplorer({ index, rows, narrowed = false, selected, onSelect, problemIds, onDiscard, onReveal, onStepThrough, onClearFilter, searchRef, disabled }: {
+export function ReviewExplorer({ index, rows, narrowed = false, selected, onSelect, problemIds, onDiscard, onReveal, onStepThrough, onClearFilter, searchRef, disabled, reach = NO_REACH }: {
   index: ReviewIndex
   /** The groups shown, as indices into `index.groups`. */
   rows: number[]
@@ -222,6 +224,8 @@ export function ReviewExplorer({ index, rows, narrowed = false, selected, onSele
   onClearFilter: () => void
   searchRef?: RefObject<HTMLInputElement | null>
   disabled?: boolean
+  /** Who a data change reaches beyond this view. */
+  reach?: DataReach
 }) {
   const { groups } = index
   // Top-down (unless filtered): each change under its container, as the canvas places it.
@@ -357,7 +361,7 @@ export function ReviewExplorer({ index, rows, narrowed = false, selected, onSele
               return (
                 <ReviewRow id={f.domId} group={g} level={f.level} current={f.current}
                   onToggle={f.onToggle} onLevel={f.onLevel} onFocus={f.onFocus}
-                  setsize={f.setsize} posinset={f.posinset} heading={headingLabel(headingOf(g))}
+                  setsize={f.setsize} posinset={f.posinset} heading={headingLabel(headingOf(g))} reach={reach}
                   depth={f.depth} lead={f.lead} inside={f.inside}
                   attention={needsAttention(g, problemIds)} problemIds={problemIds}
                   onReveal={onReveal} onDiscard={() => { if (!disabled) onDiscard(g.changes.map((c) => c.id)) }} disabled={disabled} />
@@ -377,6 +381,8 @@ export function ReviewExplorer({ index, rows, narrowed = false, selected, onSele
                   style={{ height: HEADING_HEIGHT, transform: `translateY(${v.start}px)` }}>
                   <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/80 truncate">{item.heading}</span>
                   <span className="text-[10.5px] text-ink-muted/70 tabular-nums">{item.count.toLocaleString()}</span>
+                  {/* What a run of changes changes: the data, or only this view. */}
+                  <ChangeKindTag kind={item.view ? 'view' : 'data'} reach={reach} className="ml-auto min-w-0 mb-px" />
                 </div>
               )
             }
@@ -389,7 +395,7 @@ export function ReviewExplorer({ index, rows, narrowed = false, selected, onSele
                   onToggle={() => { onSelect(key); expand.toggle(key) }}
                   onLevel={(l) => expand.setLevel(key, l)}
                   onFocus={() => onSelect(key)}
-                  setsize={rows.length} posinset={item.row + 1} heading={headingLabel(headingOf(g))}
+                  setsize={rows.length} posinset={item.row + 1} heading={headingLabel(headingOf(g))} reach={reach}
                   attention={needsAttention(g, problemIds)} problemIds={problemIds}
                   path={pathNames(g)} onShowInTree={topDown ? () => showInTree(g) : undefined}
                   onReveal={onReveal} onDiscard={() => discard(key)} disabled={disabled} />
@@ -403,7 +409,7 @@ export function ReviewExplorer({ index, rows, narrowed = false, selected, onSele
   )
 }
 
-type ListItem = { key: string; heading: string; count: number; row: -1 } | { key: string; heading: null; count: 0; row: number }
+type ListItem = { key: string; heading: string; count: number; row: -1; view: boolean } | { key: string; heading: null; count: 0; row: number }
 
 /** Headings and rows, in order — a heading before each run of one type — and each row's item. */
 function listItems(rows: readonly number[], groups: readonly ReviewGroup[]): { items: ListItem[]; itemOf: number[] } {
@@ -416,7 +422,7 @@ function listItems(rows: readonly number[], groups: readonly ReviewGroup[]): { i
     const h = headingOf(g)
     if (h !== last) {
       headingAt = items.length
-      items.push({ key: `heading:${h}`, heading: headingLabel(h), count: 0, row: -1 })
+      items.push({ key: `heading:${h}`, heading: headingLabel(h), count: 0, row: -1, view: g.kind === 'layout' })
       last = h
     }
     ;(items[headingAt] as { count: number }).count++
@@ -449,7 +455,7 @@ function groupFields(group: ReviewGroup): FieldChange[] {
 
 function ReviewRow({
   id, group, level, current, onToggle, onLevel, onFocus, setsize, posinset, heading, attention, problemIds, onReveal, onDiscard,
-  disabled, depth, lead, inside, path, onShowInTree,
+  disabled, depth, lead, inside, path, onShowInTree, reach,
 }: {
   id: string
   group: ReviewGroup
@@ -474,6 +480,8 @@ function ReviewRow({
   /** Filtered, top-down: its containers, named — and opening the way down to it. */
   path?: string[]
   onShowInTree?: () => void
+  /** Who a data change reaches — what an entity's row says it changes. */
+  reach: DataReach
 }) {
   const colors = useEntityColorSet(group.typeId ?? '')
   const layout = group.kind === 'layout'
@@ -499,7 +507,7 @@ function ReviewRow({
       )}
       sub={path?.length
         ? <span aria-label={`in ${path.join(', ')}`}>{path.join(' › ')}</span>
-        : group.kind === 'edge' ? group.edgeType : layout ? 'This view only' : undefined}
+        : group.kind === 'edge' ? group.edgeType : layout ? ONLY_THIS_VIEW : dataTagText(reach)}
       summary={summary
         ? <ChangeSummary summary={summary} status="modified" kind={group.kind === 'edge' ? 'edge' : 'node'} />
         : <span className="block text-[11.5px] text-ink-secondary truncate"><SentenceView sentence={group.sentence} /></span>}
@@ -662,7 +670,7 @@ function ChangeDetail({ change, several, depth = 'all', onShowAll }: {
 }
 
 /** A move, in words: where the entity sits now and where the save puts it. (Its raw `before` holds
- *  the undo state — the whole view layout — which is no reading matter.) */
+ *  the undo state — the links it replaced and its own placement — which is no reading matter.) */
 function MoveDetail({ change }: { change: StagedChange }) {
   const label = (id: string | null | undefined) => {
     if (!id) return null

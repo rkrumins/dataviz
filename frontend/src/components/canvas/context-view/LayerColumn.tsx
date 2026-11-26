@@ -32,6 +32,15 @@ import { useNarrowVisibility } from '@/features/narrow/narrowStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
+import { DropHint } from './DropHint'
+import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
+import { draggedEntity } from './entityDrag'
+import { draggedLayer, setDraggedLayer } from './layerDrag'
+import { useReparentNode } from './useReparentNode'
+import { COLUMN_KIND_ICON, columnKind, columnKindCopy, type ColumnKind, type ColumnKindCopy } from './columnKind'
+import { ColumnKindMark } from './ColumnKindMark'
+import { nodeIndexOf } from '@/lib/storeIndex'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 import type { PlacedOut, PlacementInfo } from './placement'
 import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
 import { LayerSortMenu, SORT_MODE_ICONS, SORT_MODE_LABELS } from './LayerSortMenu'
@@ -216,6 +225,11 @@ interface LayerColumnProps {
   /** Keyboard reorder nudge (⌥↑/↓) — resolves the sibling set canvas-side so it
    *  works for roots and children alike. */
   onReorderNudge?: (nodeId: string, dir: 'up' | 'down') => void
+  /** Whether a dragged entity is among a row's siblings — the set custom order arranges. */
+  reorderAccepts?: (draggedId: string, targetId: string) => boolean
+  /** The canvas takes moves (a draft open and writable, editing on): any row can be dropped inside
+   *  another, a data change. */
+  moveEnabled?: boolean
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -284,6 +298,8 @@ interface LayerColumnProps {
   /** Why an anchored column can never fill — see anchorIssueByLayer. Changes
    *  the empty state from "nothing assigned" (untrue here) to the real reason. */
   anchorIssue?: 'missing' | 'duplicate'
+  /** A column of types: how many entities of other types are placed in it by hand. */
+  handPlaced?: number
   /** Folded into a spine. The canvas's fold window decides (useLayerFold);
    *  the column only asks, through `onFoldChange`. */
   isFolded?: boolean
@@ -432,6 +448,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   reorderEnabled = false,
   onReorderDrop,
   onReorderNudge,
+  reorderAccepts,
+  moveEnabled = false,
   isHydratingInitial = false,
   revealTarget,
   geometryRegistry,
@@ -454,6 +472,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onResizeLayer,
   anchorMore,
   anchorIssue,
+  handPlaced = 0,
   subsetFeed,
   emptyText,
   onSearchInLayer,
@@ -563,6 +582,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   }
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
+  // A column hovering this header: where it lands — after this one coming from the left, before it
+  // from the right (reorderLayer's rule).
+  const [layerDropTitle, setLayerDropTitle] = useState<string | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
@@ -1763,6 +1785,77 @@ export const LayerColumn = React.memo(function LayerColumn({
     return () => { geometryRegistry.delete(layer.id) }
   }, [geometryRegistry, layer.id, virtualizer])
 
+  // ── A column mapped to an entity takes a drop anywhere in its body ──────────
+  // The column IS that entity, so an entity dropped on its body (not on a row — a row takes its
+  // own drop) goes inside it: a DATA change, said as one while the drag hovers. The header keeps
+  // its view-only meaning (show in this column).
+  const { reparent, verdict } = useReparentNode()
+  const anchorUrn = layer.anchorUrn && !anchorIssue ? layer.anchorUrn : null
+  const anchorNode = useCanvasStore((s) => (anchorUrn ? nodeIndexOf(s.nodes).get(anchorUrn) : undefined))
+  const [bodyHint, setBodyHint] = useState<(DropHintSpec & { top: number }) | null>(null)
+  // The hint rides just above the pointer, so it never sits far from where the drop lands — moved
+  // in place on each dragover rather than re-rendering the column.
+  const bodyChipRef = useRef<HTMLDivElement>(null)
+  const chipTop = (clientY: number, box: DOMRect) => Math.max(10, Math.min(clientY - box.top - 44, box.height - 40))
+  const bodyHintFor = (): DropHintSpec | null => {
+    if (!anchorNode) return null
+    const dragged = draggedEntity()
+    return moveHint(dragged ? verdict(dragged, anchorNode.id) : { kind: 'data', edgeType: null },
+      resolveEntityName(anchorNode.data, personaMode, anchorNode.id))
+  }
+  /** A drag over a row — or over the end zone arranging this column's own rows — which answers
+   *  for itself. */
+  const overRow = (e: React.DragEvent) => {
+    const at = e.target as Element | null
+    return !!at?.closest?.('[id^="layer-node-"]') || (!!at?.closest?.('[data-end-zone]') && !forTheBody())
+  }
+  /** In a mapped column, a row dragged from elsewhere is for the body — not the end zone, which
+   *  arranges this column's own rows. */
+  const forTheBody = () => {
+    const dragged = draggedEntity()
+    return !!anchorNode && !!dragged && !nodes.some((n) => n.id === dragged)
+  }
+  // What kind of column this is — mapped to an entity, by type, or hand-picked — said by a mark
+  // on its tile and in its name's card, in the reader's view.
+  const kind = columnKind(layer, { resolved: !!anchorNode, issue: anchorIssue })
+  const anchorName = anchorNode ? resolveEntityName(anchorNode.data, personaMode, anchorNode.id) : undefined
+  const kindCopy = columnKindCopy(kind, {
+    persona: personaMode,
+    anchorName,
+    anchorUrn: layer.anchorUrn,
+    typeNames: (layer.entityTypes ?? []).map((id) => viewEntityTypes.find((t) => t.id === id)?.name ?? id),
+    typePlurals: (layer.entityTypes ?? []).map((id) => {
+      const t = viewEntityTypes.find((x) => x.id === id)
+      return t?.pluralName ?? `${t?.name ?? id}s`
+    }),
+    typeIds: layer.entityTypes,
+    ruleCount: layer.rules?.length,
+    handPlaced,
+  })
+  // A row that can't hold what is dropped on it passes the drop to the entity the column is.
+  const anchorId = anchorNode?.id
+  const forwardTo = useMemo(() => (anchorId && anchorName ? { id: anchorId, name: anchorName } : undefined), [anchorId, anchorName])
+  const openAnchor = kind === 'mapped' && anchorNode ? () => {
+    const id = anchorNode.id
+    useCanvasStore.getState().requestDrawerMove(() => {
+      const st = useCanvasStore.getState()
+      st.openNodeDrawer(id)
+      st.selectNode(id)
+    })
+  } : undefined
+
+  // dragleave fires on the element left, so a drag cancelled or dropped elsewhere clears it here.
+  useEffect(() => {
+    if (!bodyHint) return
+    const clear = () => setBodyHint(null)
+    window.addEventListener('dragend', clear)
+    window.addEventListener('drop', clear)
+    return () => {
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('drop', clear)
+    }
+  }, [bodyHint])
+
   // ── The header's actions tray ─────────────────────────────────────────────
   // Its controls besides the sort and ⋯, most wanted first. The Business view
   // keeps the header to the layer and its sort: adding, grouping, building and
@@ -1821,7 +1914,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   const OverrideSortIcon = SORT_MODE_ICONS[sortMode]
   // Display › Header size: an open header's row, padding, icon and name — one
   // height for every column at a size (`layerHeaderTokens`).
-  const header = layerHeaderTokens(usePreferencesStore(s => s.canvasHeaderSize) ?? 'comfortable')
+  const canvasHeaderSize = usePreferencesStore(s => s.canvasHeaderSize) ?? 'comfortable'
+  const header = layerHeaderTokens(canvasHeaderSize)
   // Display › Show off-screen markers: the "↑ N more · M lines" at the column's ends.
   const showOffscreenMarkers = usePreferencesStore(s => s.showOffscreenLineMarkers) ?? true
   // Display › Empty layers. A column whose anchor entity is gone, or held by
@@ -1990,7 +2084,9 @@ export const LayerColumn = React.memo(function LayerColumn({
           requestFold(false)
         } : undefined}
         className={cn(
-          "group/header sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
+          "group/header sticky top-0 z-10 border-b transition-all duration-200",
+          // Open and reorderable, the header is a handle: grab it to move the column.
+          onReorderLayer && !isCollapsed && !isRenaming ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
           isCollapsed
             ? "flex-1 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/50"
             : cn("flex-shrink-0", header.paddingClass),
@@ -2003,15 +2099,29 @@ export const LayerColumn = React.memo(function LayerColumn({
           // scroll beneath comes from opacity, not a blurred backdrop (a sticky
           // blur surface inside a scroller ghosts as white strips on rows).
           background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%), var(--nx-bg-elevated)`,
-          boxShadow: isDragOver ? `inset 0 0 0 2px ${layer.color}80, 0 0 20px ${layer.color}20` : undefined,
+          // A drop on the header only arranges this view: a dashed outline, as every view change is.
+          outline: isDragOver ? `2px dashed ${layer.color ?? 'currentColor'}` : undefined,
+          outlineOffset: isDragOver ? -3 : undefined,
         }}
         onClick={() => isCollapsed && requestFold(false)}
         onContextMenu={onHeaderContextMenu ? (e) => onHeaderContextMenu(e, layer.id) : undefined}
+        // The whole header is the handle for reordering — not only its icon tile — except while its
+        // name is being edited (a drag there selects text).
+        draggable={!!onReorderLayer && !isRenaming}
+        onDragStart={onReorderLayer && !isRenaming ? (e) => {
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/x-layer-id', layer.id)
+          setDraggedLayer({ id: layer.id, order: layer.order })
+        } : undefined}
+        onDragEnd={onReorderLayer ? () => setDraggedLayer(null) : undefined}
         onDragOver={(e) => {
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
           const isEntity = types.includes('text/x-entity-id')
           const isGroup = types.includes('text/x-group-id')
+          // A column over its own header: nothing to do there.
+          const from = isLayer ? draggedLayer() : null
+          if (from && from.id === layer.id) return
           // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
           // gate on the presence of the typed key + the matching handler).
           if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer) || (isGroup && groupActions)) {
@@ -2019,15 +2129,20 @@ export const LayerColumn = React.memo(function LayerColumn({
             e.dataTransfer.dropEffect = 'move'
             setIsDragOver(true)
             setDragKind(isLayer ? 'layer' : isGroup ? 'group' : 'entity')
+            if (isLayer) {
+              const title = !from ? 'Drop to reorder here' : from.order < layer.order ? `Move after ${layer.name}` : `Move before ${layer.name}`
+              if (title !== layerDropTitle) setLayerDropTitle(title)
+            }
           }
         }}
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null); setLayerDropTitle(null) }
         }}
         onDrop={(e) => {
           e.preventDefault()
           setIsDragOver(false)
           setDragKind(null)
+          setLayerDropTitle(null)
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
           const groupId = e.dataTransfer.getData('text/x-group-id')
@@ -2068,22 +2183,24 @@ export const LayerColumn = React.memo(function LayerColumn({
         {/* Drop hint overlay */}
         {isDragOver && (
           <div
-            className="absolute inset-0 flex items-center justify-center rounded-sm pointer-events-none"
+            // Over the header's own name and tile, which sit in positioned boxes of their own.
+            className="absolute inset-0 z-[25] flex items-center justify-center rounded-sm pointer-events-none"
             style={{ backgroundColor: `${layer.color}15` }}
           >
-            <div className={cn(
-              "flex items-center gap-2 rounded-xl bg-black/40 border border-white/20",
-              isCollapsed ? "p-1" : "px-3 py-1.5",
-            )}>
-              <LucideIcons.MoveRight className="w-3.5 h-3.5" style={{ color: layer.color }} />
-              {/* A spine has no room for the sentence; the tint and the
-                  arrow carry it. */}
-              {!isCollapsed && (
-                <span className="text-xs font-medium" style={{ color: layer.color }}>
-                  {dragKind === 'layer' ? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : `Move to ${layer.name}`}
-                </span>
-              )}
-            </div>
+            {/* A spine has no room for the sentence; the tint and the
+                dashed outline carry it. */}
+            {isCollapsed ? (
+              <span className="grid place-items-center w-6 h-6 rounded-full bg-canvas-elevated border border-dashed border-ink-muted/60">
+                <LucideIcons.Eye className="w-3.5 h-3.5 text-ink" aria-hidden />
+              </span>
+            ) : (
+              <DropHint
+                kind="view"
+                title={dragKind === 'layer' ? layerDropTitle ?? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : 'Show in this column'}
+                detail="only this view"
+                className="mx-2"
+              />
+            )}
           </div>
         )}
         <div
@@ -2108,15 +2225,9 @@ export const LayerColumn = React.memo(function LayerColumn({
               </button>
             )}
             <div
-              draggable={!!onReorderLayer}
-              onDragStart={onReorderLayer ? (e) => {
-                e.stopPropagation()
-                e.dataTransfer.effectAllowed = 'move'
-                e.dataTransfer.setData('text/x-layer-id', layer.id)
-              } : undefined}
               title={onReorderLayer ? `Drag to reorder ${layer.name}` : undefined}
               className={cn(
-                "flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
+                "relative flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
                 isCollapsed
                   ? (spineWidth < NARROW_SPINE_PX ? "rounded-md" : "rounded-lg")
                   : cn(header.tileClass, "group-hover/column:scale-105 group-hover/column:shadow-md"),
@@ -2138,6 +2249,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                 )}
                 style={{ color: layer.color }}
               />
+              {/* The column's kind, over the tile's corner: no width of its own. A narrow spine
+                  has no corner to spare. */}
+              {!(isCollapsed && spineWidth < NARROW_SPINE_PX) && (
+                <ColumnKindMark kind={kind} copy={kindCopy} small={isCollapsed || canvasHeaderSize === 'compact'} />
+              )}
             </div>
           </div>
 
@@ -2264,6 +2380,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     properties={layer.properties}
                     coverRight={trayWidth}
                     nameClass={header.nameClass}
+                    kind={kind}
+                    kindCopy={kindCopy}
+                    onOpenAnchor={openAnchor}
+                    anchorName={anchorName}
                   />
                 )}
                 <div className="flex-shrink-0 flex items-center gap-1.5">
@@ -2564,6 +2684,17 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div className="flex-1 relative flex flex-col min-h-0">
+          {/* A drag over a mapped column's body: what dropping it here does, over the whole list. */}
+          {bodyHint && (
+            <div
+              data-body-drop={bodyHint.kind}
+              className={cn('pointer-events-none absolute inset-1 z-30 rounded-xl transition-shadow duration-150', dropSurfaceClass(bodyHint.kind))}
+            >
+              <div ref={bodyChipRef} className="absolute inset-x-0 flex justify-center px-2 transition-[top] duration-75" style={{ top: bodyHint.top }}>
+                <DropHint kind={bodyHint.kind} title={bodyHint.title} detail={bodyHint.detail} />
+              </div>
+            </div>
+          )}
           {/* Display › Show off-screen markers: off, neither scrim is drawn. */}
           {showOffscreenMarkers && <>
           {/* ── Periphery scrims — "content continues" affordances at the
@@ -2990,17 +3121,39 @@ export const LayerColumn = React.memo(function LayerColumn({
               if (dragScrollRafRef.current == null) {
                 dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
               }
+              // A mapped column's body: the drop goes inside the entity the column is.
+              if (!isGroup && anchorNode && !overRow(e)) {
+                const hint = bodyHintFor()
+                if (hint) {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                }
+                const top = chipTop(e.clientY, e.currentTarget.getBoundingClientRect())
+                if (!sameHint(hint, bodyHint)) setBodyHint(hint ? { ...hint, top } : null)
+                else if (bodyChipRef.current) bodyChipRef.current.style.top = `${top}px`
+              }
             }}
+            // A row stops the drag reaching here; seen on the way down, its hint gives way to the row's.
+            onDragOverCapture={(e) => { if (bodyHint && overRow(e)) setBodyHint(null) }}
             onDragLeave={(e) => {
-              if (dragKind === 'group' && !e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+              const left = !e.currentTarget.contains(e.relatedTarget as Node)
+              if (dragKind === 'group' && left) { setIsDragOver(false); setDragKind(null) }
+              if (bodyHint && left) setBodyHint(null)
             }}
             onDrop={(e) => {
               const groupId = e.dataTransfer.getData('text/x-group-id')
-              if (!groupId || !groupActions) return
+              if (groupId && groupActions) {
+                e.preventDefault()
+                setIsDragOver(false)
+                setDragKind(null)
+                groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+                return
+              }
+              setBodyHint(null)
+              const entityId = e.dataTransfer.getData('text/x-entity-id')
+              if (!entityId || !anchorNode || overRow(e)) return
               e.preventDefault()
-              setIsDragOver(false)
-              setDragKind(null)
-              groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+              reparent(entityId, anchorNode.id)
             }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.
@@ -3380,6 +3533,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
+                        reorderAccepts={reorderAccepts}
+                        forwardTo={forwardTo}
+                        moveEnabled={moveEnabled}
                         ports={showLineageIndicators ? lineagePorts?.get(node.id) : undefined}
                         portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
                         portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
@@ -3401,12 +3557,13 @@ export const LayerColumn = React.memo(function LayerColumn({
               the end of the custom arrangement instead of being dead. */}
           {reorderEnabled && flatTree.length > 0 && (
             <div
+              data-end-zone
               className={cn(
                 "mx-1 my-1 h-12 rounded-xl border border-dashed flex items-center justify-center transition-colors duration-150",
                 endZoneHover ? "border-accent-lineage/60 bg-accent-lineage/5" : "border-transparent",
               )}
               onDragOver={(e) => {
-                if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+                if (!e.dataTransfer.types.includes('text/x-entity-id') || forTheBody()) return
                 e.preventDefault()
                 e.dataTransfer.dropEffect = 'move'
                 if (!endZoneHover) setEndZoneHover(true)
@@ -3415,19 +3572,14 @@ export const LayerColumn = React.memo(function LayerColumn({
               onDrop={(e) => {
                 const draggedId = e.dataTransfer.getData('text/x-entity-id')
                 setEndZoneHover(false)
-                if (!draggedId || !onReorderDrop) return
+                if (!draggedId || !onReorderDrop || forTheBody()) return
                 e.preventDefault()
                 e.stopPropagation()
                 const lastRoot = [...nodes].reverse().find(n => !n.isLogical)
                 if (lastRoot && lastRoot.id !== draggedId) onReorderDrop(draggedId, lastRoot.id, 'after')
               }}
             >
-              {endZoneHover && (
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-accent-lineage">
-                  <LucideIcons.CornerDownRight className="w-3 h-3" />
-                  Move to end
-                </span>
-              )}
+              {endZoneHover && <DropHint kind="view" title="Move to the end" detail="only this view" />}
             </div>
           )}
 
@@ -3497,9 +3649,9 @@ function TrayButton({ label, detail, onClick, menuHasIt, autoFocus, className, c
 //
 // Wraps the title in a 2-line clamp so long names wrap legibly, and a hover
 // popover that materialises when there is more to read: the name cut short
-// (clamped, or under the header's actions tray), the layer's description —
-// which the header never prints, so every header is one height — or its
-// properties. The
+// (clamped, or under the header's actions tray), what KIND of column it is and
+// what adding or dropping there does, the layer's description — which the
+// header never prints, so every header is one height — or its properties. The
 // popover (createPortal + framer-motion) mirrors LineageDisplayPopover's
 // pattern so the two header surfaces feel like a matched set.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3517,6 +3669,10 @@ function LayerHeaderTitle({
   properties,
   coverRight = 0,
   nameClass,
+  kind,
+  kindCopy,
+  onOpenAnchor,
+  anchorName,
 }: {
   name: string
   description?: string
@@ -3529,6 +3685,12 @@ function LayerHeaderTitle({
   coverRight?: number
   /** The name's size and how many lines it may take (Display › Header size). */
   nameClass: string
+  /** What kind of column this is, explained (see columnKind.ts). */
+  kind?: ColumnKind
+  kindCopy?: ColumnKindCopy
+  /** A mapped column: open the details of the entity it is. */
+  onOpenAnchor?: () => void
+  anchorName?: string
 }) {
   const resolvedColor = color ?? '#6b7280'
   const propertyEntries = Object.entries(properties ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -3600,10 +3762,21 @@ function LayerHeaderTitle({
     clearTimeout(closeTimerRef.current)
   }, [])
 
+  // A drag (the header is the handle for reordering) puts the card away: it would ride over the
+  // columns the reader is dropping onto.
+  useEffect(() => {
+    const putAway = () => {
+      clearTimeout(openTimerRef.current)
+      setOpen(false)
+    }
+    window.addEventListener('dragstart', putAway)
+    return () => window.removeEventListener('dragstart', putAway)
+  }, [])
+
   const scheduleOpen = () => {
-    // The card opens when the header cuts the name short — or the layer has
-    // a description or properties to read.
-    if (!isTruncated && !description && !hasProperties) return
+    // The card opens when the header cuts the name short — or there is more
+    // to read: what kind of column it is, its description, its properties.
+    if (!isTruncated && !kindCopy && !description && !hasProperties) return
     clearTimeout(closeTimerRef.current)
     clearTimeout(openTimerRef.current)
     openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
@@ -3630,7 +3803,7 @@ function LayerHeaderTitle({
         // running out of the box with no ellipsis.
         className={cn("min-w-0 font-semibold tracking-tight break-words", nameClass)}
         style={{ color: resolvedColor }}
-        title={isTruncated || description || hasProperties ? undefined : name}
+        title={isTruncated || kindCopy || description || hasProperties ? undefined : name}
       >
         <span ref={nameTextRef}>{name}</span>
       </h3>
@@ -3690,6 +3863,33 @@ function LayerHeaderTitle({
                   {name}
                 </div>
               </div>
+              {kind && kindCopy && (() => {
+                const KindIcon = COLUMN_KIND_ICON[kind]
+                return (
+                  <div data-column-kind-card={kind} className="px-3 py-2.5 flex items-start gap-2.5 border-b border-black/[0.06] dark:border-white/[0.04]">
+                    <span className="mt-px grid place-items-center w-6 h-6 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary shrink-0">
+                      <KindIcon className="w-3.5 h-3.5" aria-hidden />
+                    </span>
+                    <div className="min-w-0 space-y-1">
+                      <p className="text-[12px] font-semibold text-ink leading-snug">{kindCopy.label}</p>
+                      <p className="text-[12px] text-ink/80 leading-relaxed">{kindCopy.detail}</p>
+                      {kindCopy.technical && (
+                        <p className="font-mono text-[10.5px] text-ink-muted break-all">{kindCopy.technical}</p>
+                      )}
+                      {onOpenAnchor && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenAnchor() }}
+                          className="mt-0.5 inline-flex items-center gap-1 text-[12px] font-semibold text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+                        >
+                          Open {anchorName ? `${anchorName}’s` : 'its'} details
+                          <LucideIcons.ArrowUpRight className="w-3 h-3" aria-hidden />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
               {description && (
                 <div className="px-3 py-2.5 text-[12px] text-ink/85 leading-relaxed whitespace-pre-wrap">
                   {description}

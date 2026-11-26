@@ -92,7 +92,7 @@ describe('DisplayMenu', () => {
     fireEvent.focus(reset)
     expect(await screen.findByText('Put the canvas settings back to their defaults')).toBeInTheDocument()
     expect(screen.getByText(
-      'Zoom, density, header size, icons, IDs, badges, off-screen markers, tree lines, the memory gauge and empty layers',
+      'Zoom, density, header size, icons, IDs, badges, off-screen markers, what’s new, tree lines, the memory gauge and empty layers',
     )).toBeInTheDocument()
     usePreferencesStore.setState({ showMemoryUsage: false })
   })
@@ -106,13 +106,13 @@ describe('DisplayMenu', () => {
     expect(ids).toHaveAttribute('aria-checked', 'true')
     expect(ids).toHaveTextContent('Each entity’s ID under its name — beside it at the minimal density.')
     // On by default, so it is counted among the options that are on, and offers no Reset.
-    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('5 on')
     expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
 
     fireEvent.click(ids)
     expect(usePreferencesStore.getState().showCanvasEntityIds).toBe(false)
     expect(ids).toHaveAttribute('aria-checked', 'false')
-    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('3 on')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
     // Hidden IDs are a change from the defaults: Reset offers itself.
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
     usePreferencesStore.setState({ showCanvasEntityIds: true })
@@ -380,17 +380,33 @@ describe('DisplayMenu — layer headers, off-screen markers and empty layers', (
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
   })
 
+  it('hides what’s new on every graph, counts it among the options that are on, and Reset brings it back', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const news = screen.getByRole('switch', { name: /Show what’s new on this graph/ })
+    expect(news).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('5 on')
+    fireEvent.click(news)
+    expect(usePreferencesStore.getState().showGraphDigest).toBe(false)
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
+    // A change from the defaults: Reset offers itself, and puts it back.
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
+    usePreferencesStore.getState().resetCanvasDisplaySettings()
+    expect(usePreferencesStore.getState().showGraphDigest).toBe(true)
+  })
+
   it('turns the off-screen markers off, and counts them among the options that are on', () => {
     render(<DisplayMenu {...baseProps()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
     const markers = screen.getByRole('switch', { name: /Show off-screen markers/ })
-    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('5 on')
     fireEvent.click(markers)
     expect(usePreferencesStore.getState().showOffscreenLineMarkers).toBe(false)
     expect(markers).toHaveAttribute('aria-checked', 'false')
     expect(markers).toHaveTextContent('No count at a column’s top or bottom')
-    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('3 on')
+    expect(screen.getByRole('button', { name: /Display options/ })).toHaveTextContent('4 on')
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
   })
 

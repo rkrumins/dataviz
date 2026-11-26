@@ -86,6 +86,19 @@ export function allowedChildTypeIds(
 }
 
 /**
+ * Whether the ontology says what may contain what at all — some type declares a non-empty
+ * `canContain`. One that declares nothing (as suggested and introspected ontologies do) leaves
+ * nesting open, as the server reads it: an empty `canContain` there is not a leaf.
+ */
+export function hierarchyDeclared(
+  entityTypes: EntityTypeSchema[],
+  hierarchyMap: Record<string, { canContain?: string[] }>,
+): boolean {
+  return entityTypes.some((et) => (et.hierarchy?.canContain?.length ?? 0) > 0)
+    || Object.values(hierarchyMap).some((h) => (h?.canContain?.length ?? 0) > 0)
+}
+
+/**
  * Builder leaf policy: a parent whose `canContain` is empty/absent in BOTH the
  * schema and the hierarchyMap is CLOSED to nesting — consistent with the
  * FlatTreeItem add-child gate. This intentionally differs from

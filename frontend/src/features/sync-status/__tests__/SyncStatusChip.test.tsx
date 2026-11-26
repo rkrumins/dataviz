@@ -7,7 +7,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { usePreferencesStore } from '@/store/preferences'
 import type { SyncStatus } from '../syncStatusApi'
 
 let data: SyncStatus | undefined
@@ -42,7 +41,6 @@ beforeEach(() => {
 describe('SyncStatusChip in the Business view', () => {
   beforeEach(() => {
     usePersonaStore.setState({ mode: 'business' })
-    usePreferencesStore.setState({ syncTechnicalDetailsOpen: false })
   })
 
   it('says it is up to date and when that was checked, as a button naming no store', () => {
@@ -79,23 +77,22 @@ describe('SyncStatusChip in the Business view', () => {
     expect(await screen.findByRole('tooltip')).toHaveTextContent('cmt_01M3AH4A26Y5ZFJ60G1ZYNM07A')
   })
 
-  it('keeps the store names behind "Show technical details", and remembers it open', async () => {
+  it('leaves the stores to the Technical view: no technical-details switch of its own', async () => {
     const user = userEvent.setup()
     const { unmount } = renderChip()
     await user.click(screen.getByRole('button', { name: /^Sync status/ }))
-    const toggle = await screen.findByRole('button', { name: 'Show technical details' })
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('Postgres')).toBeNull()
-    await user.click(toggle)
-    expect(screen.getByRole('button', { name: 'Hide technical details' })).toHaveAttribute('aria-expanded', 'true')
-    const technical = screen.getByRole('list', { name: "Where this view's data comes from" })
-    expect(within(technical).getByText('Postgres')).toBeInTheDocument()
-    expect(within(technical).getByText('FalkorDB')).toBeInTheDocument()
-    expect(usePreferencesStore.getState().syncTechnicalDetailsOpen).toBe(true)
+    const card = await screen.findByRole('dialog', { name: 'Sync details' })
+    // The header's Business/Technical switch is the way to the stores; the card doesn't repeat it.
+    expect(within(card).queryByRole('button', { name: /technical details/i })).toBeNull()
+    for (const word of ['Postgres', 'FalkorDB']) expect(card.textContent).not.toContain(word)
     unmount()
+
+    usePersonaStore.setState({ mode: 'technical' })
     renderChip()
     await user.click(screen.getByRole('button', { name: /^Sync status/ }))
-    expect(await screen.findByText('Postgres')).toBeInTheDocument()
+    const technical = await screen.findByRole('list', { name: "Where this view's data comes from" })
+    expect(within(technical).getByText('Postgres')).toBeInTheDocument()
+    expect(within(technical).getByText('FalkorDB')).toBeInTheDocument()
   })
 
   it('says an external graph is read live from its source, with no commit', async () => {

@@ -16,6 +16,7 @@ import {
   typesValidForNode,
   planRetype,
   edgeKind,
+  hierarchyDeclared,
 } from '../ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { RetypeContext, RetypeNode } from '../ontologyPreflightService'
@@ -31,6 +32,18 @@ const rt = (
   targetTypes: string[],
   extra: Partial<RelationshipTypeSchema> = {},
 ): RelationshipTypeSchema => ({ id, name: id, sourceTypes, targetTypes, ...extra } as RelationshipTypeSchema)
+
+describe('hierarchyDeclared', () => {
+  it('is false for an ontology that says nothing of what contains what (suggested, introspected)', () => {
+    expect(hierarchyDeclared([et('node', []), et('thing', [])], { node: { canContain: [] } })).toBe(false)
+    expect(hierarchyDeclared([], {})).toBe(false)
+  })
+
+  it('is true once any type declares what it may contain — in the schema or the hierarchy map', () => {
+    expect(hierarchyDeclared([et('dashboard', ['metric']), et('metric', [])], {})).toBe(true)
+    expect(hierarchyDeclared([et('node', [])], { node: { canContain: ['node'] } })).toBe(true)
+  })
+})
 
 describe('isDrawableLineageType', () => {
   it('excludes the synthetic AGGREGATED type', () => {

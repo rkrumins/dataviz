@@ -49,7 +49,7 @@ vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) =
 vi.mock('@/features/versioning/components/EntityHistory', () => ({ EntityHistory: () => null }))
 vi.mock('@/components/panels/LineageNeighbors', () => ({ LineageNeighbors: () => null }))
 vi.mock('@/components/canvas/context-view/useReparentNode', () => ({
-  useReparentNode: () => ({ reparent: vi.fn(), retypeContainment: vi.fn() }),
+  useReparentNode: () => ({ reparent: vi.fn(), retypeContainment: vi.fn(), moveToTopLevel: vi.fn(), topLevelVerdict: () => ({ kind: 'none' }) }),
 }))
 vi.mock('@/features/versioning/canvas/useRestoreGhost', () => ({ useRestoreGhost: () => vi.fn() }))
 vi.mock('@/providers/ViewExecutionContext', () => ({ useViewExecutionContext: () => null }))

@@ -235,16 +235,20 @@ export function buildReviewGroups(changes: readonly StagedChange[], lookup: Name
   return [...groups.values()]
 }
 
-/** "3 entities and 2 relationships" — what a review is about, in one phrase. */
-export function describeScope(groups: readonly ReviewGroup[]): string {
-  const n = { node: 0, edge: 0, layout: 0 }
-  for (const g of groups) n[g.kind]++
+/** "2 data changes (every view) and 1 view change (only this view)" — what a review changes, by
+ *  kind: the data (entities and relationships, reaching `dataReach`), or only this view's layout. */
+export function describeScope(groups: readonly ReviewGroup[], dataReach = 'every view'): string {
+  let data = 0
+  let view = 0
+  for (const g of groups) {
+    if (g.kind === 'layout') view++
+    else data++
+  }
   const parts = [
-    n.node && `${n.node.toLocaleString()} ${n.node === 1 ? 'entity' : 'entities'}`,
-    n.edge && `${n.edge.toLocaleString()} ${n.edge === 1 ? 'relationship' : 'relationships'}`,
-    n.layout && `${n.layout.toLocaleString()} layout ${n.layout === 1 ? 'change' : 'changes'}`,
+    data && `${data.toLocaleString()} data ${data === 1 ? 'change' : 'changes'} (${dataReach})`,
+    view && `${view.toLocaleString()} view ${view === 1 ? 'change' : 'changes'} (only this view)`,
   ].filter(Boolean) as string[]
-  return parts.length <= 1 ? (parts[0] ?? 'nothing') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+  return parts.join(' and ') || 'nothing'
 }
 
 /** A title for the publish, from what was changed: "Update owner on Orders and 2 more". */

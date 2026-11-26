@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import type { PlacedOut, PlacementInfo } from './placement'
@@ -34,6 +35,9 @@ import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
+import { setDraggedEntity, draggedEntity } from './entityDrag'
+import { ChangeKindTag, DropHint } from './DropHint'
+import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
 import { LineEndTag } from './LineEndTag'
 import type { LineEnd } from './lineEnd'
 
@@ -41,6 +45,9 @@ import type { LineEnd } from './lineEnd'
  *  explicit entry or a drag), by a stamp (the entity's own layerAssignment), by a layer rule
  *  matching it, inherited from another parent, or caught by the view's fallback layer. */
 export type PlacedReason = 'hand' | 'rule' | 'stamp' | 'inherited' | 'fallback'
+
+/** Where a drop hint's label sits on screen: a row's top edge, at its right end. */
+interface ChipAt { top: number; left: number; width: number }
 
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
@@ -106,6 +113,14 @@ interface FlatTreeItemProps {
    *  band keeps the existing reparent drop. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
+  /** Whether a dragged entity is one of this row's siblings — the set custom order arranges. A row
+   *  from another set gets no before/after band: there is nothing to arrange it among. */
+  reorderAccepts?: (draggedId: string, targetId: string) => boolean
+  /** The entity this row's column is mapped to: a drop this row can't hold goes inside it. */
+  forwardTo?: { id: string; name: string }
+  /** The canvas takes moves (a draft open and writable, editing on): every row can be picked up
+   *  and dropped inside another — a data change. */
+  moveEnabled?: boolean
   /** Where this card's lines on the canvas plug in, by side and direction —
    *  its lineage PORTS (lineagePorts.ts). Rendered as children of the row
    *  box, so they track the card's width and position and unmount with it. */
@@ -214,6 +229,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
+  reorderAccepts,
+  forwardTo,
+  moveEnabled = false,
   ports,
   portStrengthLeft = 0,
   portStrengthRight = 0,
@@ -404,7 +422,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
   // 4.3 Drag-and-drop — a row is draggable when it's a top-level node (which
   // can be re-assigned between layers) OR when reorder bands are live (draft
-  // custom-order, any depth), so children can be picked up to reorder. The
+  // custom-order, any depth), so children can be picked up to reorder, OR when
+  // the canvas takes moves (any row can be dropped inside another). The
   // DROP side validates each gesture: cross-layer assign is blocked for
   // children by the containment rule, reparent by ontology, and reorder stays
   // within a sibling set. A row being deleted (committed ghost or staged
@@ -417,7 +436,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const isRootDraggable = depth === 0 && !node.parentId && !isLogical
   // A group row drags as a GROUP (drop it on another group to nest it) — never as an entity.
   const isGroupDraggable = isLogical && !!groupActions
-  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive || isGroupDraggable)
+  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive || isGroupDraggable || (moveEnabled && !isLogical))
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
@@ -438,11 +457,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       } else {
         e.dataTransfer.setData('text/x-entity-id', node.id)
         e.dataTransfer.setData('text/x-entity-name', node.name)
+        // Readable while the drag hovers, so each target can say what a drop would do.
+        setDraggedEntity(node.id)
       }
       e.dataTransfer.setDragImage(el, 20, 20)
     }
     const onDragEnd = () => {
       delete document.documentElement.dataset.hoveredNode
+      setDraggedEntity(null)
     }
 
     el.addEventListener('dragstart', onDragStart)
@@ -453,22 +475,46 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     }
   }, [node.id, node.name, isDraggable, isGroupDraggable])
 
-  const { reparent } = useReparentNode()
-  const [dropHover, setDropHover] = useState(false)
+  const { reparent, verdict } = useReparentNode()
+  // What a drop on the row's middle would do, said while the drag hovers: move the dragged entity
+  // inside this one (data), put it back under it or into this group (view), or why it can't.
+  const [dropHint, setDropHint] = useState<(DropHintSpec & { at: ChipAt }) | null>(null)
   // Custom-order drop bands: 'before'/'after' when a drag hovers the row's
   // top/bottom 30% (root rows in a custom-sorted draft layer only). The middle
   // band keeps the reparent drop, so one gesture serves both without a mode.
   const [dropIndicator, setDropIndicator] = useState<'before' | 'after' | null>(null)
+  // The hint is a label on the row's top edge, at its right end — over the row above rather than
+  // over this row's own name. Drawn above the canvas (the next row would paint over a label inside
+  // this one), and kept on the row as the column scrolls under a held drag.
+  const hintChipRef = useRef<HTMLDivElement>(null)
+  const chipAt = (row: DOMRect): ChipAt => ({ top: row.top - 11, left: row.right - 10, width: row.width - 20 })
+  /** Where `dragged` goes if dropped on this row: inside it — or, when it can't hold it, inside the
+   *  entity this row's column is mapped to (the column IS that entity). */
+  const moveTargetFor = (dragged: string): string => {
+    if (!forwardTo || verdict(dragged, node.id).kind !== 'blocked') return node.id
+    return verdict(dragged, forwardTo.id).kind === 'data' ? forwardTo.id : node.id
+  }
+  const hintFor = (): DropHintSpec | null => {
+    if (isLogical && groupActions) return { kind: 'view', title: `Into ${node.name}`, detail: 'only this view' }
+    const dragged = draggedEntity()
+    // A drag this canvas did not start (nothing recorded): its drop is a move.
+    if (!dragged) return moveHint({ kind: 'data', edgeType: null }, displayName)
+    const target = moveTargetFor(dragged)
+    return moveHint(verdict(dragged, target), target === node.id ? displayName : forwardTo!.name)
+  }
+  /** Before/after bands, for the rows custom order arranges among: this row's own siblings. */
+  const bandsFor = (dragged: string | null) =>
+    reorderBandsActive && (!dragged || !reorderAccepts || reorderAccepts(dragged, node.id))
 
   // Drag-cancel cleanup: dragleave only fires on the TARGET row, so an
   // Escape-cancelled drag (dragend fires on the source) could strand the
   // indicator line. While any drop state is live, a window-level one-shot
   // listener guarantees it clears on every way a drag can end.
   useEffect(() => {
-    if (!dropIndicator && !dropHover) return
+    if (!dropIndicator && !dropHint) return
     const clear = () => {
       setDropIndicator(null)
-      setDropHover(false)
+      setDropHint(null)
     }
     window.addEventListener('dragend', clear)
     window.addEventListener('drop', clear)
@@ -476,7 +522,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       window.removeEventListener('dragend', clear)
       window.removeEventListener('drop', clear)
     }
-  }, [dropIndicator, dropHover])
+  }, [dropIndicator, dropHint])
 
   return (
     <div
@@ -495,20 +541,27 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
-        if (reorderBandsActive) {
+        if (bandsFor(draggedEntity())) {
           const rect = e.currentTarget.getBoundingClientRect()
           const y = e.clientY - rect.top
           const band = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
           if (band !== dropIndicator) setDropIndicator(band)
           if (band) {
-            if (dropHover) setDropHover(false)
+            if (dropHint) setDropHint(null)
             return
           }
+        } else if (dropIndicator) setDropIndicator(null)
+        const hint = hintFor()
+        const at = hint ? chipAt(e.currentTarget.getBoundingClientRect()) : null
+        if (!sameHint(hint, dropHint)) setDropHint(hint && at ? { ...hint, at } : null)
+        else if (at && hintChipRef.current) {
+          // Same hint: follow the row in place (a held drag scrolls the column) — no re-render.
+          hintChipRef.current.style.top = `${at.top}px`
+          hintChipRef.current.style.left = `${at.left}px`
         }
-        if (!dropHover) setDropHover(true)
       }}
       onDragLeave={() => {
-        if (dropHover) setDropHover(false)
+        if (dropHint) setDropHint(null)
         if (dropIndicator) setDropIndicator(null)
       }}
       onDrop={(e) => {
@@ -517,7 +570,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (draggedGroup && isLogical && groupActions) {
           e.preventDefault()
           e.stopPropagation()
-          setDropHover(false)
+          setDropHint(null)
           const target = node.id.replace(/^logical:/, '')
           const from = e.dataTransfer.getData('text/x-group-layer') || groupActions.layerId
           if (draggedGroup !== target) groupActions.receive(draggedGroup, from, target)
@@ -528,18 +581,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         e.preventDefault()
         e.stopPropagation()   // take precedence over the layer-column drop (move-to-layer)
         const indicator = dropIndicator
-        setDropHover(false)
+        setDropHint(null)
         setDropIndicator(null)
         // A drop on a GROUP places the entity in it — view arrangement, never a data move.
         if (isLogical && groupActions) {
           groupActions.place(draggedId, node.id.replace(/^logical:/, ''), node.name)
           return
         }
-        if (indicator && reorderBandsActive) {
+        if (indicator && bandsFor(draggedId)) {
           if (draggedId !== node.id) onReorderDrop!(draggedId, node.id, indicator)
           return
         }
-        if (draggedId !== node.id) reparent(draggedId, node.id)
+        if (draggedId !== node.id) reparent(draggedId, moveTargetFor(draggedId))
       }}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl transition-[background-color,background-image,box-shadow] duration-150 group/item relative z-[2]",
@@ -603,9 +656,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         !isDimmed && isDimmedBySelection && "opacity-60",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse",
-        // Reparent drop target (middle band) — a node drag will nest INTO
-        // this row: strong ring + fill so it reads as "drop inside".
-        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20",
+        // Middle-band drop target — a solid accent ring when the drop moves the dragged entity
+        // INSIDE this row (the data), a dashed outline when it only rearranges this view.
+        dropHint && dropSurfaceClass(dropHint.kind),
         // Reorder anchor (before/after band) — a lighter inset ring marks THIS
         // row as the reference point, kept visually distinct from the reparent
         // fill so the two gestures never look the same.
@@ -692,15 +745,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         >
           <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgb(var(--nx-accent-lineage-rgb)_/_0.9)] flex-shrink-0" />
           <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]" />
-          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.6)] max-w-[150px] flex-shrink-0">
-            {dropIndicator === 'before'
-              ? <LucideIcons.ArrowUpToLine className="w-2.5 h-2.5 flex-shrink-0" />
-              : <LucideIcons.ArrowDownToLine className="w-2.5 h-2.5 flex-shrink-0" />}
-            <span className="truncate">
-              {dropIndicator === 'before' ? 'Before' : 'After'} {node.name}
-            </span>
-          </span>
+          {/* Arranging is a view change: said as one. */}
+          <DropHint kind="view" title={`${dropIndicator === 'before' ? 'Before' : 'After'} ${displayName}`}
+            detail="only this view" className="max-w-[78%] flex-shrink-0" />
         </div>
+      )}
+
+      {/* What a drop on the middle of the row does, in words — and which kind of change it is. */}
+      {dropHint && !dropIndicator && createPortal(
+        <div
+          ref={hintChipRef}
+          className="pointer-events-none fixed z-[60] flex justify-end -translate-x-full"
+          style={{ top: dropHint.at.top, left: dropHint.at.left, maxWidth: dropHint.at.width }}
+        >
+          <DropHint kind={dropHint.kind} title={dropHint.title} detail={dropHint.detail} />
+        </div>,
+        document.body,
       )}
 
       {/* Edge authoring: hover-reveal handle on the card's right edge. Never
@@ -1324,39 +1384,46 @@ function GroupRowControls({ groupId, name, actions, hint = true }: {
     // A choice is where the group goes: a layer, and a group in it (none = the layer's top level).
     const dest = (layerId: string, parent: string | null) => JSON.stringify([layerId, parent])
     return (
-      <select
-        autoFocus
-        defaultValue=""
-        aria-label={mode === 'move' ? `Move group ${name} into` : `Move everything in ${name} into`}
-        onClick={stop}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setMode('idle') }}
-        onBlur={() => setMode('idle')}
-        onChange={(e) => {
-          const v = e.target.value
-          if (mode === 'move' && v) {
-            const [layerId, parent] = JSON.parse(v) as [string, string | null]
-            actions.move(groupId, parent, layerId)
-          } else if (v) actions.moveContents(groupId, v)
-          setMode('idle')
-        }}
-        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
-      >
-        <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
-        {mode === 'move' ? (
-          <>
-            <optgroup label={`In ${actions.layerName}`}>
-              <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
-              {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
-            </optgroup>
-            {actions.otherLayers.map((l) => (
-              <optgroup key={l.layerId} label={`To ${l.layerName}`}>
-                <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
-                {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+      <span className="mt-1 flex flex-col gap-1" onClick={stop}>
+        <select
+          autoFocus
+          defaultValue=""
+          aria-label={mode === 'move' ? `Move group ${name} into` : `Move everything in ${name} into`}
+          onClick={stop}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setMode('idle') }}
+          onBlur={() => setMode('idle')}
+          onChange={(e) => {
+            const v = e.target.value
+            if (mode === 'move' && v) {
+              const [layerId, parent] = JSON.parse(v) as [string, string | null]
+              actions.move(groupId, parent, layerId)
+            } else if (v) actions.moveContents(groupId, v)
+            setMode('idle')
+          }}
+          className="w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
+        >
+          <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
+          {mode === 'move' ? (
+            <>
+              <optgroup label={`In ${actions.layerName}`}>
+                <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
+                {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
               </optgroup>
-            ))}
-          </>
-        ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
-      </select>
+              {actions.otherLayers.map((l) => (
+                <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                  <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
+                  {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+                </optgroup>
+              ))}
+            </>
+          ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
+        </select>
+        {/* A group is this view's own arranging: moving one (or what is in it) leaves the data be. */}
+        <span className="flex items-center gap-1.5 min-w-0">
+          <ChangeKindTag kind="view" />
+          <span className="text-[10.5px] text-ink-muted truncate">Groups organise this view — the data doesn’t change.</span>
+        </span>
+      </span>
     )
   }
   if (mode === 'confirm') {

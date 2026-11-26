@@ -54,6 +54,7 @@ import type { GraphDataProvider, GraphNode, NodeDegree, TraceV2Result, LensClosu
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 import type { SearchViewDefinition } from '@/types/searchView'
+import type { ViewScopeCounts } from '@/services/viewApiService'
 
 /** What `src/test/fixtures/traceEstates.ts` hands back. */
 export interface TraceEstate {
@@ -498,7 +499,9 @@ function stubProvider(
  *  ERR_INVALID_URL (a relative path with no origin) swallowed into a
  *  `console.error`. Answer it with the layout the store already holds, so the
  *  effect finds nothing to change and returns. */
-function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated', versioned = false): () => void {
+function stubFetch(
+  estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated', versioned = false, viewCounts?: ViewScopeCounts,
+): () => void {
   const original = globalThis.fetch
   const view = {
     id: 'harness-view',
@@ -519,9 +522,12 @@ function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curate
                        { status: 200, headers: { 'content-type': 'application/json' } })
         : new Response(JSON.stringify({ detail: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
     }
-    const body = url.includes('/api/v1/views/')
-      ? (url.includes('/library') ? library : view)
-      : {}
+    const counts = viewCounts ?? { total: 0, byWorkspace: {}, byDataSource: {} }
+    const body = url.includes('/api/v1/views/counts')
+      ? counts
+      : url.includes('/api/v1/views/')
+        ? (url.includes('/library') ? library : view)
+        : {}
     return new Response(JSON.stringify(body), {
       status: 200, headers: { 'content-type': 'application/json' },
     })
@@ -672,6 +678,8 @@ export async function renderCanvasWithTrace(
     /** The view the canvas mounts in. Absent, the suite's own (Technical, see
      *  test/setup.ts) or whatever the test set. */
     persona?: PersonaMode
+    /** What `/views/counts` answers: the views the reader can see, per data source. None by default. */
+    viewCounts?: ViewScopeCounts
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -684,7 +692,7 @@ export async function renderCanvasWithTrace(
     if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
   }
   releaseFetch?.()
-  releaseFetch = stubFetch(estate, opts.entityScope, opts.versioned)
+  releaseFetch = stubFetch(estate, opts.entityScope, opts.versioned, opts.viewCounts)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
   // anything: with no draft open (or edit mode off) every connect/edit path
@@ -693,7 +701,8 @@ export async function renderCanvasWithTrace(
   // (workspace, dataSource, view); `canEditGraph` needs the admin flag too.
   useBranchStore.setState({
     workspaceId: opts.draft ? 'harness-ws' : null,
-    dataSourceId: null,
+    // A draft is scoped to the view's data source, when it names one.
+    dataSourceId: opts.draft ? (opts.dataSourceId ?? null) : null,
     viewId: opts.draft ? 'harness-view' : null,
     currentBranchId: opts.draft ? 'harness-branch' : null,
   } as never)

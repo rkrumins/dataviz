@@ -14,9 +14,16 @@ import { compareOrderKeys, generateNKeysBetween } from '@/utils/orderKeys'
 const renumber = (layers: ViewLayerConfig[]): ViewLayerConfig[] =>
   layers.map((l, i) => (l.order === i ? l : { ...l, order: i }))
 
-/** Append a new layer at the end; its `order` is forced to the (pre-append) length. */
+/** The layers as they are SHOWN — by `order`, ties in stored order. A saved array is not always in
+ *  that order (a wizard save, an API write), and every op below works in what the reader sees. */
+const inDisplayOrder = (layers: ViewLayerConfig[]): ViewLayerConfig[] =>
+  [...layers].sort((a, b) => a.order - b.order)
+
+/** Append a new layer at the end; its `order` follows the last one shown (the pre-append length when
+ *  the orders run 0..n-1). The stored array is otherwise kept as it was. */
 export function appendLayer(layers: ViewLayerConfig[], newLayer: ViewLayerConfig): ViewLayerConfig[] {
-  return [...layers, { ...newLayer, order: layers.length }]
+  const last = layers.reduce((max, l) => Math.max(max, l.order), -1)
+  return [...layers, { ...newLayer, order: Math.max(last + 1, layers.length) }]
 }
 
 /**
@@ -26,7 +33,8 @@ export function appendLayer(layers: ViewLayerConfig[], newLayer: ViewLayerConfig
  */
 export function insertLayer(layers: ViewLayerConfig[], newLayer: ViewLayerConfig, index: number): ViewLayerConfig[] {
   const at = Math.max(0, Math.min(Math.trunc(index), layers.length))
-  return renumber([...layers.slice(0, at), newLayer, ...layers.slice(at)])
+  const shown = inDisplayOrder(layers)
+  return renumber([...shown.slice(0, at), newLayer, ...shown.slice(at)])
 }
 
 /** Recolour one layer by id; no-op (same array) if not found or already that colour. */
@@ -62,7 +70,7 @@ export function setLayerWidth(layers: ViewLayerConfig[], id: string, width: numb
 /** Remove one layer by id and re-normalize order; no-op if not found. */
 export function removeLayer(layers: ViewLayerConfig[], id: string): ViewLayerConfig[] {
   if (!layers.some((l) => l.id === id)) return layers
-  return renumber(layers.filter((l) => l.id !== id))
+  return renumber(inDisplayOrder(layers).filter((l) => l.id !== id))
 }
 
 /**
@@ -73,12 +81,14 @@ export function removeLayer(layers: ViewLayerConfig[], id: string): ViewLayerCon
  */
 export function reorderLayer(layers: ViewLayerConfig[], draggedId: string, targetId: string): ViewLayerConfig[] {
   if (draggedId === targetId) return layers
-  const fromIdx = layers.findIndex((l) => l.id === draggedId)
-  const toIdx = layers.findIndex((l) => l.id === targetId)
+  // Positions in what the reader sees: a move left lands before the target, right after it.
+  const shown = inDisplayOrder(layers)
+  const fromIdx = shown.findIndex((l) => l.id === draggedId)
+  const toIdx = shown.findIndex((l) => l.id === targetId)
   if (fromIdx < 0 || toIdx < 0) return layers
 
-  const dragged = layers[fromIdx]
-  const without = layers.filter((l) => l.id !== draggedId)
+  const dragged = shown[fromIdx]
+  const without = shown.filter((l) => l.id !== draggedId)
   const targetPos = without.findIndex((l) => l.id === targetId)
   const insertAt = fromIdx < toIdx ? targetPos + 1 : targetPos
   return renumber([...without.slice(0, insertAt), dragged, ...without.slice(insertAt)])

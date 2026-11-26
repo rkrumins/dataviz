@@ -287,7 +287,7 @@ function showOnCanvas(from: StagedChange | null, to: StagedChange | null, what: 
 /**
  * The `roots` plus every staged `create_entity` descendant of them, found by walking the temp-urn →
  * `after.parentUrn` linkage, plus any staged `create_edge` changes anchored to one of those
- * entities' temp urns. Returned LEAF-FIRST (deepest descendants and edges before their ancestors)
+ * entities' temp urns and any `move_entity` into one of them. Returned LEAF-FIRST (deepest descendants and edges before their ancestors)
  * so discard hooks restore children before parents, regardless of staging order or same-millisecond
  * timestamps; siblings keep their staging order. Used so discarding a staged parent also discards
  * the children created under it (no orphans) and any edges staged against them (no phantoms).
@@ -330,17 +330,23 @@ function collectStagedSubtree(all: readonly StagedChange[], roots: readonly Stag
   // urns becomes a phantom once that entity is discarded (its optimistic edge
   // leaves the canvas but the staged change survives, later shipping an
   // unresolvable urn:staged: endpoint on save). Cascade those too — deepest, so
-  // their discard hooks run before the entities they reference.
+  // their discard hooks run before the entities they reference. So does a
+  // `move_entity` into one of them: a saved entity moved under a new one goes
+  // back where it was (its discard restores its old parent link), and a save can
+  // never name a parent that is gone.
   if (urnDepth.size > 0) {
     let maxDepth = 0
     for (const d of depthById.values()) if (d > maxDepth) maxDepth = d
     for (const c of all) {
-      if (c.type !== 'create_edge' || depthById.has(c.id)) continue
-      const after = c.after as { source?: string; target?: string } | undefined
-      if (after && (urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) {
-        depthById.set(c.id, maxDepth + 1)
-        victims.push(c)
-      }
+      if (depthById.has(c.id)) continue
+      if (c.type === 'create_edge') {
+        const after = c.after as { source?: string; target?: string } | undefined
+        if (!after || !(urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) continue
+      } else if (c.type === 'move_entity') {
+        if (!urnDepth.has((c.after as { parentId?: string | null } | undefined)?.parentId ?? '')) continue
+      } else continue
+      depthById.set(c.id, maxDepth + 1)
+      victims.push(c)
     }
   }
   // Deepest first; siblings in their original (creation) order.
