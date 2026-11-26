@@ -50,6 +50,8 @@ import type {
     EdgeMutationResult,
     TopLevelNodesQuery,
     TopLevelNodesResult,
+    UnplacedTopLevelRequest,
+    UnplacedTopLevelResult,
     CanvasBootstrapRequest,
     CanvasBootstrapResult,
 } from './GraphDataProvider'
@@ -1080,6 +1082,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
             `/nodes/top-level?${params.toString()}`,
             { timeoutMs: TIMEOUTS.TOP_LEVEL_MS },
         )
+    }
+
+    async getUnplacedTopLevel(
+        request: UnplacedTopLevelRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<UnplacedTopLevelResult> {
+        // The top-level read, paged to the end of the set server-side: its budget.
+        return await this.fetch<UnplacedTopLevelResult>('/nodes/top-level/unplaced', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            timeoutMs: TIMEOUTS.TOP_LEVEL_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
     }
 
     async getContainment(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult> {

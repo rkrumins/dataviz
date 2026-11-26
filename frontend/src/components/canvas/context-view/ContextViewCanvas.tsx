@@ -75,9 +75,12 @@ import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers'
-import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
+import type { AggregatedEdgeInfo, GraphNode, TraceV2Result, UnplacedTopLevelResult } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
+import { claimedFeedTypes, layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
+import { toCanvasNode } from '@/lib/canvasNodeMapper'
+import { ENTITY_COLUMNS_MAX } from '@/components/views/ViewWizard/useTopLevelEntities'
+import { placedOfTypes, rootTypesToCheck } from './unplacedRoots'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -187,6 +190,7 @@ import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
+import { useColumnsOutOfSight } from './useColumnsOutOfSight'
 import { keepClearOfDrawer, shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -476,6 +480,19 @@ function freshLayerColor(ordered: readonly ViewLayerConfig[], at: number): strin
 
 /** A column's name as it shows: its entity's, while it follows it (ViewLayerConfig.nameFromAnchor). */
 const columnName = (layer: ViewLayerConfig) => (layer.nameFromAnchor && layer.anchorUrn ? nameNow(layer.anchorUrn) : layer.name)
+
+/** What adding top-level entities says: "3 Domains", "5 top-level entities". */
+function rootsWhat(found: { byType: ReadonlyArray<{ one: string; many: string }> }, n: number): string {
+  return found.byType.length === 1
+    ? `${n.toLocaleString()} ${n === 1 ? found.byType[0].one : found.byType[0].many}`
+    : `${n.toLocaleString()} top-level ${n === 1 ? 'entity' : 'entities'}`
+}
+
+/** The entity a column is mapped to, when a complete load found it gone from this source — now. */
+function goneAnchorOf(layer: ViewLayerConfig): string | null {
+  const { hydrationStatus, nodes } = useCanvasStore.getState()
+  return layer.anchorUrn && hydrationStatus === 'ready' && !nodeIndexOf(nodes).get(layer.anchorUrn) ? layer.anchorUrn : null
+}
 
 /** What a placement said besides where it went: the columns mapped to it that let go of it. */
 function letGo(before: NormalizedReferenceLayout, after: NormalizedReferenceLayout): string {
@@ -4045,11 +4062,13 @@ export function ContextViewCanvas({
     const layers = layerOps.removeLayer(before.layers, id)
     const fallbackId = layers[0]?.id
     // Remap the deleted layer's assignments to the first remaining layer so their entities don't vanish
-    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them.
+    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them. The
+    // entity of a column whose entity is gone goes with it: there is nothing of it to show elsewhere.
+    const gone = goneAnchorOf(target)
     const assignments: NormalizedReferenceLayout['assignments'] = {}
     for (const [urn, entry] of Object.entries(before.assignments)) {
       if (entry.layerId !== id) assignments[urn] = entry
-      else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
+      else if (fallbackId && urn !== gone) assignments[urn] = { ...entry, layerId: fallbackId }
     }
     const after = { ...before, layers, assignments }
     persistReferenceLayout(after)
@@ -4077,7 +4096,9 @@ export function ContextViewCanvas({
   // names (stagedChangesStore).
   const stageMapping = useCallback((
     targetId: string, before: NormalizedReferenceLayout, after: NormalizedReferenceLayout,
-    action: 'map' | 'unmap' | 'own-column', summary: string,
+    action: 'map' | 'unmap' | 'own-column' | 'clean-up' | 'add-columns' | 'add-to-column', summary: string,
+    /** What else its Undo (and Redo) does on the canvas, after (before) the layout. */
+    also?: { discard: () => void; reapply: () => void },
   ): string => {
     const touch = layerOps.touchedBy(before, after)
     const was = layerOps.layoutPart(before, touch)
@@ -4091,8 +4112,8 @@ export function ContextViewCanvas({
       before: { part: was },
       after: { part: now, action },
       summary,
-      discard: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)),
-      reapply: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)),
+      discard: () => { persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)); also?.discard() },
+      reapply: () => { also?.reapply(); persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)) },
     })
   }, [currentLayout, persistReferenceLayout])
 
@@ -4135,6 +4156,17 @@ export function ContextViewCanvas({
     const before = currentLayout()
     const layer = before.layers.find((l) => l.id === layerId)
     if (!layer?.anchorUrn) return
+    // Its entity gone, there is no row to show: the column keeps the name it has, hand-picked now.
+    if (goneAnchorOf(layer)) {
+      const id = stageMapping(`layer:${layerId}`, before, layerOps.unmapLayer(before, layerId), 'unmap', `Made “${layer.name}” a hand-picked column`)
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: viewNotice(`“${layer.name}” is a hand-picked column now.`),
+        action: discardAction(id),
+        durationMs: MOVE_NOTICE_MS,
+      })
+      return
+    }
     const name = nameNow(layer.anchorUrn)
     const after = layerOps.unmapLayer(before, layerId, { name })
     const id = stageMapping(`layer:${layerId}`, before, after, 'unmap', `Showed ${name} as a row in “${columnName(layer)}”`)
@@ -6896,7 +6928,8 @@ export function ContextViewCanvas({
     if (!target) return
     const ordered = [...before.layers].sort((a, b) => a.order - b.order)
     const heir = ordered.find((l) => l.id !== layerId)
-    const placed = Object.values(before.assignments).filter((a) => a.layerId === layerId).length
+    const gone = goneAnchorOf(target)
+    const placed = Object.entries(before.assignments).filter(([urn, a]) => a.layerId === layerId && urn !== gone).length
     deleteLayer(layerId)
     useNotificationStore.getState().add({
       type: 'success',
@@ -7373,16 +7406,190 @@ export function ContextViewCanvas({
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   // Placements that point at nothing here (recorded by the load: see useGraphHydration). Only
   // what the load asked for and didn't get, still placed, and still absent: an entity that has
-  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported.
+  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported. Never a temp
+  // urn (a save drops a discarded create's), nor a column's own entity: that column says so itself.
   const placementsCheck = useCanvasStore((s) => s.placementsNotFound)
   const notFoundPlacements = useMemo(() => {
     if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || traceActive) return []
     const assignments = activeReferenceLayout.assignments
     const layerNames = new Map(sortedLayers.map((l) => [l.id, l.name]))
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
     return placementsCheck.urns
-      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
+      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn) && !assignmentOps.isTempUrn(urn) && !anchors.has(urn))
       .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
   }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
+  // Outside a draft, a repair offers the way into one — to someone who can open it.
+  const openDraftOffer = !isDraft && canManage && versioningEnabled && canEnterEdit && editModeEnabled ? handleEnterEdit : undefined
+  // Clean them up: their placements go, as ONE change — its Undo puts back only them.
+  const cleanUpNotFound = useCallback(() => {
+    if (traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const urns = notFoundPlacements.map((p) => p.urn).filter((urn) => before.assignments[urn])
+    if (urns.length === 0) return
+    const what = `${urns.length.toLocaleString()} ${urns.length === 1 ? 'placement that pointed at an entity' : 'placements that pointed at entities'} no longer in this source`
+    const id = stageMapping('view:placements-not-found', before, assignmentOps.unassignEntities(before, urns), 'clean-up', `Removed ${what}`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Removed ${what}.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [notFoundPlacements, currentLayout, stageMapping])
+  // A column whose entity is gone says so in its own body — and here, while that body can't be
+  // seen: folded, or scrolled out of sight. "Show" brings it into view.
+  const goneColumnIds = useMemo(
+    () => (traceActive ? [] : sortedLayers.filter((l) => anchorIssueByLayer.get(l.id) === 'missing').map((l) => l.id)),
+    [traceActive, sortedLayers, anchorIssueByLayer],
+  )
+  const goneOutOfSight = useColumnsOutOfSight(horizontalScrollRef, goneColumnIds)
+  const goneColumns = useMemo(() => {
+    const names = new Map(shownLayers.map((l) => [l.id, l.name]))
+    return goneColumnIds
+      .filter((id) => layerFold.folded.has(id) || goneOutOfSight.has(id))
+      .map((id) => ({ id, name: names.get(id) ?? id }))
+  }, [goneColumnIds, goneOutOfSight, layerFold.folded, shownLayers])
+  const { folded: foldedLayers, focusLayer } = layerFold
+  const showColumn = useCallback((layerId: string) => {
+    if (foldedLayers.has(layerId)) focusLayer(layerId)
+    horizontalScrollRef.current?.querySelector(`[data-layer-id="${CSS.escape(layerId)}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+  }, [foldedLayers, focusLayer])
+
+  // ── Top-level entities this view doesn't place (UnplacedRootsChip) ──
+  // ONE read per load — keyed on the load's own record (placementsCheck), so no render, edit or
+  // poll asks again — of the root types the view is about, sending what it places of them. An open
+  // view's type layers load their types anyway: those are never asked about. A view placed by the
+  // server (a subset, one that follows another) has nothing of its own to add them to.
+  const rootsAsk = useMemo(() => {
+    if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || serverPlaced) return null
+    const assignments = activeReferenceLayout.assignments
+    const typeOf = (urn: string) => nodeMap.get(urn)?.data?.type as string | undefined
+    const entityTypes = rootTypesToCheck({
+      rootTypes: creationRootTypes,
+      layers: sortedLayers,
+      placedTypes: Object.keys(assignments).map(typeOf).filter((t): t is string => !!t),
+      fedTypes: activeEntityScope === 'curated' ? [] : claimedFeedTypes(sortedLayers, schemaEntityTypes),
+    })
+    if (entityTypes.length === 0) return null
+    return { token: placementsCheck, entityTypes, placedUrns: placedOfTypes(assignments, typeOf, entityTypes) }
+  }, [placementsCheck, activeViewId, hydrationStatus, serverPlaced, activeReferenceLayout, nodeMap, creationRootTypes, sortedLayers, activeEntityScope, schemaEntityTypes])
+  const rootsAskRef = useRef(rootsAsk)
+  useEffect(() => { rootsAskRef.current = rootsAsk })
+  const [unplaced, setUnplaced] = useState<{ token: object; result: UnplacedTopLevelResult } | null>(null)
+  const rootsToken = rootsAsk ? rootsAsk.token : null
+  useEffect(() => {
+    const ask = rootsAskRef.current
+    if (!rootsToken || !ask || !provider.getUnplacedTopLevel) return
+    const controller = new AbortController()
+    provider.getUnplacedTopLevel(
+      { entityTypes: ask.entityTypes, placedUrns: ask.placedUrns, limit: ENTITY_COLUMNS_MAX },
+      { signal: controller.signal },
+    ).then((result) => {
+      if (!controller.signal.aborted) setUnplaced({ token: rootsToken, result })
+    }).catch((err) => {
+      // A check that could not run says nothing: it is an offer, never a verdict.
+      if (!controller.signal.aborted) console.warn('[ContextViewCanvas] the unplaced top-level check failed', err)
+    })
+    return () => controller.abort()
+  }, [rootsToken, provider])
+  const dismissedRoots = usePreferencesStore((s) => (activeViewId ? s.unplacedRootsDismissed[activeViewId] : undefined))
+  // What it found, less what has been placed since — said once the load is complete, outside a trace.
+  const rootsFound = useMemo(() => {
+    if (!unplaced || unplaced.token !== placementsCheck || hydrationStatus !== 'ready' || traceActive || serverPlaced) return null
+    if (dismissedRoots === unplaced.result.totalCount) return null
+    const assignments = activeReferenceLayout.assignments
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
+    const placedNow = (urn: string) => !!assignments[urn]?.layerId || anchors.has(urn)
+    const counts = { ...unplaced.result.byType }
+    for (const n of unplaced.result.nodes) if (placedNow(n.urn)) counts[n.entityType] = (counts[n.entityType] ?? 1) - 1
+    const typeDef = (id: string) => schemaEntityTypes.find((t) => t.id === id)
+    const byType = Object.entries(counts).filter(([, n]) => n > 0).map(([type, count]) => ({
+      type, count, one: typeDef(type)?.name ?? type, many: typeDef(type)?.pluralName ?? `${typeDef(type)?.name ?? type}s`,
+    }))
+    if (byType.length === 0) return null
+    const nodes = unplaced.result.nodes.filter((n) => !placedNow(n.urn))
+    return { byType, atLeast: !unplaced.result.complete, nodes, total: unplaced.result.totalCount }
+  }, [unplaced, placementsCheck, hydrationStatus, traceActive, serverPlaced, dismissedRoots, activeReferenceLayout, sortedLayers, schemaEntityTypes])
+  // The columns they can be placed in: any that isn't an entity's own, those for their types first.
+  const rootsColumns = useMemo(() => {
+    if (!rootsFound) return []
+    const types = new Set(rootsFound.byType.map((t) => t.type.toLowerCase()))
+    const open = shownLayers.filter((l) => !l.anchorUrn)
+    const forThem = (l: ViewLayerConfig) => (l.entityTypes ?? []).some((t) => types.has(String(t).toLowerCase()))
+    return [...open.filter(forThem), ...open.filter((l) => !forThem(l))].map((l) => ({ id: l.id, name: l.name }))
+  }, [rootsFound, shownLayers])
+  /** Add them to the canvas, and take them off again with the change's Undo when nothing holds them. */
+  const stageRoots = useCallback((
+    nodesToAdd: GraphNode[], before: NormalizedReferenceLayout, after: NormalizedReferenceLayout,
+    action: 'add-columns' | 'add-to-column', summary: string,
+  ) => {
+    const add = () => useCanvasStore.getState().addGraph(nodesToAdd.map((n) => toCanvasNode(n)), [])
+    add()
+    return stageMapping('view:unplaced-roots', before, after, action, summary, {
+      discard: () => {
+        const placed = currentLayout().assignments
+        for (const n of nodesToAdd) if (!placed[n.urn]) useCanvasStore.getState().removeNode(n.urn)
+      },
+      reapply: add,
+    })
+  }, [stageMapping, currentLayout])
+  const addRootsAsColumns = useCallback(() => {
+    if (!rootsFound || traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    let after = before
+    rootsFound.nodes.forEach((n, i) => {
+      const ordered = [...after.layers].sort((a, b) => a.order - b.order)
+      const id = `layer-${Date.now()}-${i}`
+      // Named by nobody: each takes its entity's name, and follows it.
+      const fresh = { id, name: '', description: '', icon: 'Layers', color: freshLayerColor(ordered, ordered.length), entityTypes: [], order: ordered.length }
+      after = layerOps.mapLayerToEntity({ ...after, layers: layerOps.appendLayer(after.layers, fresh) }, id, n.urn, { name: n.displayName || n.urn })
+    })
+    const what = rootsWhat(rootsFound, rootsFound.nodes.length)
+    const id = stageRoots(rootsFound.nodes, before, after, 'add-columns', `Added ${what} as columns`)
+    // Each column is what is inside its entity: its first page, as a load gives a mapped column.
+    void loadChildrenBatch(rootsFound.nodes.filter((n) => (n.childCount ?? 0) > 0).map((n) => n.urn))
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Added ${what} as columns — each shows what’s inside it.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [rootsFound, currentLayout, stageRoots, loadChildrenBatch])
+  const addRootsToColumn = useCallback((layerId: string) => {
+    if (!rootsFound || traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const layer = before.layers.find((l) => l.id === layerId)
+    if (!layer) return
+    const what = rootsWhat(rootsFound, rootsFound.nodes.length)
+    const after = assignmentOps.assignEntities(before, rootsFound.nodes.map((n) => n.urn), layerId)
+    const id = stageRoots(rootsFound.nodes, before, after, 'add-to-column', `Added ${what} to “${columnName(layer)}”`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Added ${what} to “${columnName(layer)}”.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [rootsFound, currentLayout, stageRoots])
+  const notNowRoots = useCallback(() => {
+    if (activeViewId && unplaced) usePreferencesStore.getState().dismissUnplacedRoots(activeViewId, unplaced.result.totalCount)
+  }, [activeViewId, unplaced])
+  const unplacedRoots = useMemo(() => {
+    if (!rootsFound) return null
+    // Outside a draft it says so only to someone who can open one.
+    const editable = layerEditsAllowed && !subsetFollows
+    if (!editable && !openDraftOffer) return null
+    const typeName = (id: string) => rootsFound.byType.find((t) => t.type === id)?.one ?? id
+    return {
+      byType: rootsFound.byType,
+      atLeast: rootsFound.atLeast,
+      listed: rootsFound.nodes.map((n) => ({ urn: n.urn, name: n.displayName || n.urn, typeName: typeName(n.entityType) })),
+      columns: editable ? rootsColumns : undefined,
+      onAddAsColumns: editable ? addRootsAsColumns : undefined,
+      onAddToColumn: editable && rootsColumns.length > 0 ? addRootsToColumn : undefined,
+      onOpenDraft: editable ? undefined : openDraftOffer,
+      onNotNow: notNowRoots,
+    }
+  }, [rootsFound, layerEditsAllowed, subsetFollows, openDraftOffer, rootsColumns, addRootsAsColumns, addRootsToColumn, notNowRoots])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -8679,6 +8886,12 @@ export function ContextViewCanvas({
           unresolvedEdgeCount={!overlay.active && showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           notFoundPlacements={notFoundPlacements}
+          // A repair is a layout change: offered in a draft, and outside one the way into a draft.
+          onCleanUpNotFound={layerEditsAllowed && !subsetFollows ? cleanUpNotFound : undefined}
+          onOpenDraft={openDraftOffer}
+          goneColumns={goneColumns}
+          onShowColumn={showColumn}
+          unplacedRoots={unplacedRoots}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}
@@ -9153,6 +9366,7 @@ export function ContextViewCanvas({
                 // A subset that follows its base takes its layers from there.
                 onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}
                 onDeleteLayer={isDraft && !subsetFollows ? deleteLayer : undefined}
+                onDeleteWithUndo={isDraft && !subsetFollows ? deleteLayerWithUndo : undefined}
                 onReorderLayer={isDraft && !subsetFollows ? reorderLayer : undefined}
                 // The layer menu (right-click the header), and inserting a layer right here.
                 onHeaderContextMenu={openLayerMenu}

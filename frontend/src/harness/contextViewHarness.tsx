@@ -19,6 +19,9 @@
  *             `create` a draft whose columns each add differently: Finance (a
  *                      column mapped to the Finance domain), Domains (several
  *                      top-level domains) and Apps (a type that needs a domain)
+ *   health    with `create`: the source changed under the view — two placements point at
+ *             entities it no longer holds, an Archive column's entity is gone, and three new
+ *             Domains (Treasury, Legal, Research) aren't placed: the view-health chips
  *   views     with `create`: the view's data source has this many views the reader can see
  *             (so a data move names the others it reaches)
  *   theme     `dark` for the dark palette
@@ -84,6 +87,9 @@ const node = (urn: string, displayName: string, entityType: string, childCount: 
 const DASHBOARDS = fixture === 'tracelong' ? 80 : 4
 const DASHBOARD_NAMES = ['Revenue', 'Churn', 'Pipeline', 'Retention']
 const CREATE = fixture === 'create'
+// `health`: the source has changed under the `create` view (see the header).
+const HEALTH = CREATE && params.has('health')
+const NEW_DOMAINS = HEALTH ? ['Treasury', 'Legal', 'Research'] : []
 const DOMAINS = ['Finance', 'Sales', 'Marketing', 'Operations', 'People']
 const APPS: Record<string, string[]> = { Finance: ['Billing', 'Ledger', 'Payroll'], Sales: ['CRM', 'Quotes'], Marketing: ['Campaigns'] }
 const ROOTS: GraphNode[] = CREATE ? DOMAINS.map((d) => node(`dom:${d}`, d, 'domain', APPS[d]?.length ?? 0)) : [
@@ -92,6 +98,8 @@ const ROOTS: GraphNode[] = CREATE ? DOMAINS.map((d) => node(`dom:${d}`, d, 'doma
   ...Array.from({ length: DASHBOARDS }, (_, i) =>
     node(`d${i}`, `${DASHBOARD_NAMES[i % 4]} dashboard${i < 4 ? '' : ` ${Math.floor(i / 4) + 1}`}`, 'dashboard', 0)),
 ]
+// In the source, not on the canvas: a curated view loads only what it places.
+const UNPLACED: GraphNode[] = NEW_DOMAINS.map((d) => node(`dom:${d}`, d, 'domain', 0))
 function childrenOf(urn: string): GraphNode[] {
   if (CREATE) return (APPS[urn.replace(/^dom:/, '')] ?? []).map((a) => node(`app:${a}`, a, 'app', 0))
   if (urn === 'wh') return Array.from({ length: CONTAINERS }, (_, i) => node(`s${i}`, `schema_${String(i).padStart(3, '0')}`, 'schema', CHILDREN))
@@ -115,7 +123,7 @@ function parentOf(urn: string): string | undefined {
   return c ? `t${c[1]}_${c[2]}` : undefined
 }
 function lookup(urn: string): GraphNode | undefined {
-  const root = ROOTS.find((r) => r.urn === urn)
+  const root = [...ROOTS, ...UNPLACED].find((r) => r.urn === urn)
   if (root) return root
   const parent = parentOf(urn)
   return parent ? childrenOf(parent).find((c) => c.urn === urn) : undefined
@@ -125,12 +133,17 @@ const LAYERS = CREATE ? [
   { id: 'fin', name: 'Finance', color: '#10b981', order: 0, entityTypes: [], rules: [], anchorUrn: 'dom:Finance' },
   { id: 'domains', name: 'Domains', color: '#6366f1', order: 1, entityTypes: ['domain'], rules: [] },
   { id: 'apps', name: 'Apps', color: '#f59e0b', order: 2, entityTypes: ['app'], rules: [] },
+  ...(HEALTH ? [{ id: 'archive', name: 'Archive', color: '#ec4899', order: 3, entityTypes: [], rules: [], anchorUrn: 'dom:Archive', nameFromAnchor: true }] : []),
 ] : [
   { id: 'sources', name: 'Sources', color: '#6366f1', order: 0, entityTypes: [], rules: [] },
   { id: 'reports', name: 'Reports', color: '#f59e0b', order: 1, entityTypes: [], rules: [] },
 ]
 const ASSIGNMENTS: Record<string, { layerId: string }> = CREATE
-  ? Object.fromEntries(DOMAINS.map((d) => [`dom:${d}`, { layerId: d === 'Finance' ? 'fin' : 'domains' }]))
+  ? {
+    ...Object.fromEntries(DOMAINS.map((d) => [`dom:${d}`, { layerId: d === 'Finance' ? 'fin' : 'domains' }])),
+    // Placed before the source changed: two entities it no longer holds, and the Archive column's own.
+    ...(HEALTH ? { 'dom:Legacy': { layerId: 'domains' }, 'app:Forecasts': { layerId: 'apps' }, 'dom:Archive': { layerId: 'archive' } } : {}),
+  }
   : {
     wh: { layerId: 'sources' }, lake: { layerId: 'sources' },
     ...Object.fromEntries(Array.from({ length: DASHBOARDS }, (_, i) => [`d${i}`, { layerId: 'reports' }])),
@@ -233,6 +246,12 @@ const provider = {
   traceClosure: fixture === 'tracelong'
     ? async (req?: { grain?: string }) => (req?.grain === 'coarse' ? longWalk(true) : longWalk(false))
     : () => new Promise<never>(() => {}),
+  // The view-health check's one read: the source's Domains the view doesn't place.
+  getUnplacedTopLevel: async (req: { entityTypes: string[]; placedUrns: string[]; limit?: number }) => {
+    const nodes = [...ROOTS, ...UNPLACED].filter((n) => req.entityTypes.includes(n.entityType) && !req.placedUrns.includes(n.urn))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName))
+    return { nodes: nodes.slice(0, req.limit ?? 50), byType: nodes.length ? { domain: nodes.length } : {}, totalCount: nodes.length, complete: true }
+  },
   computeLayerAssignments: async () => ({
     assignments: new Map(Object.entries(ASSIGNMENTS).map(([entityId, a]) => [entityId, { entityId, layerId: a.layerId, isInherited: false }])),
     parentMap: new Map(),
@@ -319,6 +338,8 @@ const store = useCanvasStore.getState()
 store.setGraph(ROOTS.map((n) => toCanvasNode(n)), [] as LineageEdge[])
 store.setHydrationPhase('complete')
 store.setHydrationStatus('ready')
+// The view's load asked for every placement by urn: these did not come back.
+if (HEALTH) store.setPlacementsNotFound({ viewId: 'harness-view', urns: ['dom:Legacy', 'app:Forecasts', 'dom:Archive'] })
 
 if (fixture === 'top') {
   // An edge read that failed: its banner, in flow at the very top.
