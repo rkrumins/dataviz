@@ -4,7 +4,8 @@ What a draft's relationship counts read of main's store at the entities the draf
 (``draft_search``). Pins: each urn seeked by its label's URN index, out and in — an urn whose
 label is unknown (not in the graph) is never an unlabeled scan; the types as a pattern, or every
 type but a roll-up and those left out; one relationship read from both its ends once; and the
-limit, which says whether that was all of them.
+limit: each direction counted first, by a statement that stops past it, and nothing read once
+there are more than it (None).
 """
 import asyncio
 
@@ -37,13 +38,17 @@ def _provider(rows_for=lambda cypher, params: []):
         return sorted(by.items())
 
     async def _ro_query(cypher, params=None, timeout=None, op=None, **kw):
-        calls.append((cypher, params or {}))
-        return _Result(rows_for(cypher, params or {}))
+        params = params or {}
+        calls.append((cypher, params))
+        if cypher.endswith("RETURN count(r)"):           # as LIMIT ends it: at ``_n``
+            held = rows_for(cypher, {**params, "_after": -1, "_page": 10 ** 9})
+            return _Result([[min(len(held), params["_n"])]])
+        return _Result(rows_for(cypher, params))
 
     p._ensure_connected = _connected
     p._label_buckets = _buckets
     p._ro_query = _ro_query
-    p._alias_rel_types = lambda types: list(types)
+    p._alias_rel_types = list
     return p, calls
 
 
@@ -51,11 +56,17 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _reads(calls):
+    return [(cypher, params) for cypher, params in calls if "ORDER BY ID(r)" in cypher]
+
+
 def test_each_label_is_seeked_by_its_urn_index_both_ways_and_an_unknown_urn_has_none():
     p, calls = _provider()
-    _run(p.relationships_at(["urn:t1", "urn:d1", "urn:t2", "urn:gone"], edge_types=["FLOWS_TO"],
-                            limit=10))
-    shapes = sorted(cypher.split(" AND ID(r)")[0] for cypher, _ in calls)
+    assert _run(p.relationships_at(["urn:t1", "urn:d1", "urn:t2", "urn:gone"],
+                                   edge_types=["FLOWS_TO"], limit=10)) == []
+    # Each way counted, stopping past the limit; none held: none read.
+    assert all(cypher.endswith(" WITH r LIMIT $_n RETURN count(r)") for cypher, _ in calls)
+    shapes = sorted(cypher.split(" WITH r LIMIT")[0] for cypher, _ in calls)
     assert shapes == [
         "MATCH (a)-[r:FLOWS_TO]->(b:Dashboard) WHERE b.urn IN $_urns",
         "MATCH (a)-[r:FLOWS_TO]->(b:Table) WHERE b.urn IN $_urns",
@@ -64,8 +75,8 @@ def test_each_label_is_seeked_by_its_urn_index_both_ways_and_an_unknown_urn_has_
     ]
     assert sorted(tuple(params["_urns"]) for _, params in calls) == \
         [("urn:d1",), ("urn:d1",), ("urn:t1", "urn:t2"), ("urn:t1", "urn:t2")]
-    assert all(params["_page"] == 10 and params["_after"] == -1 for _, params in calls)
-    assert not _run(p.relationships_at(["urn:gone"], limit=10)), "no unlabeled scan"
+    assert all(params["_n"] == 11 for _, params in calls)
+    assert _run(p.relationships_at(["urn:gone"], limit=10)) == [], "no unlabeled scan"
     assert len(calls) == 4
 
 
@@ -94,7 +105,33 @@ def test_one_read_from_both_its_ends_is_once_and_the_limit_holds():
     by_id = {e.id: e for e in edges}
     assert by_id["e1"].confidence == 0.5 and by_id["e2"].properties == {"mode": "batch"}
     assert (by_id["e1"].source_urn, by_id["e1"].target_urn) == ("urn:t1", "urn:t2")
-    assert len(_run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=1))) == 1
+    # Two of them: past a limit of one, none.
+    assert _run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=1)) is None
+
+
+def test_more_than_the_limit_in_all_is_none_though_each_way_is_within_it():
+    def rows(cypher, params):
+        if "a.urn IN $_urns" in cypher:
+            return [[1, "urn:t1", "urn:x", "FLOWS_TO", {"id": "out"}]]
+        return [[2, "urn:y", "urn:t1", "FLOWS_TO", {"id": "in"}]]
+
+    p, _ = _provider(rows)
+    assert sorted(e.id for e in _run(p.relationships_at(["urn:t1"], limit=2))) == ["in", "out"]
+    assert _run(p.relationships_at(["urn:t1"], limit=1)) is None
+
+
+def test_more_come_between_their_count_and_their_read_is_none():
+    held = [[1, "urn:t1", "urn:x1", "FLOWS_TO", {"id": "e1"}]]
+
+    def rows(cypher, params):
+        if "a.urn IN $_urns" not in cypher:
+            return []
+        if "ORDER BY" in cypher:
+            held.append([2, "urn:t1", "urn:x2", "FLOWS_TO", {"id": "e2"}])
+        return list(held)
+
+    p, _ = _provider(rows)
+    assert _run(p.relationships_at(["urn:t1"], limit=1)) is None
 
 
 def test_a_hub_past_one_reply_is_read_a_page_at_a_time(monkeypatch):
@@ -114,11 +151,19 @@ def test_a_hub_past_one_reply_is_read_a_page_at_a_time(monkeypatch):
     p, calls = _provider(rows)
     edges = _run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=100))
     assert sorted(e.id for e in edges) == sorted(f"e{i}" for i in range(10))
-    assert all("ORDER BY ID(r) LIMIT $_page" in cypher for cypher, _ in calls)
-    assert [params["_after"] for cypher, params in calls if "a.urn IN" in cypher] == [-1, 2, 5, 8]
-    # The limit still holds, across pages.
-    p, _ = _provider(rows)
-    assert len(_run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=4))) == 4
+    assert all("ORDER BY ID(r) LIMIT $_page" in cypher for cypher, _ in _reads(calls))
+    # Only the way that holds any is read.
+    assert [params["_after"] for _, params in _reads(calls)] == [-1, 2, 5, 8]
+
+
+def test_a_hub_past_the_limit_is_counted_to_just_past_it_and_never_read():
+    """However many relationships an entity holds, past the limit what it costs is a count that
+    stops at ``limit + 1`` — no page of them is read."""
+    hub = [[i, "urn:t1", f"urn:x{i}", "FLOWS_TO", {"id": f"e{i}"}] for i in range(50)]
+    p, calls = _provider(lambda cypher, params: hub if "a.urn IN $_urns" in cypher else [])
+    assert _run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=4)) is None
+    assert _reads(calls) == []
+    assert {params["_n"] for _, params in calls} == {5}
 
 
 def test_a_lagging_main_refuses_it_as_its_other_search_reads():

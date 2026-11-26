@@ -7192,14 +7192,20 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def relationships_at(self, urns: Sequence[str], *,
                                edge_types: Optional[Sequence[str]] = None,
-                               except_types: Sequence[str] = (), limit: int) -> List[GraphEdge]:
-        """Every relationship stored from or to any of ``urns``, each once, up to ``limit`` — fewer
-        is all of them: of ``edge_types`` (as named; None: every type but ``except_types``), never
-        a roll-up. Each urn is seeked by its label's URN index, both directions, and an urn the
-        graph doesn't hold has none (as :meth:`relationships_between`): never an unlabeled scan."""
+                               except_types: Sequence[str] = (), limit: int
+                               ) -> Optional[List[GraphEdge]]:
+        """Every relationship stored from or to any of ``urns``, each once — or None when there are
+        more than ``limit``: of ``edge_types`` (as named; None: every type but ``except_types``),
+        never a roll-up. Each urn is seeked by its label's URN index, both directions, and an urn
+        the graph doesn't hold has none (as :meth:`relationships_between`): never an unlabeled scan.
+
+        What it costs is bounded by ``limit``, never by how many relationships an entity holds:
+        each direction is counted first, by a statement that stops at ``limit + 1``. Past ``limit``
+        in either, there are more than ``limit`` and none is read; within it, each is read a page
+        at a time."""
         await self._ensure_connected()
-        if limit <= 0:
-            return []
+        if limit < 0:
+            return None
         types: List[str] = []
         if edge_types is not None:
             types = [t for t in self._alias_rel_types(list(edge_types))
@@ -7210,31 +7216,52 @@ class FalkorDBProvider(GraphDataProvider):
         skip = sorted({str(t).upper() for t in (*DERIVED_EDGE_TYPES, *except_types)})
         where = "" if types else " AND NOT toUpper(type(r)) IN $_skip"
 
-        async def read(label: str, bucket: List[str], outgoing: bool) -> list:
+        def pattern(label: str, outgoing: bool) -> str:
+            return (f"MATCH (a:{label})-{rel}->(b) WHERE a.urn IN $_urns{where}" if outgoing
+                    else f"MATCH (a)-{rel}->(b:{label}) WHERE b.urn IN $_urns{where}")
+
+        async def held(label: str, bucket: List[str], outgoing: bool) -> int:
+            # ``LIMIT`` ends the traversal there: an entity past ``limit`` costs ``limit + 1``.
+            res = await self._ro_query(
+                f"{pattern(label, outgoing)} WITH r LIMIT $_n RETURN count(r)",
+                params={"_urns": bucket, "_skip": skip, "_n": limit + 1}, op="edges.at.count")
+            got = res.result_set or []
+            return int(got[0][0]) if got else 0
+
+        async def read(label: str, bucket: List[str], outgoing: bool) -> Optional[list]:
             # A page at a time in relationship-ID order: FalkorDB cuts a reply at its
-            # ``RESULTSET_SIZE`` rows without saying so, and a hub holds far more than one.
-            pattern = (f"MATCH (a:{label})-{rel}->(b) WHERE a.urn IN $_urns" if outgoing
-                       else f"MATCH (a)-{rel}->(b:{label}) WHERE b.urn IN $_urns")
-            page = min(limit, _EDGES_AT_PAGE)
+            # ``RESULTSET_SIZE`` rows without saying so. Each page walks every relationship this
+            # way, at most ``limit`` of them once counted.
+            page = min(limit + 1, _EDGES_AT_PAGE)
             rows: list = []
             after = -1
-            while len(rows) < limit:
+            while True:
                 res = await self._ro_query(
-                    f"{pattern}{where} AND ID(r) > $_after WITH a, b, r ORDER BY ID(r) LIMIT $_page "
-                    "RETURN ID(r), a.urn, b.urn, type(r), properties(r)",
+                    f"{pattern(label, outgoing)} AND ID(r) > $_after WITH a, b, r ORDER BY ID(r) "
+                    "LIMIT $_page RETURN ID(r), a.urn, b.urn, type(r), properties(r)",
                     params={"_urns": bucket, "_skip": skip, "_after": after, "_page": page},
                     op="edges.at")
                 got = res.result_set or []
                 rows += [r[1:] for r in got]
+                if len(rows) > limit:
+                    return None                         # more came since they were counted
                 if len(got) < page:
-                    break
+                    return rows
                 after = got[-1][0]
-            return rows
 
-        buckets = [(label, bucket) for label, bucket in await self._label_buckets(list(urns))
-                   if label]                               # an urn not in the graph: none
-        answers = await asyncio.gather(*(read(label, bucket, outgoing)
-                                         for label, bucket in buckets for outgoing in (True, False)))
+        ways = [(label, bucket, outgoing)
+                for label, bucket in await self._label_buckets(list(urns))
+                if label                                # an urn not in the graph: none
+                for outgoing in (True, False)]
+        counts = await asyncio.gather(*(held(*way) for way in ways))
+        # Each relationship is counted once a direction (by the bucket of its end there): past
+        # ``limit`` either way, there are more than ``limit``.
+        for outgoing in (True, False):
+            if sum(n for (_, _, o), n in zip(ways, counts) if o is outgoing) > limit:
+                return None
+        answers = await asyncio.gather(*(read(*way) for way, n in zip(ways, counts) if n))
+        if any(rows is None for rows in answers):
+            return None
         # One between two of ``urns`` (or from one to itself) is read from both ends: once.
         out: Dict[Tuple[str, str, str, str], GraphEdge] = {}
         for rows in answers:
@@ -7242,7 +7269,7 @@ class FalkorDBProvider(GraphDataProvider):
                 props = dict(props or {})
                 out.setdefault((s, t, str(rel_type), str(props.get("id"))),
                                _edge_from_row(s, t, str(rel_type), props))
-        return list(out.values())[:limit]
+        return None if len(out) > limit else list(out.values())
 
     async def _edges_between_pairs(
         self,
