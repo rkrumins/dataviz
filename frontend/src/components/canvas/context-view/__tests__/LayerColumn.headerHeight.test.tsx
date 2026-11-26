@@ -18,6 +18,7 @@ import {
   ViewSearchSessionContext,
 } from '@/components/canvas/search/session/ViewSearchSessionContext'
 import { usePersonaStore } from '@/store/persona'
+import { useCanvasStore } from '@/store/canvas'
 import { usePreferencesStore, type CanvasHeaderSize } from '@/store/preferences'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import { stubSession } from '@/test/stubSearchSession'
@@ -181,5 +182,64 @@ describe('LayerColumn header — what moved out of the row', () => {
     expect(screen.queryByRole('heading', { name: LONG })).toBeNull()
     const spine = screen.getByLabelText(new RegExp(`^Unfold ${LONG}`))
     expect([...spine.children].some((el) => !!(el as HTMLElement).style.height)).toBe(false)
+  })
+})
+
+describe('LayerColumn header — what kind of column it is', () => {
+  const finance = { id: 'Finance', type: 'generic', position: { x: 0, y: 0 }, data: { label: 'Finance', urn: 'Finance', type: 'domain' } }
+  beforeEach(() => {
+    useCanvasStore.setState({ nodes: [finance], edges: [], _nodeIndex: new Set(['Finance']), _edgeIndex: new Set() } as never)
+  })
+  const KINDS: Array<[string, Partial<ViewLayerConfig>, string]> = [
+    ['mapped', { name: 'Money', anchorUrn: 'Finance' }, 'Mapped to Finance'],
+    ['byType', { name: 'Apps', entityTypes: ['app'] }, 'By type: app'],
+    ['handPicked', { name: 'Picked', entityTypes: [] }, 'Hand-picked'],
+  ]
+
+  it.each(SIZES)('marks the tile with the kind, at the height every header has (%s)', (size) => {
+    usePreferencesStore.setState({ canvasHeaderSize: size })
+    for (const [kind, layer, label] of KINDS) {
+      const { unmount } = renderHeader(layer)
+      const mark = screen.getByRole('img', { name: label })
+      expect(mark.dataset.columnKind).toBe(kind)
+      // Over the tile's corner, taking no room in the row.
+      expect(mark.parentElement!.className).toMatch(/\babsolute\b/)
+      expect(titleRowHeight(layer.name!)).toBe(`${layerHeaderTokens(size).rowPx}px`)
+      unmount()
+    }
+  })
+
+  it('explains it in the name’s card — a mapped column with the way to its entity', async () => {
+    renderHeader({ name: 'Money', anchorUrn: 'Finance' })
+    fireEvent.mouseEnter(screen.getByRole('heading', { name: 'Money' }).parentElement!)
+    const card = await screen.findByRole('tooltip')
+    expect(card).toHaveTextContent('Mapped to Finance')
+    expect(card).toHaveTextContent('Adding or dropping here puts things inside Finance — changes the data.')
+    fireEvent.click(screen.getByRole('button', { name: /Open Finance’s details/ }))
+    expect(useCanvasStore.getState().drawerNodeId).toBe('Finance')
+  })
+
+  it('a hand-picked column says arranging it only changes the view; a by-type one what it shows', async () => {
+    const { unmount } = renderHeader({ name: 'Picked', entityTypes: [] })
+    fireEvent.mouseEnter(screen.getByRole('heading', { name: 'Picked' }).parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Entities placed here by hand. Arranging this column only changes this view.')
+    unmount()
+    renderHeader({ name: 'Apps', entityTypes: ['app'] }, { handPlaced: 2 })
+    fireEvent.mouseEnter(screen.getByRole('heading', { name: 'Apps' }).parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('A column for apps — adding here creates an app. And 2 placed here by hand.')
+  })
+
+  it('in the Business view, in plain words, without the urn', async () => {
+    usePersonaStore.setState({ mode: 'business' })
+    renderHeader({ name: 'Money', anchorUrn: 'Finance' })
+    fireEvent.mouseEnter(screen.getByRole('heading', { name: 'Money' }).parentElement!)
+    const card = await screen.findByRole('tooltip')
+    expect(card).toHaveTextContent('This column is what’s inside Finance.')
+    expect(card.querySelector('.font-mono')).toBeNull()
+  })
+
+  it('keeps the mark on a folded spine wide enough for it', () => {
+    renderHeader({ name: 'Apps', entityTypes: ['app'] }, { isFolded: true, spineWidth: 44 })
+    expect(screen.getByRole('img', { name: 'By type: app' })).toBeInTheDocument()
   })
 })

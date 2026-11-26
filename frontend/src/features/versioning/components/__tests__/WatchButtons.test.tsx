@@ -2,7 +2,8 @@
  * The watch toggles. The graph's, in the view's page header: nothing without a versioned graph
  * with a first version, or with version control off; a toggle named "Watch this graph" whose
  * pressed state says whether you watch it, held until what you watch is known. An entity's, in
- * its panel: "Watch this entity", pressed when that urn is watched. Both share one query, a
+ * its panel: "Watch this entity", pressed when that urn is watched. A relationship's, in its
+ * panel: "Watch this relationship", pressed when its id is watched. All share one query, a
  * failure keeps the state and says why. The API is mocked, the hooks are real.
  */
 import { render, screen, waitFor } from '@testing-library/react'
@@ -19,19 +20,23 @@ vi.mock('@/services/versioningApiService', async (orig) => ({
   getGraphWatch: vi.fn(),
   watchGraph: vi.fn(),
   unwatchGraph: vi.fn(),
+  watchEdge: vi.fn(),
+  unwatchEdge: vi.fn(),
 }))
 vi.mock('../../hooks/useVersioning', async (orig) => ({
   ...(await orig<typeof import('../../hooks/useVersioning')>()),
   useResolveGraph: () => resolved,
 }))
 
-import { getGraphWatch, unwatchGraph, watchGraph } from '@/services/versioningApiService'
-import { EntityWatchButton, GraphWatchButton } from '../WatchButtons'
+import { getGraphWatch, unwatchEdge, unwatchGraph, watchEdge, watchGraph } from '@/services/versioningApiService'
+import { EntityWatchButton, GraphWatchButton, RelationshipWatchButton } from '../WatchButtons'
 import { watching } from '../__fixtures__/digest'
 
 const mockGet = vi.mocked(getGraphWatch)
 const mockWatch = vi.mocked(watchGraph)
 const mockUnwatch = vi.mocked(unwatchGraph)
+const mockWatchEdge = vi.mocked(watchEdge)
+const mockUnwatchEdge = vi.mocked(unwatchEdge)
 
 function renderBoth() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -143,5 +148,46 @@ describe('EntityWatchButton', () => {
     await user.click(entity)
     expect(mockWatch).toHaveBeenCalledWith('ws1', 'g1', 'urn:li:dataset:orders')
     await waitFor(() => expect(entity).toHaveAttribute('aria-pressed', 'true'))
+  })
+})
+
+describe('RelationshipWatchButton', () => {
+  const SINCE = '2026-11-16T10:00:00+00:00'
+
+  function renderRelationship() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <EntityWatchButton wsId="ws1" graphId="g1" urn="urn:li:dataset:orders" name="Orders" />
+        <RelationshipWatchButton wsId="ws1" graphId="g1" edgeId="urn:uuid:feeds" name="Orders → Revenue" />
+      </QueryClientProvider>,
+    )
+  }
+
+  it('is pressed when its id is watched — an entity of that name is not it — and watches or stops watching it alone', async () => {
+    mockGet.mockResolvedValue(watching({ entities: [{ urn: 'urn:uuid:feeds', since: SINCE }] }))
+    mockWatchEdge.mockResolvedValue(watching({ edges: [{ id: 'urn:uuid:feeds', since: SINCE }] }))
+    mockUnwatchEdge.mockResolvedValue(watching())
+    renderRelationship()
+    const user = userEvent.setup()
+    const relationship = await screen.findByRole('button', { name: 'Watch this relationship', pressed: false })
+    await user.click(relationship)
+    expect(mockWatchEdge).toHaveBeenCalledWith('ws1', 'g1', 'urn:uuid:feeds')
+    expect(mockWatch).not.toHaveBeenCalled()
+    await waitFor(() => expect(relationship).toHaveAttribute('aria-pressed', 'true'))
+    expect(relationship).toHaveTextContent('Watching')
+    expect(screen.getByRole('button', { name: 'Watch this entity' })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(relationship)
+    expect(mockUnwatchEdge).toHaveBeenCalledWith('ws1', 'g1', 'urn:uuid:feeds')
+    await waitFor(() => expect(relationship).toHaveAttribute('aria-pressed', 'false'))
+    expect(mockUnwatch).not.toHaveBeenCalled()
+  })
+
+  it('names the relationship by its ends in its tip', async () => {
+    mockGet.mockResolvedValue(watching({ edges: [{ id: 'urn:uuid:feeds', since: SINCE }] }))
+    renderRelationship()
+    const relationship = await screen.findByRole('button', { name: 'Watch this relationship', pressed: true })
+    await userEvent.setup().hover(relationship.parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('You’re watching Orders → Revenue')
   })
 })

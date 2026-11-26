@@ -13,6 +13,10 @@
  *     does.
  *   - How many entities does each rule match in the whole view?
  *     (``POST /search/counts``, followed to an exact total.)
+ *   - On a canvas that draws them (``lines``): which of the relationships
+ *     it has loaded does each rule that styles relationships match? (The
+ *     same membership, ≤ 1,000 relationships a request, each by its id and
+ *     its ends; a relationship rule's count is its Connections search's.)
  *
  * Both are re-asked when a rule's criteria, the enabled set, the view's
  * layers or the open draft change (``useDraftDataKey``: a save, a bulk change
@@ -24,15 +28,17 @@ import { useEffect, useMemo, useRef } from 'react'
 
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
 import { useDraftDataKey } from '@/features/versioning/hooks/useDraftDataKey'
+import { useViewIsContainmentEdge } from '@/hooks/useViewSchema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { rideOut } from '@/services/rideOut'
 import { countRules } from '@/services/ruleCounts'
-import { useCanvasStore } from '@/store/canvas'
+import { type LineageEdge, useCanvasStore } from '@/store/canvas'
 import { useDisplayRules, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
+import { normalizeEdgeType } from '@/store/schema'
 import type { DisplayRuleConfig } from '@/types/schema'
-import type { Predicate } from '@/types/search'
+import type { Predicate, SearchMembershipResult } from '@/types/search'
 
 
 /** Debounce window before asking, so bursts of loads and edits (an
@@ -41,18 +47,32 @@ const DEBOUNCE_MS = 150
 
 /** The server's limits per membership request. */
 const URNS_PER_REQUEST = 1000
+const EDGES_PER_REQUEST = 1000
 const RULES_PER_REQUEST = 32
 
+const NO_EDGES: readonly LineageEdge[] = []
 
-export function useDisplayRuleEngine(viewId: string | null | undefined): void {
+export interface DisplayRuleEngineOptions {
+    /** The canvas draws relationships' lines, so its relationship rules are
+     *  asked about the relationships it has loaded. */
+    lines?: boolean
+}
+
+
+export function useDisplayRuleEngine(
+    viewId: string | null | undefined, { lines = false }: DisplayRuleEngineOptions = {},
+): void {
     const provider = useGraphProvider()
     const rules = useDisplayRules()
     const layers = useReferenceModelStore((s) => s.layers)
     const nodes = useCanvasStore((s) => s.nodes)
+    const edges = useCanvasStore((s) => (lines ? s.edges : NO_EDGES))
+    const isContainmentEdge = useViewIsContainmentEdge()
 
     const setRuleMeta = useDisplayRuleMatchStore((s) => s.setRuleMeta)
     const retainRules = useDisplayRuleMatchStore((s) => s.retainRules)
     const applyMembership = useDisplayRuleMatchStore((s) => s.applyMembership)
+    const applyEdgeMembership = useDisplayRuleMatchStore((s) => s.applyEdgeMembership)
     const setCounts = useDisplayRuleMatchStore((s) => s.setCounts)
     const setMembershipError = useDisplayRuleMatchStore((s) => s.setMembershipError)
     const setCountsError = useDisplayRuleMatchStore((s) => s.setCountsError)
@@ -70,24 +90,29 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
 
     const enabled = useMemo(() => rules.filter((r) => r.enabled), [rules])
     const askable = useMemo(() => enabled.filter(canAsk), [enabled])
+    const entityRules = useMemo(() => askable.filter((r) => !stylesLines(r)), [askable])
+    const lineRules = useMemo(() => askable.filter(stylesLines), [askable])
     // What the answers depend on: which rules, with which criteria, in which
     // view (and its layers) and on which state of the draft open — not a
     // rule's name, colour or icon. A draft's chips and counts are its own, so
     // they are asked again as it changes (a save, a bulk change window by window).
     const draftKey = useDraftDataKey()
     const signature = useMemo(
-        () => JSON.stringify([viewId, enabled.map((r) => [r.id, r.predicate]), layers, draftKey]),
+        () => JSON.stringify([viewId, enabled.map((r) => [r.id, r.target, r.predicate]), layers, draftKey]),
         [viewId, enabled, layers, draftKey],
     )
 
-    // The entities already answered for the current signature.
+    // The entities, and the relationships, already answered for the current signature.
     const answered = useRef<{ signature: string; urns: Set<string> }>({
         signature: '', urns: new Set(),
+    })
+    const answeredEdges = useRef<{ signature: string; ids: Set<string> }>({
+        signature: '', ids: new Set(),
     })
 
     // Membership: every loaded entity, once; later ones as they load.
     useEffect(() => {
-        if (!viewId || !(provider instanceof RemoteGraphProvider) || askable.length === 0) return
+        if (!viewId || !(provider instanceof RemoteGraphProvider) || entityRules.length === 0) return
         if (answered.current.signature !== signature) {
             answered.current = { signature, urns: new Set() }
             setMembershipNote(null)
@@ -98,42 +123,58 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
 
         const controller = new AbortController()
         const timer = setTimeout(() => {
-            void (async () => {
-                for (let i = 0; i < pending.length; i += URNS_PER_REQUEST) {
-                    const batch = pending.slice(i, i + URNS_PER_REQUEST)
-                    for (let j = 0; j < askable.length; j += RULES_PER_REQUEST) {
-                        const group = askable.slice(j, j + RULES_PER_REQUEST)
-                        try {
-                            // The graph busy or failing over: asked again, for minutes.
-                            const answer = await rideOut(() => provider.searchMembership({
-                                scope: { viewId, scopeMode: 'view' },
-                                items: group.map(asItem),
-                                urns: batch,
-                            }, { signal: controller.signal }), controller.signal)
-                            if (controller.signal.aborted) return
-                            applyMembership(group.map((r) => r.id), batch, answer.matches)
-                            // On a draft, why some tags on what it changed are Published's.
-                            if (answer.notes?.length) setMembershipNote(answer.notes[0])
-                        } catch (err) {
-                            if (controller.signal.aborted) return
-                            // The batch keeps its previous chips and is asked
-                            // about again on the next change — or on Retry,
-                            // which the rule list offers with why it failed.
-                            setMembershipError(readable(err))
-                            return
-                        }
-                    }
-                    for (const urn of batch) done.add(urn)
-                }
-                setMembershipError(null)
-            })()
+            void askInBatches(pending, URNS_PER_REQUEST, entityRules, controller.signal, {
+                ask: (batch, group) => provider.searchMembership({
+                    scope: { viewId, scopeMode: 'view' }, items: group.map(asItem), urns: batch,
+                }, { signal: controller.signal }),
+                apply: (batch, group, answer) => applyMembership(group.map((r) => r.id), batch, answer.matches),
+                done: (batch) => { for (const urn of batch) done.add(urn) },
+                setNote: setMembershipNote,
+                setError: setMembershipError,
+            })
         }, DEBOUNCE_MS)
         return () => {
             controller.abort()
             clearTimeout(timer)
         }
-    }, [viewId, provider, signature, askable, nodes, applyMembership, setMembershipError,
+    }, [viewId, provider, signature, entityRules, nodes, applyMembership, setMembershipError,
         setMembershipNote, retryToken])
+
+    // Relationships: every loaded one the canvas draws as a line, once; later
+    // ones as they load. Containment is drawn as nesting, never styled.
+    useEffect(() => {
+        if (!viewId || !(provider instanceof RemoteGraphProvider) || lineRules.length === 0) return
+        if (answeredEdges.current.signature !== signature) {
+            answeredEdges.current = { signature, ids: new Set() }
+            setMembershipNote(null)
+        }
+        const done = answeredEdges.current.ids
+        const pending = [...new Map(edges
+            .filter((e) => e.id && !done.has(e.id) && !e.data?.isAggregated
+                && !isContainmentEdge(normalizeEdgeType(e)))
+            .map((e) => [e.id, e])).values()]
+        if (pending.length === 0) return
+
+        const controller = new AbortController()
+        const timer = setTimeout(() => {
+            void askInBatches(pending, EDGES_PER_REQUEST, lineRules, controller.signal, {
+                ask: (batch, group) => provider.searchMembership({
+                    scope: { viewId, scopeMode: 'view' }, items: group.map(asItem),
+                    edges: batch.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+                }, { signal: controller.signal }),
+                apply: (batch, group, answer) => applyEdgeMembership(
+                    group.map((r) => r.id), batch.map((e) => e.id), answer.edgeMatches ?? {}),
+                done: (batch) => { for (const e of batch) done.add(e.id) },
+                setNote: setMembershipNote,
+                setError: setMembershipError,
+            })
+        }, DEBOUNCE_MS)
+        return () => {
+            controller.abort()
+            clearTimeout(timer)
+        }
+    }, [viewId, provider, signature, lineRules, edges, isContainmentEdge, applyEdgeMembership,
+        setMembershipError, setMembershipNote, retryToken])
 
     // Counts: each rule's exact total in the view. A rule that can't be asked
     // about reads as one that can't be counted, and why.
@@ -179,6 +220,54 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
 
 function readable(err: unknown): string {
     return readableSearchError(err instanceof Error ? err.message : String(err))
+}
+
+
+/**
+ * Ask about ``pending`` (entities or relationships), ``perRequest`` at a
+ * time, ≤ 32 rules a request, folding each answer in as it lands. A batch
+ * that fails keeps its previous answers and is asked about again on the
+ * next change — or on Retry, which the rule list offers with why it failed.
+ */
+async function askInBatches<T>(
+    pending: readonly T[],
+    perRequest: number,
+    rules: readonly DisplayRuleConfig[],
+    signal: AbortSignal,
+    how: {
+        ask: (batch: T[], group: DisplayRuleConfig[]) => Promise<SearchMembershipResult>
+        apply: (batch: T[], group: DisplayRuleConfig[], answer: SearchMembershipResult) => void
+        done: (batch: T[]) => void
+        setNote: (note: string | null) => void
+        setError: (error: string | null) => void
+    },
+): Promise<void> {
+    for (let i = 0; i < pending.length; i += perRequest) {
+        const batch = pending.slice(i, i + perRequest)
+        for (let j = 0; j < rules.length; j += RULES_PER_REQUEST) {
+            const group = rules.slice(j, j + RULES_PER_REQUEST)
+            try {
+                // The graph busy or failing over: asked again, for minutes.
+                const answer = await rideOut(() => how.ask(batch, group), signal)
+                if (signal.aborted) return
+                how.apply(batch, group, answer)
+                // On a draft, why some answers on what it changed are Published's.
+                if (answer.notes?.length) how.setNote(answer.notes[0])
+            } catch (err) {
+                if (signal.aborted) return
+                how.setError(readable(err))
+                return
+            }
+        }
+        how.done(batch)
+    }
+    how.setError(null)
+}
+
+
+/** A rule that styles relationships' lines: its predicate a Connections search. */
+function stylesLines(rule: DisplayRuleConfig): boolean {
+    return rule.target === 'relationships'
 }
 
 

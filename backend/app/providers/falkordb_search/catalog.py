@@ -43,6 +43,7 @@ from backend.app.providers.falkordb_deep_search import (
 )
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
 from backend.app.providers.falkordb_search.plan import (
+    REPLY_ROWS_MAX,
     Context,
     Unit,
     expand_unit,
@@ -72,8 +73,16 @@ VALUES_MAX = 1000
 #: reads every value).
 VALUES_SHOWN = 20
 
-#: Distinct tag sets read per unit; past it the tags are not counted.
-TAG_SETS_MAX = 10000
+#: Distinct tag sets read per unit; past it the tags are not counted. One
+#: fewer than a reply holds (FalkorDB cuts a reply at ``REPLY_ROWS_MAX`` rows
+#: without saying so): the row past it is how a unit shows it has more.
+TAG_SETS_MAX = REPLY_ROWS_MAX - 1
+
+#: Keys one statement asks about: a row each, well inside a reply.
+KEYS_PER_STATEMENT = 500
+
+#: Rows a paged read takes per statement: never more than a reply holds.
+PAGE = REPLY_ROWS_MAX
 
 #: Entities a key never seen before is first sampled on: one holding more
 #: than ``VALUES_MAX`` distinct values among them is high-cardinality at
@@ -130,32 +139,7 @@ class CatalogStats:
         fold into a catalog (``folded``). (Which keys an entity keeps raw is not known here, so
         a change leaves ``residual`` as it is.)"""
         self.add_entities(label, sign)
-        for key, value in (properties or {}).items():
-            kind = _kind_of(value)
-            if key in skip or kind is None:
-                continue
-            self.add_kind(label, key, kind, sign)
-            if kind in ("Integer", "Float"):
-                if sign > 0:
-                    self.add_bounds(key, [value, value, None, None] if value >= 0
-                                    else [None, None, value, value])
-                else:
-                    lo, hi = self.gone.get(key, (value, value))
-                    self.gone[key] = [min(lo, value), max(hi, value)]
-            k = self.keys[key]
-            if k["values"] is None:
-                continue
-            elements = value if kind == "List" else [value]
-            for slot in {_slot(_kind_of(e) or "Null", e) for e in elements}:
-                n = k["values"].get(slot, 0) + sign
-                if n:
-                    k["values"][slot] = n
-                else:
-                    k["values"].pop(slot, None)
-            # A change to more distinct values than a catalog lists makes the key one whose
-            # values are not listed.
-            if len(k["values"]) > 2 * VALUES_MAX:
-                self._too_many(k, 0)
+        self.add_properties(label, properties, skip, sign)
         held = _tags_of(tags)
         if held and self.tags_counted:
             self.tagged += sign
@@ -169,6 +153,42 @@ class CatalogStats:
             if len(self.tags) > 2 * TAG_SETS_MAX:
                 self.tags_counted = False
                 self.tags.clear()
+
+    def add_properties(self, label: str, properties: Dict[str, Any], skip: FrozenSet[str],
+                       sign: int = 1, bagged: FrozenSet[str] = frozenset(),
+                       cap: Optional[int] = None) -> None:
+        """One item's properties, counted under ``label`` as the scan counts them — the item
+        itself is counted apart (``add_entities``). ``bagged``: the keys it holds in its JSON
+        rather than natively, counted ``residual`` too. ``cap``: the distinct values a key is
+        listed for (a change's: twice ``VALUES_MAX``, since a change takes values out too)."""
+        cap = 2 * VALUES_MAX if cap is None else cap
+        for key, value in (properties or {}).items():
+            kind = _kind_of(value)
+            if key in skip or kind is None:
+                continue
+            self.add_kind(label, key, kind, sign)
+            if kind in ("Integer", "Float"):
+                if sign > 0:
+                    self.add_bounds(key, [value, value, None, None] if value >= 0
+                                    else [None, None, value, value])
+                else:
+                    lo, hi = self.gone.get(key, (value, value))
+                    self.gone[key] = [min(lo, value), max(hi, value)]
+            k = self.keys[key]
+            if key in bagged:
+                k["residual"] += sign
+            if k["values"] is None:
+                continue
+            elements = value if kind == "List" else [value]
+            for slot in {_slot(_kind_of(e) or "Null", e) for e in elements}:
+                n = k["values"].get(slot, 0) + sign
+                if n:
+                    k["values"][slot] = n
+                else:
+                    k["values"].pop(slot, None)
+            # More distinct values than a catalog lists: the key's values are not listed.
+            if len(k["values"]) > cap:
+                self._too_many(k, 0)
 
     def folded(self, change: "CatalogStats") -> Tuple["CatalogStats", FrozenSet[str]]:
         """This catalog with ``change`` (signed, ``add_entity``) folded in — and the keys whose
@@ -393,11 +413,13 @@ def entities_statement(unit: Unit, ctx: Context, clamps) -> Tuple[str, Dict[str,
 
 
 def keys_statement(unit: Unit, ctx: Context, clamps) -> Tuple[str, Dict[str, Any]]:
-    """Every key's entities per label and per kind. (The platform's keys
-    are dropped in Python: an ``IN`` list test on every row costs more.)"""
+    """Every key's entities per label and per kind, as ONE row: a wide graph's
+    labels × keys × kinds can be more rows than a reply holds. (The platform's
+    keys are dropped in Python: an ``IN`` list test on every row costs more.)"""
     head, params = match_statement(unit, ctx, clamps)
     return (f"{head} UNWIND keys(n) AS _k "
-            "RETURN labels(n)[0], _k, typeOf(n[_k]), count(*)", params)
+            "WITH labels(n)[0] AS _l, _k, typeOf(n[_k]) AS _t, count(*) AS _c "
+            "RETURN collect([_l, _k, _t, _c])", params)
 
 
 def probe_statement(unit: Unit, ctx: Context, clamps, keys: List[str]
@@ -450,10 +472,46 @@ def tags_statement(unit: Unit, ctx: Context, clamps) -> Tuple[str, Dict[str, Any
             "RETURN _t, count(*) LIMIT $_tagcap", params)
 
 
-def residual_statement(unit: Unit, ctx: Context, clamps) -> Tuple[str, Dict[str, Any]]:
+def residual_statement(unit: Unit, ctx: Context, clamps, after: int = -1
+                       ) -> Tuple[str, Dict[str, Any]]:
+    """A page of the unit's entities holding keys in ``propertiesRaw``, in ID
+    order after ``after``: there can be more of them than a reply holds."""
     head, params = match_statement(unit, ctx, clamps)
+    params["_after"], params["_page"] = int(after), PAGE
     return (f"{head} WITH n WHERE n.propertiesRaw IS NOT NULL AND n.propertiesRaw <> '{{}}' "
-            "RETURN labels(n)[0], n.propertiesRaw", params)
+            "AND ID(n) > $_after WITH n ORDER BY ID(n) LIMIT $_page "
+            "RETURN ID(n), labels(n)[0], n.propertiesRaw", params)
+
+
+async def paged(run, statement, timeout_s: float) -> List[List[Any]]:
+    """Every row of a paged read (``statement(after)`` → cypher, params; each row's ID first),
+    a page at a time, without the IDs."""
+    rows: List[List[Any]] = []
+    after = -1
+    while True:
+        cypher, params = statement(after)
+        page = (await run(cypher, params, timeout_s)).result_set or []
+        rows += [list(r[1:]) for r in page]
+        if len(page) < PAGE:
+            return rows
+        after = page[-1][0]
+
+
+def collected(res) -> List[List[Any]]:
+    """The rows a ``RETURN collect(...)`` answered, as one row holds them."""
+    rows = res.result_set or []
+    return [list(r) for r in ((rows[0][0] if rows and rows[0] else None) or [])]
+
+
+def chunks(keys: List[str]) -> List[List[str]]:
+    """``keys`` in statements of at most ``KEYS_PER_STATEMENT``."""
+    return [keys[i:i + KEYS_PER_STATEMENT] for i in range(0, len(keys), KEYS_PER_STATEMENT)]
+
+
+async def per_keys(run, statement, keys: List[str], timeout_s: float) -> List[List[Any]]:
+    """The rows of ``statement(keys)`` — one per key — over ``keys`` in chunks, run together."""
+    answers = await asyncio.gather(*(run(*statement(part), timeout_s) for part in chunks(keys)))
+    return [row for res in answers for row in res.result_set or []]
 
 
 class _CatalogWork:
@@ -473,36 +531,29 @@ class _CatalogWork:
 
     async def unit(self, unit: Unit, timeout_s: float):
         clamps = self.session.clamps
-        statements = [entities_statement(unit, self.ctx, clamps),
-                      keys_statement(unit, self.ctx, clamps),
-                      residual_statement(unit, self.ctx, clamps),
-                      tags_statement(unit, self.ctx, clamps)]
-        entities, keyed, residual, tag_sets = await asyncio.gather(
-            *(self.run(c, p, timeout_s) for c, p in statements))
-        keyed_rows = [row for row in keyed.result_set or [] if row[1] not in self.skip]
+        ctx, run = self.ctx, self.run
+        statements = [entities_statement(unit, ctx, clamps), keys_statement(unit, ctx, clamps),
+                      tags_statement(unit, ctx, clamps)]
+        (entities, keyed, tag_sets), residual = await asyncio.gather(
+            asyncio.gather(*(run(c, p, timeout_s) for c, p in statements)),
+            paged(run, lambda after: residual_statement(unit, ctx, clamps, after), timeout_s))
+        keyed_rows = [row for row in collected(keyed) if row[1] not in self.skip]
         keys = {row[1] for row in keyed_rows}
         # A key never seen before is sampled first: one plainly unique per
         # entity (an identifier, a hash, a timestamp) is not worth counting
         # value by value across the whole unit.
-        probed: List[List[Any]] = []
         new = sorted(k for k in keys if k not in self.stats.keys)
-        if new:
-            cypher, params = probe_statement(unit, self.ctx, clamps, new)
-            probed = [r for r in (await self.run(cypher, params, timeout_s)).result_set or []
-                      if r[1] > VALUES_MAX]
+        probed = [r for r in await per_keys(
+            run, lambda part: probe_statement(unit, ctx, clamps, part), new, timeout_s)
+            if r[1] > VALUES_MAX]
         unique = {r[0] for r in probed}
         tracked = sorted(k for k in keys - unique if not self.stats.high_cardinality(k))
         numeric = sorted({row[1] for row in keyed_rows if row[2] in ("Integer", "Float")})
-        second = []
-        if tracked:
-            second.append(values_statement(unit, self.ctx, clamps, tracked))
-        if numeric:
-            second.append(bounds_statement(unit, self.ctx, clamps, numeric))
-        answers = await asyncio.gather(*(self.run(c, p, timeout_s) for c, p in second))
-        values = answers.pop(0).result_set or [] if tracked else []
-        bounds = answers.pop(0).result_set or [] if numeric else []
+        values, bounds = await asyncio.gather(
+            per_keys(run, lambda part: values_statement(unit, ctx, clamps, part), tracked, timeout_s),
+            per_keys(run, lambda part: bounds_statement(unit, ctx, clamps, part), numeric, timeout_s))
         return (entities.result_set or [], keyed_rows, probed, values, bounds,
-                residual.result_set or [], tag_sets.result_set or [])
+                residual, tag_sets.result_set or [])
 
     def fold(self, unit: Unit, result) -> None:
         entities, keyed, probed, values, bounds, residual, tag_sets = result
@@ -532,12 +583,15 @@ class _CatalogWork:
 async def execute_catalog_session(provider, scope: SearchScope, *, context: SearchRunContext,
                                   wait_ms: int, session_id: Optional[str] = None,
                                   refresh: bool = False,
-                                  values_for: Optional[str] = None) -> Dict[str, Any]:
+                                  values_for: Optional[str] = None,
+                                  subject: str = "entities") -> Dict[str, Any]:
     """The catalog of ``scope`` (resolved by the caller): this request's
     share of the scan, answered with everything read so far. A client
     follows it with the returned ``sessionId`` until it is complete.
     ``values_for``: a key whose every kept value is listed, not only the
-    ``VALUES_SHOWN`` most held."""
+    ``VALUES_SHOWN`` most held. ``subject``: the properties of the scope's
+    ``entities``, or of its ``relationships`` (``relationship_catalog``)."""
+    from backend.app.providers.falkordb_search import relationship_catalog as rc
     from backend.app.providers.falkordb_search.engine import (
         _GRACE_S,
         _advance,
@@ -554,7 +608,10 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
     unit_s = unit_budget(settings, passes=2)
     deadline = request_deadline(time.monotonic(), wait_ms / 1000.0, unit_s)
     store = store_for(provider)
-    name = f"catalog:{context.scope_hash}"
+    relationships = subject == "relationships"
+    # Each subject its own sessions: an entity catalog's are named as they always were.
+    name = (f"catalog:relationships:{context.scope_hash}" if relationships
+            else f"catalog:{context.scope_hash}")
 
     # The latest complete catalog of this scope: this data's, or — within
     # the reuse window — a recent one, marked as of when it was read.
@@ -565,7 +622,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
                 and latest.scope_hash == context.scope_hash
                 and (latest.data_version == context.data_version
                      or time.time() - latest.created < settings.catalog_reuse_seconds)):
-            return await _answer(store, latest, context, values_for)
+            return await _answer(store, latest, context, values_for, subject)
 
     admit = context.admit
 
@@ -573,40 +630,50 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
         async with (admit() if admit else contextlib.nullcontext()):
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
-    query_id = f"catalog:{context.scope_hash}"
+    query_id = name
     sid = session_id_of(query_id, context.data_version, None)
     session = await _find(store, session_id, query_id, None)
     if session is not None and session.status == FAILED:
         raise SearchFailed(f"catalog failed: {session.error}")
     session = session or await store.load(sid)
     created = False
+    state: Dict[str, Any] = {}
+    plan_run = lambda c, p: run(c, p, max(1.0, statement_s(settings)))  # noqa: E731
+    plan_s = max(0.5, deadline + _GRACE_S - time.monotonic())
     if session is None or session.status == FAILED:
-        query = SearchQuery(predicate=MatchAllPredicate(), scope=scope)
-        compiler = _build_compiler_for_provider(provider)
-        compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
-        plan = await make_plan(
-            provider, query, compiler,
-            run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
-            width=settings.chunk_width, walk_max=settings.walk_max,
-            timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()),
-        )
+        if relationships:
+            plan, state = await rc.relationship_plan(provider, scope, run, settings,
+                                                     time.monotonic() + plan_s)
+        else:
+            query = SearchQuery(predicate=MatchAllPredicate(), scope=scope)
+            compiler = _build_compiler_for_provider(provider)
+            compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
+            plan = await make_plan(
+                provider, query, compiler, run=plan_run,
+                width=settings.chunk_width, walk_max=settings.walk_max, timeout_s=plan_s,
+            )
         session = Session.start(sid, query_id, context.data_version, None, 0, plan,
                                 scope_hash=context.scope_hash)
         created = True
+    elif relationships:
+        state = rc.state_of(await store.load_accumulator(session.sid))
 
-    ctx = Context(
-        where="true", params={}, sort=SortSpec((SortKey("n.urn"),)),
-        containment=_containment(provider), max_depth=int(scope.max_depth or 12),
-        visible=(list(scope.visible_urns or []) if scope.scope_mode == "visible" else None),
-    )
-    work = _CatalogWork(session, ctx, run, _skipped_keys())
+    if relationships:
+        work = rc.RelationshipCatalogWork(session, provider, scope, run, state)
+    else:
+        ctx = Context(
+            where="true", params={}, sort=SortSpec((SortKey("n.urn"),)),
+            containment=_containment(provider), max_depth=int(scope.max_depth or 12),
+            visible=(list(scope.visible_urns or []) if scope.scope_mode == "visible" else None),
+        )
+        work = _CatalogWork(session, ctx, run, _skipped_keys())
     session = await _advance(session, created, store, work, deadline, settings,
                              ttl_s=settings.catalog_ttl_seconds, unit_s=unit_s)
     if session.status == FAILED:
         raise SearchFailed(f"catalog failed: {session.error}")
     if session.status == COMPLETE:
         await store.point(name, session.sid, settings.catalog_ttl_seconds)
-    return await _answer(store, session, context, values_for)
+    return await _answer(store, session, context, values_for, subject)
 
 
 def _skipped_keys() -> FrozenSet[str]:
@@ -616,23 +683,26 @@ def _skipped_keys() -> FrozenSet[str]:
 
 
 async def _answer(store: SessionStore, session: Session, context: SearchRunContext,
-                  values_for: Optional[str] = None) -> Dict[str, Any]:
+                  values_for: Optional[str] = None, subject: str = "entities") -> Dict[str, Any]:
     return answer_of(CatalogStats.from_json(await store.load_accumulator(session.sid)),
-                     session, context, values_for=values_for)
+                     session, context, values_for=values_for, subject=subject)
 
 
 def answer_of(stats: CatalogStats, session: Session, context: SearchRunContext,
-              wide: FrozenSet[str] = frozenset(), values_for: Optional[str] = None) -> Dict[str, Any]:
+              wide: FrozenSet[str] = frozenset(), values_for: Optional[str] = None,
+              subject: str = "entities") -> Dict[str, Any]:
     """The catalog answer of ``stats`` as read by ``session`` — ``wide``: the keys whose range
     may be wider than it is (``CatalogStats.folded``); ``values_for``: a key whose every kept
-    value is listed, not only the most held."""
+    value is listed, not only the most held. Relationships carry no tags."""
     complete = session.status == COMPLETE
+    tagged = subject == "entities" and stats.tags_counted
     properties = sorted((stats.describe(key, complete, key not in wide,
                                         VALUES_MAX if key == values_for else VALUES_SHOWN)
                          for key in stats.keys),
                         key=lambda p: (-p["count"], p["key"]))
     return {
         "sessionId": session.sid,
+        "subject": subject,
         "status": "complete" if complete else "running",
         "progress": {"scanned": session.scanned, "total": max(session.total, session.scanned),
                      "matched": session.count},
@@ -645,7 +715,7 @@ def answer_of(stats: CatalogStats, session: Session, context: SearchRunContext,
         "properties": properties,
         "tags": [{"tag": tag, "count": n} for tag, n in
                  sorted(stats.tags.items(), key=lambda kv: (-kv[1], kv[0]))]
-        if stats.tags_counted else [],
-        "tagged": stats.tagged if stats.tags_counted else None,
+        if tagged else [],
+        "tagged": stats.tagged if tagged else None,
         "notes": list(session.notes),
     }

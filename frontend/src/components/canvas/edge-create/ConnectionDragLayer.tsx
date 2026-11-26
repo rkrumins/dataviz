@@ -145,7 +145,9 @@ export function ConnectionDragLayer({ sourceIds, pointer, hint = null, live = nu
   const hoverTone = live === 'tool' ? toneOf(null) : toneOf(liveHint?.level ?? null)
 
   return (
-    <div ref={containerRef} className="absolute inset-0 pointer-events-none z-[6]">
+    // Over the columns (z-canvas), as floating chrome is: the band, the rings and the hint are what
+    // the reader is doing right now, and a card must not paint over them.
+    <div ref={containerRef} className="absolute inset-0 pointer-events-none z-chrome">
       {/* Where the line starts: the source glows, so the reader never loses it. */}
       {sourceRings.map(({ id, box }) => box && (
         <span

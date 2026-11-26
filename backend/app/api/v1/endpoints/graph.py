@@ -26,7 +26,7 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
-    ChildrenBatchParent, ChildrenBatchResult,
+    ChildrenBatchParent, ChildrenBatchResult, UnplacedTopLevelResult,
     EdgesBeneathRequest, EdgesBeneathResult, TraceClosureRequest, TraceClosureResult,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
@@ -57,6 +57,7 @@ from backend.app.services.advanced_search_service import (
     follows_relationships,
 )
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.unplaced_top_level import unplaced_top_level
 from backend.app.services.versioning.ids import derived_entity_id, new_entity_id
 from backend.app.services.deep_search import (
     CompileError,
@@ -465,6 +466,128 @@ async def bootstrap_decision_endpoint(
     return status
 
 
+@router.get("/bootstrap/review")
+async def bootstrap_review_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose enablement job to read."),
+    kind: str = Query("copies", description="copies (connections held more than once) or values"),
+    after: Optional[str] = Query(None, description="The previous page's `next`."),
+    limit: int = Query(50, ge=1, le=500),
+    q: Optional[str] = Query(None, description="Only what holds this text (any case)."),
+    fmt: Optional[str] = Query(None, alias="format",
+                               description="csv: the whole list, as a download"),
+    _user=Depends(requires("workspace:datasource:read", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What an enablement held for review, a page at a time: connections the source holds more
+    than once with different properties (``kind=copies`` — each version side by side, the
+    properties they disagree on, a person's choice) or values history can't store as they are
+    (``kind=values``), or with ``format=csv`` the whole list as a download. Kept after the job
+    ends, as the record of what was decided. 404 when nothing was held. Workspace read permission,
+    as the duplicate list takes."""
+    from backend.app.services.versioning.bootstrap_worker import review_csv, review_page
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        if fmt == "csv":
+            stream = await review_csv(data_source_id=dataSourceId, kind=kind, workspace_id=ws_id)
+            name = "connections-held-more-than-once" if kind == "copies" else "values-stored-as-text"
+            return StreamingResponse(stream, media_type="text/csv", headers={
+                "Content-Disposition": f'attachment; filename="{name}-{dataSourceId}.csv"'})
+        return await review_page(data_source_id=dataSourceId, kind=kind, after=after,
+                                 limit=limit, q=q, workspace_id=ws_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+class BootstrapReviewChoice(BaseModel):
+    entityId: str = Field(..., description="The connection held for review.")
+    choice: Optional[Dict[str, Any]] = Field(
+        None, description="{rule: keep_first|keep|merge, keep?, excludeCopies?, values?, "
+                          "excludeProperties?}; null clears it.")
+
+
+@router.put("/bootstrap/review/choice")
+async def bootstrap_review_choice_endpoint(
+    ws_id: str,
+    body: BootstrapReviewChoice,
+    dataSourceId: str = Query(...),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Save how one connection held for review is to be copied — a version kept, or its versions
+    merged with some versions or properties left out and a value picked where they disagree —
+    while the job waits on the review. 409 ``not_awaiting_decision`` once it doesn't; 404 for a
+    connection that wasn't held; 422 for a choice naming what it doesn't hold."""
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, save_review_choice)
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        return await save_review_choice(data_source_id=dataSourceId, entity_id=body.entityId,
+                                        choice=body.choice, workspace_id=ws_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+class BootstrapReviewDecision(BaseModel):
+    fingerprint: str = Field(..., description="The `review.fingerprint` that was shown.")
+    copies: Optional[Dict[str, Any]] = Field(
+        None, description="{rule: keep_first|merge, excludeProperties}: how to copy every "
+                          "connection held more than once that has no choice of its own.")
+    values: Optional[str] = Field(None, description="as_text: store the values as text.")
+
+
+@router.post("/bootstrap/review/decision", status_code=202)
+async def bootstrap_review_decision_endpoint(
+    ws_id: str,
+    response: Response,
+    body: BootstrapReviewDecision,
+    dataSourceId: str = Query(...),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Decide what a paused enablement held for review, and let the copy carry on: each
+    connection held more than once is copied as its own choice says, else as ``body.copies``
+    does; values history can't store are kept as text. ``body.fingerprint`` must be the list as
+    it was shown: 409 ``stale_decision`` if it has changed, 409 ``not_awaiting_decision`` if the
+    job is not waiting on a review; 422 when a kind held is left undecided. 202 with the job; 200
+    when this same decision was already recorded."""
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, bootstrap_status, decide_review)
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        res = await decide_review(data_source_id=dataSourceId, fingerprint=body.fingerprint,
+                                  actor=user.id if user else "system", copies=body.copies,
+                                  values=body.values, workspace_id=ws_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if res["already"]:
+        response.status_code = 200
+    status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
+    if not res["already"]:
+        # What a person decided about their data — kept, merged, stored as text: recorded once.
+        review = (status or {}).get("review") or {}
+        await _record_versioning(
+            session, "workspace.versioning.review_decided", dataSourceId,
+            {"jobId": res["jobId"], "connections": (review.get("copies") or {}).get("connections"),
+             "valuesAsText": (review.get("values") or {}).get("count"),
+             "copies": body.copies, "values": body.values},
+        )
+    return status
+
+
 @router.post("/bootstrap/retry", status_code=202)
 async def bootstrap_retry_endpoint(
     ws_id: str,
@@ -696,8 +819,11 @@ async def resync_versioned_graph_endpoint(
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
-    except BootstrapFailure as exc:                 # a server that cuts replies short
-        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",
+    except BootstrapFailure as exc:
+        if exc.code != "infrastructure":            # what the graph holds, said as such
+            raise HTTPException(status_code=422, detail={"type": "integrity",
+                                                         "message": exc.reason})
+        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",  # replies cut short
                                                      "message": str(exc)})
     except AmbiguousSpelling as exc:                # a type the graph spells two ways
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
@@ -1880,6 +2006,58 @@ async def get_top_level_nodes(
         )
 
 
+class _UnplacedTopLevelRequest(BaseModel):
+    """Body for /nodes/top-level/unplaced: the types a view is about, and the urns it places."""
+    entity_types: List[str] = Field(..., alias="entityTypes", min_length=1, max_length=50)
+    placed_urns: List[str] = Field(default_factory=list, alias="placedUrns", max_length=10_000)
+    limit: int = Field(50, ge=1, le=200)
+
+    class Config:
+        populate_by_name = True
+
+
+@router.post(
+    "/nodes/top-level/unplaced",
+    response_model=UnplacedTopLevelResult,
+    response_model_by_alias=True,
+)
+async def get_unplaced_top_level(
+    response: Response,
+    body: _UnplacedTopLevelRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> UnplacedTopLevelResult:
+    """The top-level entities of ``entityTypes`` that a view does not place: how many, by type,
+    and the first ``limit`` of them by name (``complete`` False: the counts are a lower bound).
+
+    A view's health check asks this once per load, sending the urns it places of those types.
+    Read through ``/nodes/top-level``'s own provider read — label-indexed, keyset-paged, and the
+    draft's on a branch (``?branchId=``) — to the end of the set, under a ceiling
+    (``services/unplaced_top_level``). A POST: the placed urns are the request."""
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def read_page(cursor: Optional[str], size: int) -> TopLevelNodesResult:
+        return await engine.get_top_level_or_orphan_nodes(
+            entity_types=body.entity_types, limit=size, cursor=cursor, include_child_count=True,
+        )
+
+    async def compute() -> UnplacedTopLevelResult:
+        return await unplaced_top_level(read_page, placed=body.placed_urns, limit=body.limit)
+
+    try:
+        return await _bounded_compute(engine, compute)()
+    except CursorMismatchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ProviderConfigurationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Ontology configuration error: {exc}. Configure containment "
+                "edge types on the active ontology (or set CONTAINMENT_EDGE_TYPES "
+                "as a deployment-level override)."
+            ),
+        )
+
+
 @router.get("/nodes/{urn}", response_model=GraphNode, response_model_by_alias=True)
 async def get_node(
     urn: str,
@@ -2770,7 +2948,10 @@ async def search_membership(
     """Which of the entities on screen (at most 1,000 urns) match which
     rules (at most 32) — what display rules paint, without downloading every
     entity a rule matches. Only entities inside the view's scope ever match;
-    the scope is resolved here from ``scope.viewId``, like a search's.
+    the scope is resolved here from ``scope.viewId``, like a search's. A rule
+    that styles relationships (a Connections search) is asked about the
+    relationships on screen instead (at most 1,000 ``edges``, each its id and
+    its ends) and answers in ``edgeMatches``.
 
     A rule using ``withinHops`` or a path is refused in ``errors``: those
     describe a route, not an entity.

@@ -24,7 +24,7 @@ import logging
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from typing import Any, Awaitable, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,7 +47,6 @@ from backend.app.services.view_scope import (
     ViewScopeResolver,
 )
 from backend.common.derived_artifacts import is_derived_edge_type
-from backend.common.edge_properties import EDGE_NATIVE_KEYS, JSON_OPS
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
     LINEAGE_AXES,
@@ -199,16 +198,12 @@ def _path_ends(predicate):
 
 
 def _validate_edges(p: EdgesPredicate, *, depth: int, path: str, rule: bool) -> int:
-    """A Connections search is the whole query, and never a display rule's
-    (a rule tags entities; this returns edges). Its From and To are each
+    """A Connections search is the whole query. Its From and To are each
     held to a top-level condition's caps — inside a container included —
     but follow no route (``withinHops``, a path) and trace nothing: the
-    engine tests one end per entity and the other per edge."""
-    if rule:
-        raise ValidationError(
-            f"A display rule tags entities, and the Connections search at {path} returns "
-            "edges — make the rule from its From or To condition instead"
-        )
+    engine tests one end per entity and the other per edge. ``rule``: a
+    display rule that styles relationships — asked of every relationship on
+    the canvas, so its ends follow lineage one hop, as an entity rule does."""
     if depth > 1:
         raise ValidationError(
             f"The Connections search at {path} must be the whole query — not beside other "
@@ -217,7 +212,8 @@ def _validate_edges(p: EdgesPredicate, *, depth: int, path: str, rule: bool) -> 
     if p.edge_predicate is not None:
         _validate_edge_filter(p.edge_predicate, f"{path}.edgePredicate")
     return 1 + sum(
-        _validate_predicate(where, depth=depth + 1, path=f"{path}.{alias}", top=False, end=True)
+        _validate_predicate(where, depth=depth + 1, path=f"{path}.{alias}", rule=rule,
+                            top=False, end=True)
         for where, alias in _path_ends(p) if where is not None)
 
 
@@ -318,13 +314,10 @@ def _validate_edge_comparisons(predicate, path: str, *, groups: int) -> int:
             for i, child in enumerate(predicate.children)
         )
     if isinstance(predicate, EdgePropertyPredicate):
+        # Every operator: an edge's properties are native within the name budget. A value an
+        # edge still keeps in its JSON is reached by presence and equality alone
+        # (``falkordb_deep_search._visit_edge_property``; discovery's ``storedAs`` says which).
         _resolve_or_raise(predicate, path)
-        if predicate.key not in EDGE_NATIVE_KEYS and predicate.op not in JSON_OPS:
-            raise ValidationError(
-                f"{path} ({predicate.key}): an edge keeps its own properties as JSON "
-                "text, which a condition can test with is set, is, is not or is one "
-                f"of — not {predicate.op!r}"
-            )
     return 1
 
 
@@ -1060,31 +1053,52 @@ class AdvancedSearchService:
         *,
         run_context: Optional[SearchRunContext] = None,
     ) -> SearchMembershipResult:
-        """Which of the requested (on-screen) entities match which rules,
-        inside the view's scope — resolved here, never taken from the
-        client."""
+        """Which of the requested (on-screen) entities match which rules, and
+        which of the requested relationships match which rules that style
+        relationships (a Connections search, ``edgeMatches``) — inside the
+        view's scope, resolved here, never taken from the client."""
+        # A Connections search sent in an AND group of its own is the search itself.
+        request = request.model_copy(update={"items": [
+            item.model_copy(update={"predicate": unwrap_edges(item.predicate)})
+            for item in request.items]})
         _validate_items(request.items)
+        connections = {item.id for item in request.items
+                       if isinstance(item.predicate, EdgesPredicate)}
         refused = self._refused_on_a_shared_link(request.items)
         scope, _eff = await self._rule_scope(request.scope, members=True)
         if scope is None:
-            return SearchMembershipResult(matches={item.id: [] for item in request.items},
-                                          errors=refused)
-        op = self._provider_op("deep_search_membership")
+            return SearchMembershipResult(
+                matches={item.id: [] for item in request.items if item.id not in connections},
+                edge_matches={item_id: [] for item_id in connections}, errors=refused)
+        entity_op = (self._provider_op("deep_search_membership")
+                     if len(connections) < len(request.items) else None)
+        edge_op = (self._provider_op("deep_search_edge_membership")
+                   if connections and request.edges else None)
         context = replace(run_context or SearchRunContext(),
                           members=self._members(request.scope, _eff))
+        if context.members is not None:
+            refused.update({item_id: CONNECTIONS_PAST_THE_CAP for item_id in connections
+                            if item_id not in refused})
         items, unusable, context = await self._resolve_item_refs(
             [item for item in request.items if item.id not in refused], scope, context)
         items, unplaced = _resolve_item_layers(items, _eff)
         refused = {**refused, **unusable, **unplaced}
         boundary = await self._scope_boundary(scope, _eff, context)
-        out = await op(scope, [(item.id, self._in_subset(item.predicate, _eff, boundary))
-                               for item in items],
-                       request.urns, context=context)
+        judged = [(item.id, self._in_subset(item.predicate, _eff, boundary)) for item in items]
+        none: Dict[str, Any] = {"matches": {}, "errors": {}, "elapsedMs": 0}
+        entities = [(i, p) for i, p in judged if i not in connections]
+        out = (await entity_op(scope, entities, request.urns, context=context)
+               if entity_op is not None and entities else none)
+        lines = [(i, p) for i, p in judged if i in connections]
+        edge_out = (await edge_op(scope, lines, request.edges, context=context)
+                    if edge_op is not None and lines else {**none, "matches": {i: [] for i, _ in lines}})
         return SearchMembershipResult(
-            matches={**{item_id: [] for item_id in refused}, **out["matches"]},
-            errors={**out["errors"], **refused},
-            data_version=context.data_version or None, elapsed_ms=out["elapsedMs"],
-            notes=out.get("notes") or [],
+            matches={**{i: [] for i in refused if i not in connections}, **out["matches"]},
+            edge_matches={**{i: [] for i in refused if i in connections}, **edge_out["matches"]},
+            errors={**out["errors"], **edge_out["errors"], **refused},
+            data_version=context.data_version or None,
+            elapsed_ms=out["elapsedMs"] + edge_out["elapsedMs"],
+            notes=[*(out.get("notes") or []), *(edge_out.get("notes") or [])],
         )
 
     def _refused_on_a_shared_link(self, items) -> dict:
@@ -1218,17 +1232,20 @@ class AdvancedSearchService:
         *,
         run_context: Optional[SearchRunContext] = None,
     ) -> SearchCatalogResult:
-        """Every property the view's entities carry, exactly — in the view's
-        scope, resolved here as a search's is."""
+        """Every property the view's entities carry, exactly — or, ``subject``
+        ``relationships``, the relationships between them — in the view's
+        scope, resolved here as a search's (or a Connections search's) is."""
+        relationships = request.subject == "relationships"
         scope, eff = await self._rule_scope(request.scope)
         self._refuse_outside_subset(eff, "list the properties of what this view searches in")
         if scope is None:
-            return SearchCatalogResult(session_id="", status="complete")
+            return SearchCatalogResult(session_id="", subject=request.subject, status="complete")
         op = self._provider_op("deep_search_catalog")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
         out = await op(scope, context=context, wait_ms=request.wait_ms,
                        session_id=request.session_id, refresh=request.refresh,
-                       **({"values_for": request.values_for} if request.values_for else {}))
+                       **({"values_for": request.values_for} if request.values_for else {}),
+                       **({"subject": request.subject} if relationships else {}))
         return SearchCatalogResult.model_validate(out)
 
     async def export(

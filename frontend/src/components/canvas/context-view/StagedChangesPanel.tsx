@@ -55,6 +55,7 @@ import { canvasLookup } from './review/canvasLookup'
 import { stagedCsvLines } from '@/features/versioning/model/reviewCsv'
 import { downloadCsv } from '@/lib/csv'
 import { stopsFromGroups, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
+import { NO_REACH, dataReachDetail, type DataReach } from './changeKind'
 
 // Drawn only when the Map is opened: React Flow and the layout engine stay out of the first paint.
 const ChangeMap = lazy(() => import('@/features/versioning/components/ChangeMap'))
@@ -85,9 +86,11 @@ export interface SaveConfirmationModalProps {
   viewId?: string | null
   /** Show an entity on the canvas (the dialog closes first). */
   onReveal?: (nodeId: string) => void
+  /** Who a data change reaches beyond this view (the other views on its data source). */
+  reach?: DataReach
 }
 
-export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSourceId, viewId, onReveal }: SaveConfirmationModalProps) {
+export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSourceId, viewId, onReveal, reach = NO_REACH }: SaveConfirmationModalProps) {
   const isOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const close = useStagedChangesStore(s => s.closeReviewPanel)
   const intent = useStagedChangesStore(s => s.reviewIntent)
@@ -306,7 +309,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                         ? (draftCount > 0
                           ? 'Nothing new to save — here’s what this draft already holds.'
                           : 'Nothing pending. Make some edits and they’ll show up here for review.')
-                        : <>You’re changing <span className="font-semibold text-ink">{describeScope(groups)}</span>. Nothing is saved until you choose below.</>}
+                        : <>You’re making <span className="font-semibold text-ink">{describeScope(groups, dataReachDetail(reach))}</span>. Nothing is saved until you choose below.</>}
                     {failedCount > 0 && problems.length === 0 && step === 'review' && (
                       <span className="ml-1.5 inline-flex items-center gap-1 text-rose-600 dark:text-rose-400 font-semibold">
                         <AlertTriangle className="w-3 h-3" />
@@ -410,6 +413,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                   ) : groups.length === 0 && draftCount > 0 ? null : (
                     <ReviewExplorer
                       index={index}
+                      reach={reach}
                       rows={rows}
                       narrowed={isNarrowed(filter)}
                       selected={selectedKey}

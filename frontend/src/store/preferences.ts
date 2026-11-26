@@ -314,6 +314,23 @@ interface PreferencesState {
   setViewSortOverride: (viewId: string, layerId: string, mode: LayerNodeSortAlgo | null) => void
   clearViewSortOverrides: (viewId: string) => void
 
+  /**
+   * Per VIEW, how many top-level entities it didn't place when the reader said
+   * "Not now" to them: the canvas says nothing more until that number changes.
+   * Device-local, and pruned to the most recent ~50 views.
+   */
+  unplacedRootsDismissed: Record<string, number>
+  dismissUnplacedRoots: (viewId: string, count: number) => void
+
+  /**
+   * The VIEWS whose editor this browser has asked whether to keep the view complete (a view
+   * that never said, holding every top-level entity of its types): marked when the question is
+   * shown, so it is asked once — answered or not — and never again here. The answer itself is
+   * the view's (`config.coverage`). Device-local, and pruned to the most recent ~200 views.
+   */
+  viewCoverageAsked: Record<string, true>
+  markViewCoverageAsked: (viewId: string) => void
+
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
@@ -323,10 +340,6 @@ interface PreferencesState {
   changeListLayout: ChangeListLayout | null
   setChangeListLayout: (layout: ChangeListLayout) => void
 
-  /** The Business view's sync card: whether its "Show technical details" (the stores and
-   *  revisions behind the plain lanes) is open. Closed by default; the choice is remembered. */
-  syncTechnicalDetailsOpen: boolean
-  setSyncTechnicalDetailsOpen: (open: boolean) => void
 
   /** Whether a data, search or view export says where each entity sits: its parent and path, the
    *  five informational columns (`lib/ancestryColumns`). Off, so a file reads as it always has to
@@ -352,6 +365,11 @@ interface PreferencesState {
    *  scrolled past its ends, and the lines that lead there. On by default. */
   showOffscreenLineMarkers: boolean
   toggleOffscreenLineMarkers: () => void
+  /** The versioning bar's note of what was published since the reader last looked ("3 new
+   *  versions since your last visit"). On by default; off hides it on every graph. A review
+   *  waiting on the reader still shows. */
+  showGraphDigest: boolean
+  toggleGraphDigest: () => void
   /** When an empty layer says so. Always by default. A column whose anchor
    *  entity is gone, or held by another column, says why whatever this is. */
   emptyLayerMessage: EmptyLayerMessage
@@ -621,6 +639,26 @@ export const usePreferencesStore = create<PreferencesState>()(
         return { viewSortOverrides: rest }
       }),
 
+      unplacedRootsDismissed: {},
+      dismissUnplacedRoots: (viewId, count) => set((state) => {
+        // Re-inserted last, so insertion order is recency; the oldest views beyond 50 go.
+        const others = { ...state.unplacedRootsDismissed }
+        delete others[viewId]
+        const keys = Object.keys(others)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - 49))) delete others[stale]
+        return { unplacedRootsDismissed: { ...others, [viewId]: count } }
+      }),
+
+      viewCoverageAsked: {},
+      markViewCoverageAsked: (viewId) => set((state) => {
+        // As above: insertion order is recency, and the oldest views beyond 200 go.
+        const others = { ...state.viewCoverageAsked }
+        delete others[viewId]
+        const keys = Object.keys(others)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - 199))) delete others[stale]
+        return { viewCoverageAsked: { ...others, [viewId]: true } }
+      }),
+
       // Onboarding
       onboardingCompletedSteps: [],
       onboardingDismissedAt: null,
@@ -642,8 +680,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       changeListLayout: null,
       setChangeListLayout: (changeListLayout) => set({ changeListLayout }),
 
-      syncTechnicalDetailsOpen: false,
-      setSyncTechnicalDetailsOpen: (syncTechnicalDetailsOpen) => set({ syncTechnicalDetailsOpen }),
 
       exportWithPath: false,
       setExportWithPath: (exportWithPath) => set({ exportWithPath }),
@@ -665,6 +701,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       setCanvasHeaderSize: (canvasHeaderSize) => set({ canvasHeaderSize }),
       showOffscreenLineMarkers: true,
       toggleOffscreenLineMarkers: () => set((s) => ({ showOffscreenLineMarkers: !(s.showOffscreenLineMarkers ?? true) })),
+      showGraphDigest: true,
+      toggleGraphDigest: () => set((s) => ({ showGraphDigest: !(s.showGraphDigest ?? true) })),
       emptyLayerMessage: 'always',
       setEmptyLayerMessage: (emptyLayerMessage) => set({ emptyLayerMessage }),
       showCanvasTypeBadge: true,
@@ -682,6 +720,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         canvasDensity: 'spacious',
         canvasHeaderSize: 'comfortable',
         showOffscreenLineMarkers: true,
+        showGraphDigest: true,
         emptyLayerMessage: 'always',
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,

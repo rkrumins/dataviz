@@ -125,7 +125,7 @@ describe('AskComposer', () => {
     })
 
     it('asks with the routes, the people added, who can see it, the node and a key — on ⌘↵', async () => {
-        const { onAsked } = renderAsk({ entity: { id: 'urn:t1', label: 'gl_balances' } })
+        const { onAsked } = renderAsk({ entity: { id: 'urn:t1', label: 'gl_balances', path: ['Finance', 'Ledger'], type: 'table' } })
         await screen.findByRole('switch', { name: /View’s owners/ })
         fireEvent.click(screen.getByRole('switch', { name: /View’s owners/ }))
         fireEvent.click(screen.getByRole('button', { name: 'Add people' }))
@@ -140,7 +140,7 @@ describe('AskComposer', () => {
         expect(api.askQuestion).toHaveBeenCalledWith({ type: 'view', id: 'v1', name: 'Revenue' }, {
             body: 'Why two rows per account?', visibility: 'private', mentions: [], clientKey: expect.any(String),
             route: { viewOwners: false, dataContacts: true }, recipientIds: ['u_fay'],
-            entityId: 'urn:t1', entityLabel: 'gl_balances',
+            entityId: 'urn:t1', entityLabel: 'gl_balances', entityPath: ['Finance', 'Ledger'], entityType: 'table',
         })
         await waitFor(() => expect(onAsked).toHaveBeenCalledWith(expect.objectContaining({ reached: ['u_ana', 'u_bo'] })))
     })

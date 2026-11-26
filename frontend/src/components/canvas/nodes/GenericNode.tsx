@@ -203,7 +203,6 @@ export const GenericNode = memo(function GenericNode({
   // Adding inside stages an entity, so it's offered only where the host lets
   // this person edit.
   const offerAddInside = canAddChild && !!entityData.canAddInside
-  const restoreGhost = useRestoreGhost()
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
   // the canonical identifier; fall back to the React Flow node id
@@ -313,21 +312,14 @@ export const GenericNode = memo(function GenericNode({
       )}
 
       {/* Ghost (committed deletion) toolbar — read-only entity, so the only action is to bring it
-          back. Restore stages a resurrect (create over the tombstone by its original urn). */}
+          back, with what its deletion took with it (`useRestoreGhost`). */}
       {isGhost && !!selected && (
         <NodeToolbar
           isVisible
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
-          <ToolbarButton
-            icon="RotateCcw"
-            label="Restore"
-            onClick={(e) => {
-              e.stopPropagation()
-              restoreGhost(searchUrn)
-            }}
-          />
+          <RestoreGhostButton urn={searchUrn} />
         </NodeToolbar>
       )}
 
@@ -753,6 +745,21 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
         </span>
       )
   }
+}
+
+/** A deletion ghost's Restore — mounted on the selected ghost only, so no other card pays for it. */
+function RestoreGhostButton({ urn }: { urn: string }) {
+  const restoreGhost = useRestoreGhost()
+  return (
+    <ToolbarButton
+      icon="RotateCcw"
+      label="Restore"
+      onClick={(e) => {
+        e.stopPropagation()
+        void restoreGhost(urn)
+      }}
+    />
+  )
 }
 
 // Toolbar Button Component

@@ -17,6 +17,7 @@ import { motion } from 'framer-motion'
 import {
   ChevronDown,
   ChevronsUpDown,
+  BellOff,
   Eye,
   EyeOff,
   FolderOpen,
@@ -106,6 +107,8 @@ export function isDefaultState(props: {
   headerSize?: CanvasHeaderSize
   /** Absent reads as the default (shown). */
   showOffscreenLineMarkers?: boolean
+  /** Absent reads as the default (shown). */
+  showGraphDigest?: boolean
   /** Absent reads as the default (always). */
   emptyLayerMessage?: EmptyLayerMessage
 }): boolean {
@@ -119,6 +122,7 @@ export function isDefaultState(props: {
     props.showMemoryUsage !== true &&
     (props.headerSize ?? 'comfortable') === 'comfortable' &&
     props.showOffscreenLineMarkers !== false &&
+    props.showGraphDigest !== false &&
     (props.emptyLayerMessage ?? 'always') === 'always'
   )
 }
@@ -334,10 +338,12 @@ export function DisplaySettingsSections({
   const setHeaderSize = usePreferencesStore((s) => s.setCanvasHeaderSize)
   const showOffscreenMarkers = usePreferencesStore((s) => s.showOffscreenLineMarkers) ?? true
   const toggleOffscreenMarkers = usePreferencesStore((s) => s.toggleOffscreenLineMarkers)
+  const showGraphDigest = usePreferencesStore((s) => s.showGraphDigest) ?? true
+  const toggleGraphDigest = usePreferencesStore((s) => s.toggleGraphDigest)
   const emptyLayerMessage = usePreferencesStore((s) => s.emptyLayerMessage) ?? 'always'
   const setEmptyLayerMessage = usePreferencesStore((s) => s.setEmptyLayerMessage)
-  const togglesOn = [showEntityIcons, !simple && showEntityIds, showTypeBadge, showOffscreenMarkers, subtleTreeLines,
-    showMemoryUsage, subsetView && showWhereTheySit].filter(Boolean).length
+  const togglesOn = [showEntityIcons, !simple && showEntityIds, showTypeBadge, showOffscreenMarkers, showGraphDigest,
+    subtleTreeLines, showMemoryUsage, subsetView && showWhereTheySit].filter(Boolean).length
 
   return (
     <>
@@ -530,6 +536,16 @@ export function DisplaySettingsSections({
           icon={ChevronsUpDown}
           active={showOffscreenMarkers}
           onClick={toggleOffscreenMarkers}
+          accent="cyan"
+        />
+        <ToggleRow
+          label="Show what’s new on this graph"
+          description={showGraphDigest
+            ? 'A note of what was published since your last visit'
+            : 'No note of new versions on any graph — a review waiting on you still shows'}
+          icon={showGraphDigest ? Sparkles : BellOff}
+          active={showGraphDigest}
+          onClick={toggleGraphDigest}
           accent="cyan"
         />
         {(!simple || showMemoryUsage) && (

@@ -100,6 +100,7 @@ tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_discussion_counts.py
 tests/test_discussion_housekeeping.py
+tests/test_discussion_path_migration.py
 tests/test_discussions.py
 tests/test_discussions_access.py
 tests/test_discussions_scale.py
@@ -126,6 +127,7 @@ tests/test_export_plan_budget.py
 tests/test_export_selection_route.py
 tests/test_export_view_scope.py
 tests/test_falkor_indexes.py
+tests/test_falkordb_edge_attributes.py
 tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
@@ -134,6 +136,7 @@ tests/test_falkordb_native_query.py
 tests/test_falkordb_no_replicas.py
 tests/test_falkordb_ondemand_pairs.py
 tests/test_falkordb_read_router_evidence.py
+tests/test_falkordb_relationships_at.py
 tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
 tests/test_falkordb_run_guarded.py
@@ -156,6 +159,7 @@ tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
+tests/test_graph_watch_edges_migration.py
 tests/test_graph_watch_migration.py
 tests/test_graph_watch_told_migration.py
 tests/test_heal_native_leftovers.py
@@ -283,6 +287,7 @@ tests/test_reconcile_detectors.py
 tests/test_reconcile_edge_check.py
 tests/test_reconcile_sweeper.py
 tests/test_refresh_wait_deadline.py
+tests/test_relationship_catalog.py
 tests/test_reply_capped_parser.py
 tests/test_request_body_limit.py
 tests/test_request_reminders.py

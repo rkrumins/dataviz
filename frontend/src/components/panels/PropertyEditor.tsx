@@ -39,6 +39,7 @@ import {
   Undo2,
   Sparkles,
   SlidersHorizontal,
+  ListChecks,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
@@ -95,6 +96,15 @@ const EditTextModeContext = createContext<EditTextMode>('rich')
 /** Values are edited where they are read (see the header). */
 const InlineModeContext = createContext(false)
 
+/** "Make this a field" on a property's row: the properties it is offered on, and what it does. */
+export interface MakeField {
+  offered: (key: string) => boolean
+  onSelect: (key: string) => void
+  /** Whose field it would be, as the tip names them ("Feeds relationships"). */
+  typeLabel: string
+}
+const MakeFieldContext = createContext<MakeField | null>(null)
+
 export interface PropertyEditorProps {
   value: unknown
   onChange: (next: unknown) => void
@@ -133,6 +143,9 @@ export interface PropertyEditorProps {
   /** The entity type's fields a publish judges: their rows offer the allowed values and, edited,
    *  warn of a value publishing would refuse (a removed required one too). Never a block. */
   governed?: GovernedFields | null
+  /** Make a property a field of the type, in the semantic layer — offered on each top-level row
+   *  `offered` says. Absent, no row offers it. */
+  makeField?: MakeField | null
 }
 
 const MAX_DEPTH = 6
@@ -179,14 +192,17 @@ export function PropertyEditor({
   featuredKeys,
   onToggleFeatured,
   governed = null,
+  makeField = null,
 }: PropertyEditorProps) {
   return (
     <InlineModeContext.Provider value={!!inline && !readOnly}>
       <GovernedFieldsContext.Provider value={governed}>
+      <MakeFieldContext.Provider value={makeField}>
         <PropertyEditorRoot value={value} onChange={onChange} readOnlyKeys={readOnlyKeys} bare={bare} readOnly={readOnly}
           searchable={searchable} groupByPath={groupByPath} original={original} published={published}
           startAdding={startAdding} suggestions={suggestions} sectionsKey={sectionsKey}
           featuredKeys={featuredKeys} onToggleFeatured={onToggleFeatured} />
+      </MakeFieldContext.Provider>
       </GovernedFieldsContext.Provider>
     </InlineModeContext.Provider>
   )
@@ -667,6 +683,9 @@ const PropertyRow = memo(function PropertyRow({
 }: PropertyRowProps) {
   const inline = useContext(InlineModeContext)
   const governed = useContext(GovernedFieldsContext)
+  // A top-level property the type has no field for yet: made one from its row.
+  const makeField = useContext(MakeFieldContext)
+  const fieldKey = governKey && !isArrayItem && makeField?.offered(governKey) ? governKey : null
   // A field of the entity's type: edited, its allowed values are offered, and a value the draft
   // gives it (a marked row) that publishing would refuse is said under it.
   const rule = governKey && !readOnly ? governed?.fields.get(governKey) : undefined
@@ -852,6 +871,18 @@ const PropertyRow = memo(function PropertyRow({
                 className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/10"
               >
                 <Code className="w-3 h-3" />
+              </button>
+            </HoverTip>
+          )}
+          {fieldKey && (
+            <HoverTip label="Make this a field" detail={`Of ${makeField!.typeLabel}, in the semantic layer — typed, and checked when a draft is published`} className="inline-flex">
+              <button
+                type="button"
+                onClick={() => makeField!.onSelect(fieldKey)}
+                aria-label={`Make ${fieldKey} a field`}
+                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/10"
+              >
+                <ListChecks className="w-3 h-3" />
               </button>
             </HoverTip>
           )}
@@ -1408,7 +1439,8 @@ export function PropertyComposer({
                   <span className="font-mono text-ink truncate">{o.key}</span>
                   <span className="ml-auto shrink-0 text-[10.5px] text-ink-muted truncate max-w-[55%]">
                     {o.recent ? 'You used it recently'
-                      : `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}${o.examples[0] ? ` · e.g. ${o.examples[0]}` : ''}`}
+                      : [o.count > 0 && `${o.count.toLocaleString()} other${o.count === 1 ? '' : 's'}`, o.examples[0] && `e.g. ${o.examples[0]}`]
+                        .filter(Boolean).join(' · ')}
                   </span>
                 </>)}
               />

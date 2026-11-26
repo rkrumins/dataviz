@@ -33,13 +33,10 @@ from backend.common.predicate_eval import NODE_FIELDS as _NODE_FIELDS
 from backend.common.predicate_eval import matches as _matches
 from backend.common.search_semantics import (
     element_texts,
-    evaluate,
     fold_case,
-    resolve_predicate,
     value_slot,
 )
 from backend.common.derived_artifacts import is_derived_edge_type
-from backend.common.edge_properties import EDGE_NATIVE_KEYS, json_holds
 from backend.common.models.search import (
     EDGES_PAGE_MAX,
     NODE_REF_ANY_DEPTH,
@@ -49,9 +46,6 @@ from backend.common.models.search import (
     EdgeEnd,
     EdgeHit,
     EdgeRef,
-    EdgeGroupPredicate,
-    EdgeHasPropertyPredicate,
-    EdgePropertyPredicate,
     EdgesPredicate,
     GroupPredicate,
     PathHit,
@@ -211,6 +205,22 @@ class StubDeepSearchProvider:
                 matches[item_id] = [n["urn"] for n in nodes if _matches(n, predicate, self)]
             except CompileError as exc:
                 errors[item_id] = str(exc)
+        return {"matches": matches, "errors": errors, "elapsedMs": 0}
+
+    async def deep_search_edge_membership(self, scope, items, edges, *,
+                                          context=None) -> Dict[str, Any]:
+        """Which of ``edges`` (the relationships on screen, by id) each Connections rule
+        matches, inside ``scope`` — the Connections search's own answer, narrowed to them."""
+        wanted = list(dict.fromkeys(e.id for e in edges))
+        matches: Dict[str, List[str]] = {}
+        errors: Dict[str, str] = {}
+        for item_id, predicate in items:
+            try:
+                found = {hit.id for hit in self._connections(predicate, scope)}
+            except CompileError as exc:
+                errors[item_id] = str(exc)
+                continue
+            matches[item_id] = [eid for eid in wanted if eid in found]
         return {"matches": matches, "errors": errors, "elapsedMs": 0}
 
     def _in_scope(self, scope) -> List[Dict[str, Any]]:
@@ -767,23 +777,11 @@ def _compare(count: int, op: str, value: int) -> bool:
 
 def _edge_passes(edge: Dict[str, Any], ep) -> bool:
     """An edge filter on a fixture edge: its native fields are its own keys,
-    a user's properties sit in its ``properties`` (``edge_properties``)."""
-    if ep is None:
-        return True
-    if isinstance(ep, EdgeGroupPredicate):
-        if ep.op == "not":
-            return not _edge_passes(edge, ep.children[0])
-        tests = (_edge_passes(edge, c) for c in ep.children)
-        return all(tests) if ep.op == "and" else any(tests)
-    if isinstance(ep, EdgeHasPropertyPredicate):
-        present = (edge.get(ep.key) is not None if ep.key in EDGE_NATIVE_KEYS
-                   else ep.key in (edge.get("properties") or {}))
-        return not present if ep.negate else present
-    if isinstance(ep, EdgePropertyPredicate):
-        if ep.key in EDGE_NATIVE_KEYS:
-            return evaluate(edge.get(ep.key), resolve_predicate(ep))
-        return json_holds(edge.get("properties"), ep.key, resolve_predicate(ep))
-    raise CompileError(f"stub: unsupported edge predicate {type(ep).__name__}")
+    a user's properties sit in its ``properties`` — read as the engine reads
+    them (``predicate_eval.edge_matches``)."""
+    from backend.common.predicate_eval import edge_matches
+
+    return edge_matches(edge, ep)
 
 
 def _name_of(node: Dict[str, Any]) -> str:

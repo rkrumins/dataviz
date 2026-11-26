@@ -262,6 +262,29 @@ describe('relationships', () => {
     expect(isEdgeTarget({ kind: 'selection', ids: ['u'] })).toBe(false)
   })
 
+  it('from Property Manager: every relationship in the view, or those of them holding a property', () => {
+    const view = { kind: 'viewRelationships' } as const
+    const withOwner = { kind: 'relationshipsWithKey', key: 'owner' } as const
+    // Read as the relationship catalog reads them: every type, rollups never.
+    expect(targetOf(view, 'v1', 'view')).toEqual({ viewId: 'v1', predicate: { kind: 'edges', edgeClass: 'any' }, scopeMode: 'view' })
+    expect(targetOf(withOwner, 'v1', 'data_source')).toEqual({
+      viewId: 'v1', scopeMode: 'data_source',
+      predicate: { kind: 'edges', edgeClass: 'any', edgePredicate: { kind: 'edgeHasProperty', key: 'owner', negate: false } },
+    })
+    expect(isEdgeTarget(view)).toBe(true)
+    expect(isEdgeTarget(withOwner)).toBe(true)
+    expect(isConnectionsPredicate(predicateOf(withOwner))).toBe(true)
+    expect(scopedTargetLabel(view, 'view')).toBe('every relationship in this view')
+    expect(scopedTargetLabel(view, 'data_source')).toBe('every relationship in the data source')
+    expect(scopedTargetLabel(withOwner, 'data_source')).toBe('every relationship with owner, across the whole data source')
+    // Counted as any Connections search is: those also holding the key.
+    expect(reviewCounts(op({ kind: 'rename', key: 'owner', to: 'steward' }), predicateOf(view)!).map((c) => c.predicate)).toEqual([
+      { kind: 'edges', edgeClass: 'any' },
+      { kind: 'edges', edgeClass: 'any', edgePredicate: { kind: 'edgeHasProperty', key: 'owner', negate: false } },
+      { kind: 'edges', edgeClass: 'any', edgePredicate: { kind: 'edgeHasProperty', key: 'steward', negate: false } },
+    ])
+  })
+
   it('a search\'s matches are its relationships for a Connections search, alone or as an AND of one', () => {
     expect(searchPreset(edges, 'view', 12)).toEqual({ kind: 'connections', predicate: edges, scopeMode: 'view', label: 'the search’s relationships', count: 12 })
     const wrapped = { kind: 'group', op: 'and', children: [edges] } as never
@@ -275,8 +298,9 @@ describe('relationships', () => {
     expect(opProblem(op({ key: 'displayName' }), true)).toBeNull()
     expect(opProblem(op({ kind: 'rename', key: 'owner', to: 'weight' }), true)).toMatch(/kept by the platform/)
     expect(opProblem(op({ key: 'confidence' }))).toBeNull()
-    // A clean-up previews catalogued values — entities' only.
-    expect(opProblem(op({ kind: 'normalize' }), true)).toMatch(/Clean-ups are for entities/)
+    // A relationship's values are cleaned up as an entity's are.
+    expect(opProblem(op({ kind: 'normalize', key: 'team' }), true)).toBeNull()
+    expect(opProblem(op({ kind: 'replace', key: 'team' }), true)).toBe('Say what to find')
   })
 
   it('Review counts a Connections search\'s relationships holding the key by the same search, each edge holding it', () => {

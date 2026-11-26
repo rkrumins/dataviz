@@ -162,14 +162,19 @@ An edge filter nests groups at most 3 deep and holds at most 16 conditions.
 **Where an edge keeps a property.** An edge keeps the platform's own fields
 natively — `id`, `confidence`, `gvHash`, and a rollup's `aggKey`, `weight`,
 `sourceEdgeTypes`, `sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`,
-`levelDigest`, `gvSeq`, `latestUpdate` — and every other property in one JSON
-text ([ADR-026](/docs/decisions#adr-026-property-storage-in-a-postgresql-side-index)).
-A native field takes every operator. A key kept in the JSON takes presence
-(`edgeHasProperty`, `isSet`, `isNotSet`) and equality (`eq`, `neq`, `in`,
-`notIn`), compared with the value as JSON writes it: `true` is not `1`, `5`
-equals `5.0`, and text ignores case unless `caseSensitive`. Any other operator
-on such a key is a `400`. `GET /search/discover` lists each edge type's keys and
-where each is kept (`edges[].storedAs`: `native` or `json`).
+`levelDigest`, `gvSeq`, `latestUpdate` — and a user's properties as an item's
+are: natively within the graph's property-name budget, which items and
+relationships share, and the rest in one JSON text
+([ADR-026](/docs/decisions#adr-026-property-storage-in-a-postgresql-side-index)).
+A relationship written before edges were stored natively keeps all of its
+properties in the JSON until it is written again. Every operator reads a native
+value. Presence (`edgeHasProperty`, `isSet`, `isNotSet`) and equality (`eq`,
+`neq`, `in`, `notIn`) read the JSON as well, comparing the value as JSON writes
+it: `true` is not `1`, `5` equals `5.0`, and text ignores case unless
+`caseSensitive`. Any other operator matches only a native value.
+`GET /search/discover` lists each edge type's keys and where each is kept
+(`edges[].storedAs`: `native` or `json`), and the search builder offers only
+presence and equality for a key kept in the JSON.
 
 ### Names instead of URNs
 
@@ -441,7 +446,8 @@ Reporting layer" on the demo platform graph, cut to its first edge:
 
 **The rules:**
 - It is the whole query. It can't sit beside other conditions, under a `not`,
-  or inside another condition, and it can't be a display rule.
+  or inside another condition. It is a display rule only as a rule that
+  applies to relationships ([`target`](#the-rule)).
 - Both ends must be in the search's scope.
 - Both ends read native property values only, as a relationship's condition
   does.
@@ -624,9 +630,9 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | `GET /search/discover?samplePerLabel=` | → `{labels, tagValues, edges, blobOnlyLabels, missingContainment, missingSearchableText, elapsedMs}` | Samples 1–2,000 (default 200) nodes per type; `edges[].storedAs` says where each edge key is kept. Not for share links |
 | `POST /search/resolve` | `{scope, refs}` → `{results: [{count, matches: [{urn, displayName, entityType, ancestorPath}], error}], dataVersion, elapsedMs}` | What each of up to 32 [name references](#names-instead-of-urns) names in the View — how many, the first 10 with their containers. What the name picker checks as a path is typed |
 | `GET /search/values?viewId=&key=&q=&limit=` | → `{key, values: [{value, count}], complete, truncated, elapsedMs}` | A property's most common values in the View; `limit` 1–50 (25); about 1.5 s. Not for share links |
-| `POST /search/membership` | `{scope, items: [{id, predicate}], urns}` → `{matches: {id: [urn]}, errors: {id: why}, notes, dataVersion, elapsedMs}` | Which of these entities (≤ 1,000) match which rules (≤ 32). What display-rule chips use. A Connections search is no rule (`400`). On a draft, the entities it changed are answered on the draft; `notes` says which rules keep the published answer for them |
-| `POST /search/counts` | `{scope, items, waitMs, sessions}` → `{counts: {id: {count, status, sessionId, progress, error, lowerBound, approximate, note}}, dataVersion, elapsedMs}` | Exact matches per rule (≤ 32). Repeat with `sessions` until each is `complete`; a request works for at most 5 s whatever `waitMs` (0–60,000, default 1,000) says. On a draft, the published count moved by what the draft changed; `approximate` (with `note`): the published count, not moved |
-| `POST /search/catalog` | `{scope, waitMs, sessionId, refresh, valuesFor}` → every property of the View's entities, exactly | Repeat with `sessionId` until `complete`. Each key lists its 20 most held values; `valuesFor` names one key that lists every value kept for it (up to 1,000) — what merging near-duplicate values reads. On a draft, the draft's; a property's `rangeExact` is false where the draft took out a value at an end of its range (still a bound, maybe wider), and `notes` says so |
+| `POST /search/membership` | `{scope, items: [{id, predicate}], urns, edges: [{id, source, target}]}` → `{matches: {id: [urn]}, edgeMatches: {id: [edge id]}, errors: {id: why}, notes, dataVersion, elapsedMs}` | Which of these entities (≤ 1,000) match which rules (≤ 32). What display-rule chips use. A rule whose predicate is a Connections search is asked about the relationships in `edges` instead (≤ 1,000, each its id and its ends' urns) and answers in `edgeMatches`; a relationship with an end outside the View never matches. On a draft, the entities and relationships it changed, and the relationships at an entity it changed, are answered on the draft; `notes` says which rules keep the published answer for them |
+| `POST /search/counts` | `{scope, items, waitMs, sessions}` → `{counts: {id: {count, status, sessionId, progress, error, lowerBound, approximate, note}}, dataVersion, elapsedMs}` | Exact matches per rule (≤ 32). Repeat with `sessions` until each is `complete`; a request works for at most 5 s whatever `waitMs` (0–60,000, default 1,000) says. On a draft, the published count moved by what the draft changed (a relationship rule's: by the relationships it changed and those at an entity it changed); `approximate` (with `note`): the published count, not moved |
+| `POST /search/catalog` | `{scope, subject, waitMs, sessionId, refresh, valuesFor}` → every property of the View's entities — or, `subject: "relationships"`, of the relationships between them (never a rollup) — exactly | Repeat with `sessionId` until `complete`. Each key lists its 20 most held values; `valuesFor` names one key that lists every value kept for it (up to 1,000) — what merging near-duplicate values reads. On a draft, the draft's; a property's `rangeExact` is false where the draft took out a value at an end of its range (still a bound, maybe wider), and `notes` says so |
 | `POST /search/ancestor-counts` | `{scope, sessionId, urns}` → `{counts: {urn: {count, typeCounts, displayName, entityType}}, status}` | Matches inside each container (≤ 2,000), from a search's session. `expired`: run the search again |
 | `POST /search/exports` | `{scope, predicate, format: csv\|ndjson, columns, waitMs, sessionId}` → `{sessionId, status, rows, progress, format, columns, filename, downloadToken}` | Every match to a file; ≤ 200 property columns — a Connections search's edges with their [fixed columns](#connections-edges-as-results). Repeat until `complete`. Needs the **Export graph data** feature |
 | `GET /search/exports/{sessionId}/download?token=` | → the file | For the user who exported it, for an hour |
@@ -662,6 +668,7 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | `enabled` | boolean (true) | Off: kept, not evaluated |
 | `createdAt` | string ≤ 64, optional | Stamped by the server; kept when a rule is replaced |
 | `style` | object, optional | How the rule paints what it matches, besides its chip — see [A rule's look](#a-rules-look). Absent: the chip alone |
+| `target` | `"entities"` \| `"relationships"` (`"entities"`) | What the rule applies to. `relationships`: its predicate is a Connections search (`kind: edges`), and it styles the lines of the relationships it matches, on the Graph canvas and the Context View. Left out of an entity rule as it is stored and exported |
 | `invalid` | read-only | On read only: why a stored rule can't run as a rule |
 
 Rules have no priority, description, owner or scope field. Narrow a rule with
@@ -672,11 +679,14 @@ applies.
 
 | `style` field | Type | Notes |
 | --- | --- | --- |
-| `chip` | boolean (true) | Show the rule's tag chip |
-| `fill` | boolean (false) | Tint each matching card in the rule's `color` |
-| `frame` | `"solid"` \| `"dashed"`, optional | Draw a box round each matching card, in the rule's `color` |
+| `chip` | boolean (true) | Show the rule's tag chip — on a relationship rule, at the middle of each line it styles |
+| `fill` | boolean (false) | Entity rules: tint each matching card in the rule's `color` |
+| `frame` | `"solid"` \| `"dashed"`, optional | Entity rules: draw a box round each matching card, in the rule's `color` |
+| `dash` | `"solid"` \| `"dashed"` \| `"dotted"`, optional | Relationship rules: how each matching line is drawn, in the rule's `color` (absent: solid) |
+| `width` | number 1–6, optional | Relationship rules: each matching line's width in pixels (absent: 2.5) |
 
-Any other `frame` is a `422`. A rule saved without a `style` reads back without
+Any other `frame` or `dash`, a `width` out of range, a `fill` or `frame` on a
+relationship rule, or a `dash` or `width` on an entity rule, is a `422`. A rule saved without a `style` reads back without
 one, and the UI saves none for a chip alone. A `style` travels with its rule
 everywhere the rule goes: a library file, a View file, a draft's publish, a View
 version.
@@ -692,9 +702,11 @@ version.
 A rule's predicate is checked as a search's is, and additionally may not use:
 
 - `withinHops` or `path` — "A rule can't use 'within hops' or a path…"
-- `edges` — a rule tags entities, and a Connections search returns edges
-- a lineage relationship of more than one hop — a rule is asked of every
-  entity on the canvas
+- `edges`, unless the rule applies to relationships — and a rule that does
+  must be a Connections search
+- a lineage relationship of more than one hop, at either end of a
+  relationship rule too — a rule is asked of every entity (or relationship)
+  on the canvas
 - `text` with `match` `regex` or `fulltext`
 
 Relationships are otherwise allowed — "has a child tagged PII", "its parent is a
@@ -722,6 +734,23 @@ sent to be matched.
   canvas, in batches of up to 1,000 URNs × 32 rules, asked again when a rule's
   predicate or the set of enabled rules changes (not on a rename, a recolour or
   a change of its look).
+- **Lines.** On the Graph canvas, a relationship rule is asked about the
+  relationships loaded (up to 1,000 a request, each by its id and ends; never
+  containment, which is drawn as nesting). A line drawn between two visible
+  containers for several relationships is styled when any of them matches; a
+  roll-up never is. The first matching rule in the list gives a line its
+  colour, dash and width; every matching rule with its chip on adds its chip.
+  On the Context View the same rules paint its lines: a line is styled when
+  any relationship it stands for matches — several between two rows, or some
+  lifted to an ancestor row — and a roll-up member never makes it so (a line
+  holding real relationships too is styled for theirs). Its chips show on the
+  selected card's lines and on the line the relationship drawer is open on,
+  and a hovered line's card names every rule that styles it. A trace keeps
+  its own colours, and a dimmed or faint line keeps its own look.
+  A relationship rule's count is its Connections search's. On a draft, both
+  are the draft's: a relationship the draft added, changed or removed, and one
+  it didn't change at an entity it changed, is judged on the draft's values
+  and its ends as the draft holds them.
 - **Counts** come from `POST /search/counts` in groups of 32, repeated with the
   returned `sessions` until complete.
 
@@ -861,7 +890,10 @@ is out of date).
 - Each item is checked as it would be when saved. One that fails is
   **refused** with the reason, and the rest still import.
 - An item whose predicate names entity types the View doesn't show is added
-  with a warning: "Refers to entity types this view doesn't show: …".
+  with a warning: "Refers to entity types this view doesn't show: …" — and one
+  whose Connections search names relationship types the View's semantic layer
+  doesn't define, with "Refers to relationship types this view's ontology
+  doesn't have: …" (none when the layer defines no relationship types).
 - An item that would take the View past 200 rules or 500 queries is refused.
 
 The answer:
@@ -1131,8 +1163,22 @@ curl -s -b "$JAR" -o pii.csv \
   (`common.predicate_eval`), a commit's entities folded in as it lands — except
   for a rule that follows relationships, tests the View's layers, reads a field
   only the platform keeps or names an entity the draft changes: that rule keeps
-  main's answer for what the draft changed, flagged `approximate`. Not on a fork.
-  Draft *rules* are kept per draft.
+  main's answer for what the draft changed, flagged `approximate`. A
+  relationship rule is corrected for each relationship the draft changed and
+  each at an entity it changed, the same holding for its From and To. Main's
+  relationships are read only at the entities the draft moves into or out of
+  a rule's From or To (a change no rule reads moves no match, so none is read
+  there), and only once they are counted within what is left of
+  `GRAPHVER_DRAFT_SEARCH_MAX_DELTA` (200,000), by a count that stops just
+  past it: what an entity costs is bounded by the cap, however many
+  relationships it holds. Once those and the changed entities pass it, the
+  count is main's, flagged. A later commit is folded in, as for entity rules:
+  only the relationships and entities it wrote are read, each as the draft
+  held it before the commit and as it holds it now — unless the commits
+  deleted a relationship or an entity, wrote or retyped one of the
+  hierarchy, gave an entity another urn or wrote more than half the draft,
+  or the rules' relationship types now resolve otherwise: then it is read
+  whole. Not on a fork. Draft *rules* are kept per draft.
 - **No live updates**: other open sessions see a rule change when they next
   load the View.
 - **An import's dry run needs edit permission**: readers can't preview one.

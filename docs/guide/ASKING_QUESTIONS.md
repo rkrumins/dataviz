@@ -31,7 +31,9 @@ asked about it so far, and **Ask a question…** at the top. You can also start 
 * **About** (or **Details → About**) in the view's header, where **Who to ask** names each
   owner and why they are one, with **Ask a question** under them;
 * a node on the canvas: right-click it and choose **Ask about this**, and the question is
-  about that one thing.
+  about that one thing. It is named by what it's called, after the things it sits in (a
+  table as `FIN_DB › MARTS › gl_balances`), with its ID beneath — hover the name to see its
+  type, its whole path and its whole ID.
 
 Write your question and press **⌘↵** (Ctrl+Enter on Windows and Linux), or click **Ask**.
 Type `@` to mention someone who can open the view — their name joins the question, and they
@@ -93,7 +95,9 @@ drawer says **This changed** with **Reload**, rather than overwriting what they 
 A question asked about one thing on the canvas puts an amber **?** beside it, with how many
 are still open — a grey one once they're all answered or closed. Click the **?** to see the
 questions about that thing alone, and ask another. In a question about a node, **Show on
-canvas** closes the drawer and selects the node, bringing it into view.
+canvas** closes the drawer and selects the node, bringing it into view, and the ID beside
+its name can be copied. Every question keeps the node's name and where it sat as they were
+when it was asked; one asked before names were kept shows its ID.
 
 You can also ask from the Explorer: a view's preview shows **Who to ask** under who made it
 and a **Questions** button with the open count, and the **…** on a view's card offers **Ask a

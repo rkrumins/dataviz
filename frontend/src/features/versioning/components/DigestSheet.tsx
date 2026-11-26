@@ -1,10 +1,11 @@
 /**
  * DigestSheet — what changed in the graph since you last looked: the versions published since your
  * seen marker (or in the last 7 days, said so), who published them and what each recorded of
- * itself, the reviews waiting on you, and the entities you watch that changed. From each, the way
- * on: a version's changes in place (`ChangeList`), its comparison in History (`RevisionCompare`)
- * where there is a canvas to show it on (`onCompare`), a watched entity's history (`EntityHistory`),
- * a review in the Reviews inbox.
+ * itself, the reviews waiting on you, and the entities and relationships you watch that changed (a
+ * relationship by its ends and its type). From each, the way on: a version's changes in place
+ * (`ChangeList`), its comparison in History (`RevisionCompare`) where there is a canvas to show it
+ * on (`onCompare`), a watched entity's or relationship's history (`EntityHistory`), a review in the
+ * Reviews inbox.
  *
  * Opening it marks nothing seen. It is a list to work through — a comparison opened from it, and the
  * way back, must find it as it was — and "seen" is kept by the server for every device, so a glance
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount } from '@/lib/units'
+import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { Drawer } from '@/components/ui/Drawer'
@@ -213,10 +215,18 @@ function WatchedRow({ w, wsId, graphId, mainBranchId }: {
   const [open, setOpen] = useState(false)
   const panel = useId()
   const status = CHANGE_STATUS[w.change]
+  // A relationship by its ends ("Orders → Revenue") and its type, as the canvas names them.
+  const name = w.kind === 'edge'
+    ? `${w.source.name || w.source.entityId} → ${w.target.name || w.target.entityId}`
+    : w.name || w.urn
+  const type = w.kind === 'edge' && w.edgeType
+    ? edgeTypeCopy(w.edgeType)?.label ?? relationshipLabel(w.edgeType)
+    : null
   return (
     <li className="rounded-xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.03] px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 truncate text-[13px] font-medium text-ink" title={w.name || w.urn}>{w.name || w.urn}</span>
+        <span className="min-w-0 truncate text-[13px] font-medium text-ink" title={name}>{name}</span>
+        {type && <span className="text-[11px] text-ink-muted">{type}</span>}
         <NodeDiffBadge status={status} withLabel className={COUNT_TONE[status]} />
         <span className="text-[11px] text-ink-muted">
           in #{w.seq} · <DateTime at={w.at} />
@@ -229,7 +239,7 @@ function WatchedRow({ w, wsId, graphId, mainBranchId }: {
       {open && (
         <div id={panel} className="mt-2">
           <EntityHistory wsId={wsId} graphId={graphId} entityId={w.entityId} mainBranchId={mainBranchId}
-            branchId={null} kind="node" />
+            branchId={null} kind={w.kind} />
         </div>
       )}
     </li>
@@ -359,7 +369,8 @@ export function DigestSheet({ wsId, graphId, mainBranchId, open, onOpenChange, o
             <Section icon={Eye} title="Things you watch" count={d.watchedChanged.length}>
               <ul className="space-y-2">
                 {d.watchedChanged.map((w) => (
-                  <WatchedRow key={w.urn} w={w} wsId={wsId} graphId={graphId} mainBranchId={mainBranchId} />
+                  <WatchedRow key={w.kind === 'edge' ? w.entityId : w.urn} w={w} wsId={wsId} graphId={graphId}
+                    mainBranchId={mainBranchId} />
                 ))}
               </ul>
             </Section>

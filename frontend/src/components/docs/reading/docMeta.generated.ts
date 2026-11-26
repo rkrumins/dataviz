@@ -214,6 +214,10 @@ export const docMeta: Record<string, DocMeta> = {
     "updated": "2026-11-21",
     "path": "docs/versioning/19-change-streams.md"
   },
+  "versioning-parallel-relationships": {
+    "updated": "",
+    "path": "docs/versioning/20-parallel-relationships.md"
+  },
   "versioning-e2e": {
     "updated": "2026-11-05",
     "path": "docs/VERSIONING_E2E.md"

@@ -39,6 +39,16 @@ export function storedType(kinds: Readonly<Record<string, number>>): { type: Val
     return { type, mixed: byType.size > 1 }
 }
 
+/** The kind the graph stores one value as, as the catalog counts it (`Integer`, `String`, …) —
+ *  null for anything else (a map, no value). */
+export function storedKindOf(value: unknown): string | null {
+    if (typeof value === 'boolean') return 'Boolean'
+    if (typeof value === 'number') return Number.isInteger(value) ? 'Integer' : 'Float'
+    if (typeof value === 'string') return 'String'
+    if (Array.isArray(value)) return 'List'
+    return null
+}
+
 export interface TypeMeta { Icon: LucideIcon; tile: string; label: string }
 
 const TYPE_META: Record<NonNullable<ValueType>, TypeMeta> = {

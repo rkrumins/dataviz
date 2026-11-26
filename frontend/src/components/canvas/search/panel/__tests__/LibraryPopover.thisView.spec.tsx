@@ -4,7 +4,7 @@
  * everyone, so after asking) by someone who can edit the view, and an
  * empty tab that says who can add to it.
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -19,7 +19,6 @@ import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useViewLibraryStore, type ViewLibraryState } from '@/store/viewLibraryStore'
 
-import { NO_RULE_FOR_CONNECTIONS } from '../findMode'
 import { LibraryPopover } from '../LibraryPopover'
 
 
@@ -89,7 +88,7 @@ describe('LibraryPopover — This view', () => {
         expect(screen.queryByRole('button', { name: /Remove/ })).toBeNull()
     })
 
-    it('marks a saved Connections search, reads it by its ends, and makes no display rule of it', () => {
+    it('marks a saved Connections search, reads it by its ends, and makes a rule that styles what it finds', () => {
         const links: SavedViewQuery = {
             id: 'q2', name: 'Column links',
             // As the API reference asks a root to be sent: in an AND group of its own.
@@ -97,13 +96,17 @@ describe('LibraryPopover — This view', () => {
                 { kind: 'edges', sourceWhere: { kind: 'entityType', op: 'in', values: ['schemaField'] } }] },
         }
         library({ canEdit: true, savedQueries: [tables, links] })
-        renderPopover({ onMakeRule: vi.fn() })
+        const onMakeRule = vi.fn()
+        renderPopover({ onMakeRule })
         expect(screen.getAllByText('Connections')).toHaveLength(1)
         expect(screen.getByText('type:schemaField → anything')).toBeInTheDocument()
         const rule = screen.getByRole('button', { name: 'Make a display rule of “Column links”' })
-        expect(rule).toBeDisabled()
-        expect(rule).toHaveAttribute('title', NO_RULE_FOR_CONNECTIONS)
-        expect(screen.getByRole('button', { name: 'Make a display rule of “Tables”' })).toBeEnabled()
+        expect(rule).toBeEnabled()
+        expect(rule).toHaveAttribute('title', 'Make a display rule of it — style every relationship it finds')
+        expect(screen.getByRole('button', { name: 'Make a display rule of “Tables”' }))
+            .toHaveAttribute('title', 'Make a display rule of it — tag every entity it matches')
+        fireEvent.click(rule)
+        expect(onMakeRule).toHaveBeenCalledWith(links.predicate, 'Column links')
     })
 
     it('says who can add queries when the view has none', async () => {

@@ -1,9 +1,11 @@
 /**
  * The relationship drawer on several relationships: it reads them as they are stored (never the
- * canvas copy), says for each property whether they hold it alike, differently or only some do,
- * and lists the ones it leaves out and why — roll-ups, ones deleted in the draft, ones not saved
- * yet. In a draft a change is made for all of them and staged as each relationship's own edit, in
- * one step that Undo takes back; more than it compares are changed on the server instead. Each is
+ * canvas copy), of every kind but roll-ups, says for each property whether they hold it alike,
+ * differently or only some do, and lists the ones it leaves out and why — roll-ups, ones deleted in
+ * the draft, ones not saved yet. In a draft a change is made for all of them and staged as each
+ * relationship's own edit, in one step that Undo takes back — never one value for several of a type
+ * on a field it keeps unique — and a property added to all is offered the names others of their
+ * types carry; more than it compares are changed on the server instead. Each is
  * named by its ends, with its ID in the list opened on them; outside a draft the way into one sits
  * in the top line. The drawer is wider comparing them than reading one.
  */
@@ -31,6 +33,9 @@ const h = vi.hoisted(() => ({
   editing: { offered: true, blocked: null as string | null },
   /** The view's relationship types. */
   relTypes: [] as unknown[],
+  /** What the view's discovery sample says relationships of each type carry. */
+  edgeKeys: {} as Record<string, string[]>,
+  edgeSamples: {} as Record<string, unknown[]>,
 }))
 
 vi.mock('@/hooks/useRelationshipRecords', () => ({
@@ -62,6 +67,9 @@ vi.mock('@/hooks/useViewSchema', () => ({
   useViewRelationshipTypes: () => h.relTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
+vi.mock('@/components/canvas/search/builder/useDiscovery', () => ({
+  useDiscovery: () => ({ keysByEdgeType: h.edgeKeys, getEdgeValueSamples: (_type: string, key: string) => h.edgeSamples[key] ?? [] }),
+}))
 
 import { RelationshipDrawer } from '../../../RelationshipDrawer'
 
@@ -74,7 +82,7 @@ const record = (entityId: string, properties: Record<string, unknown>, edgeType 
 
 const MEMBERS = [
   member('e1', 'a', 'b'), member('e2', 'b', 'c'), member('e3', 'a', 'c'),
-  member('agg', 'a', 'c', 'AGGREGATED', true), member('gone', 'c', 'a'), member('new', 'c', 'b'), member('kids', 'a', 'b', 'CONTAINS'),
+  member('agg', 'a', 'c', 'AGGREGATED', true), member('gone', 'c', 'a'), member('new', 'c', 'b'),
 ]
 const changes = () => useStagedChangesStore.getState().changes
 /** The updates a save would send (the fixture's drawn relationship is a create). */
@@ -91,7 +99,6 @@ beforeEach(() => {
     ['e1', record('e1', { owner: 'ana', sla: '1h' })],
     ['e2', record('edge:e2', { owner: 'ana', sla: '4h' })],
     ['e3', record('e3', { owner: 'ana', sla: '1h', tier: 'gold' })],
-    ['kids', record('kids', {}, 'CONTAINS')],
   ])
   h.deleted = new Set(['gone'])
   h.missing = new Set()
@@ -99,6 +106,8 @@ beforeEach(() => {
   h.asked = []
   h.editing = { offered: true, blocked: null }
   h.relTypes = []
+  h.edgeKeys = {}
+  h.edgeSamples = {}
   useCanvasStore.setState({
     nodes: [node('a', 'Orders'), node('b', 'Revenue'), node('c', 'Refunds')],
     edges: [], _nodeIndex: new Set(['a', 'b', 'c']), _edgeIndex: new Set(),
@@ -120,20 +129,45 @@ describe('several relationships in the relationship drawer', () => {
   it('compares the ones it can, as stored, and lists the rest with why', async () => {
     const user = userEvent.setup()
     render(<RelationshipDrawer canEdit />)
-    expect(screen.getByRole('heading', { name: '7 relationships' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '6 relationships' })).toBeInTheDocument()
     // Read once — never the roll-up, nor the one not saved yet.
-    expect(h.asked.at(-1)).toEqual(['e1', 'e2', 'e3', 'gone', 'kids'])
+    expect(h.asked.at(-1)).toEqual(['e1', 'e2', 'e3', 'gone'])
     expect(within(rowOf('owner')).getByText('Same')).toBeInTheDocument()
     expect(within(rowOf('sla')).getByText('Differs · 2 values')).toBeInTheDocument()
     expect(within(rowOf('tier')).getByText('On 1 of 3')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /4 left out/ }))
+    await user.click(screen.getByRole('button', { name: /3 left out/ }))
     const leftOut = screen.getByRole('list', { name: 'Relationships left out' })
     expect(within(leftOut).getByText('A roll-up — read-only')).toBeInTheDocument()
     expect(within(leftOut).getByText('Deleted in this draft')).toBeInTheDocument()
     expect(within(leftOut).getByText('Not saved yet')).toBeInTheDocument()
-    expect(within(leftOut).getByText('Hierarchy — read-only')).toBeInTheDocument()
     expect(within(leftOut).getByRole('button', { name: 'Refunds → Orders' })).toBeInTheDocument()
+  })
+
+  it('compares and edits every kind but roll-ups — hierarchy links and associations too', async () => {
+    const user = userEvent.setup()
+    h.relTypes = [{ id: 'OWNS', name: 'Owns', sourceTypes: [], targetTypes: [], isLineage: false,
+      visual: { strokeColor: '#6366f1', strokeWidth: 2, strokeStyle: 'solid', animated: false, animationSpeed: 'normal', arrowType: 'arrow', curveType: 'bezier' } }]
+    h.records.set('own', record('own', { owner: 'bo' }, 'OWNS'))
+    h.records.set('kids', record('kids', { owner: 'ana' }, 'CONTAINS'))
+    // Not marked a roll-up where it was drawn, but stored as one.
+    h.records.set('sum', record('sum', { owner: 'ana' }, 'AGGREGATED'))
+    act(() => open([
+      member('e1', 'a', 'b'), member('kids', 'a', 'b', 'CONTAINS'), member('own', 'b', 'c', 'OWNS'),
+      member('agg', 'a', 'c', 'AGGREGATED', true), member('sum', 'a', 'c', ''),
+    ]))
+    render(<RelationshipDrawer canEdit />)
+    expect(h.asked.at(-1)).toEqual(['e1', 'kids', 'own', 'sum'])
+    expect(screen.getByRole('button', { name: /List the 3 compared/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /2 left out/ }))
+    expect(within(screen.getByRole('list', { name: 'Relationships left out' })).getAllByText('A roll-up — read-only')).toHaveLength(2)
+
+    await user.click(screen.getByRole('button', { name: 'Edit owner for all' }))
+    await user.type(screen.getByRole('textbox', { name: 'owner for all' }), 'cy{Enter}')
+    await user.click(screen.getByRole('button', { name: 'Stage for 3' }))
+    expect(ops().map((o) => [o.kind, o.id, o.payload.properties])).toEqual([
+      ['edge', 'e1', { owner: 'cy' }], ['edge', 'kids', { owner: 'cy' }], ['edge', 'own', { owner: 'cy' }],
+    ])
   })
 
   it('sets a value for all, staged as each relationship\'s own edit against what was read — one Undo takes it back', async () => {
@@ -250,6 +284,45 @@ describe('several relationships in the relationship drawer', () => {
  *  click away, and a required one some of them lack is filled on every one of the type missing it
  *  — a Connections search, since they are relationships. */
 describe('several relationships held to their type’s fields', () => {
+  const visual = { strokeColor: '#6366f1', strokeWidth: 2, strokeStyle: 'solid', animated: true, animationSpeed: 'normal', arrowType: 'arrow', curveType: 'bezier' }
+  const field = (id: string, name: string, over: Record<string, unknown> = {}) =>
+    ({ id, name, type: 'string', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0, ...over })
+
+  it('refuses one value for several of a type on a field it keeps unique — set one at a time', async () => {
+    h.relTypes = [
+      { id: 'FLOWS_TO', name: 'Feeds', sourceTypes: [], targetTypes: [], bidirectional: false, showLabel: false, isLineage: true, visual,
+        fields: [field('code', 'Code', { unique: true })] },
+      { id: 'OWNS', name: 'Owns', sourceTypes: [], targetTypes: [], bidirectional: false, showLabel: false, isLineage: false, visual,
+        fields: [field('tag', 'Tag', { unique: true })] },
+    ]
+    h.records = new Map<string, unknown>([
+      ['e1', record('e1', { code: 'A', owner: 'ana' })],
+      ['e2', record('e2', { code: 'B', owner: 'ana' })],
+      ['own', record('own', { tag: 't1', owner: 'ana' }, 'OWNS')],
+    ])
+    act(() => open([member('e1', 'a', 'b'), member('e2', 'b', 'c'), member('own', 'a', 'c', 'OWNS')]))
+    render(<RelationshipDrawer canEdit />)
+    const code = rowOf('code')
+    expect(code).toHaveTextContent('No two Feeds relationships may share a Code — set it one at a time.')
+    expect(within(code).queryByRole('button', { name: 'Edit code for all' })).toBeNull()
+    // One Owns relationship held: no two of that type would share it.
+    expect(within(rowOf('tag')).queryByText(/may share/)).toBeNull()
+    expect(within(rowOf('owner')).getByRole('button', { name: 'Edit owner for all' })).toBeInTheDocument()
+  })
+
+  it('offers the names others of their types carry as a property is added to all, with a value they hold', async () => {
+    const user = userEvent.setup()
+    h.edgeKeys = { flows_to: ['owner', 'retention', 'gvHash'], OWNS: ['steward'] }
+    h.edgeSamples = { retention: ['30d'] }
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('button', { name: 'Add to all' }))
+    await user.click(screen.getByRole('combobox', { name: 'Property name' }))
+    const offered = within(await screen.findByRole('listbox', { name: 'Suggested names' })).getAllByRole('option')
+    // What they hold already, a relationship's own fields and another type's names are not offered.
+    expect(offered).toHaveLength(1)
+    expect(offered[0]).toHaveTextContent(/retention.*e\.g\. 30d/)
+  })
+
   it('offers a field’s allowed values, and fills a required one where they lack it', async () => {
     const user = userEvent.setup()
     h.relTypes = [{

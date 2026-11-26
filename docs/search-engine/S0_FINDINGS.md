@@ -810,3 +810,69 @@ choice is cost.
   the smith search still finished.
 - The selective searches spend their time scanning the anchor's label in
   units.
+
+## 17. The relationship property catalog
+
+`POST /search/catalog` with `subject: "relationships"` lists the properties
+of the relationships between the entities in a view's scope. The answer has
+the entity catalog's shape (§13): `entities` counts relationships,
+`entityTypes` and `byEntityType` are relationship types, `residual` counts
+the relationships holding a key in their JSON, and there are no tags.
+Rollups (`AGGREGATED`) are never read.
+
+**Which relationships.** Those a Connections search (§16) of any
+relationship (`edgeClass: "any"`) between any two entities in the scope
+reads: units are bands of source entities, sized from each relationship
+type's count in `db.meta.stats()`, and a hub's edges are split by edge-ID
+band. It never scans `ID(r)` ranges per type, which costs O(E × N).
+
+**Two parts per unit.** A relationship keeps a user's properties natively
+within the property-name budget and the rest in its JSON bag,
+`r.properties`. A relationship written before that keeps every one in the
+bag. Cypher can't parse the bag, so:
+
+- Relationships with an empty bag (`'{}'`) are counted in the graph, as
+  entities are: keys and kinds as one collected row, a probe of a new key's
+  first 2,000 values, values for keys under the cap, and sign-split bounds
+  for numeric keys.
+- Relationships holding a bag are read a page at a time in
+  (source, edge) ID order and counted in Python, as every reader takes a
+  relationship (`falkordb_provider.edge_user_properties`):
+  - the bag wins a name held both natively and in the bag;
+  - a `confidence` that isn't a number is the user's;
+  - a key from the bag is also counted as `residual`.
+
+**Drafts.** Main's answer, with the relationships the draft added, changed
+or removed folded in (`draft_search._fold_relationships`):
+
+- Each is taken out as main holds it, when both its ends are in the scope
+  there, and counted back as the draft holds it.
+- Main's value is read between the relationship's two ends, both seeked by
+  their URN index (`relationships_between`), never by `r.id`.
+- As with entities, `residual` is left as it was, and a draft past
+  `DRAFT_SEARCH_MAX_DELTA` relationships shows main's answer and says so.
+
+**Within one reply.** FalkorDB cuts a reply at `RESULTSET_SIZE` rows without
+saying so. Every catalog statement, for entities and relationships, stays
+inside one:
+
+- keys and kinds come back as one collected row;
+- `propertiesRaw` and the bags are read in pages;
+- statements about keys ask about at most 500 keys at a time;
+- the tag-set cutoff is one row inside the cap.
+
+**Measured.** The CI step "Property catalogs at scale"
+(`test_catalog_scale_live.py`, the `CATALOG_SCALE_REPORT` line) reads
+999,980 relationships across eleven types. One entity is a hub with 499,990
+of them. Half keep their properties natively and half in the bag. Every
+count is exact.
+
+| | |
+|---|---:|
+| Complete | 68.5 s, 6 requests |
+| Bag pages (114 statements) | median 0.69 s, p95 1.25 s, max 1.48 s |
+| Slowest statement of any kind | 1.76 s |
+| The entity catalog of the same graph's 50,001 entities | 0.1 s |
+
+No statement came near the per-unit budget, so the hub's band was read whole.
+The hub split by edge-ID band (§16) is the fallback for one that does.

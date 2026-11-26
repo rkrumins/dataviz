@@ -428,14 +428,17 @@ class TestCompiler:
         c.compile(P(AND(rel("upstream", edge=edge), rel("upstream", maxHops=2, edge=edge))))
         one, path = c.tail
         assert "[(n)<-[_xe0:FLOWS_TO]-(_xr0) WHERE ID(_xr0) <> ID(n) AND " \
-               "EXISTS(_xe0.`confidence`)" in one
-        assert "[_xp1 = (n)<-[:FLOWS_TO*1..2]-(_xr1) WHERE ID(_xr1) <> ID(n) AND " \
-               "ALL(_xe1 IN relationships(_xp1) WHERE EXISTS(_xe1.`confidence`))" in path
+               "(EXISTS(_xe0.`confidence`) OR coalesce(_xe0.properties, '') CONTAINS $p" in one
+        assert re.search(r"\[_xp(\d) = \(n\)<-\[:FLOWS_TO\*1\.\.2\]-\(_xr\1\) WHERE ID\(_xr\1\) "
+                         r"<> ID\(n\) AND ALL\(_xe\1 IN relationships\(_xp\1\) WHERE "
+                         r"\(EXISTS\(_xe\1\.`confidence`\) OR coalesce\(_xe\1\.properties, ''\) "
+                         r"CONTAINS \$p", path), path
 
     def test_a_users_edge_property_is_read_from_the_json_there_too(self):
         c = _compiler()
         c.compile(P(rel("upstream", edge={"kind": "edgeHasProperty", "key": "transform"})))
-        assert "AND coalesce(_xe0.properties, '') CONTAINS $p1 | true]" in c.tail[0]
+        assert ("AND (EXISTS(_xe0.`transform`) OR coalesce(_xe0.properties, '') CONTAINS $p1) "
+                "| true]") in c.tail[0]
         assert c.params["p1"] == '"transform": '
 
     def test_lineage_naming_its_far_end_is_walked_from_it(self):

@@ -4,12 +4,13 @@
  * manager decides, the integrity report that makes enabling an act of evidence rather
  * than faith, and a failure that says plainly that nothing was changed.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const retryMutate = vi.fn()
 const abandonMutate = vi.fn()
 const decideMutate = vi.fn()
+const decideReviewMutate = vi.fn()
 const openPanel = vi.fn()
 const notify = vi.fn()
 
@@ -17,6 +18,9 @@ vi.mock('../../hooks/useVersioning', () => ({
   useRetryBootstrap: () => ({ mutate: retryMutate, isPending: false }),
   useAbandonBootstrap: () => ({ mutate: abandonMutate, isPending: false }),
   useDecideBootstrapDuplicates: () => ({ mutate: decideMutate, isPending: false }),
+  useDecideBootstrapReview: () => ({ mutate: decideReviewMutate, isPending: false }),
+  useBootstrapReview: () => ({ data: { pages: [{ items: [], next: null }] }, isLoading: false, hasNextPage: false }),
+  useSaveBootstrapReviewChoice: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
 }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/store/versioningPanelStore', () => ({
@@ -137,7 +141,7 @@ describe('when the copy lands', () => {
       ...done,
       report: { ...done.report!, mergedDuplicateConnections: 4, merkle: 'deferred' },
     })
-    expect(screen.getByText(/4 duplicate connection/)).toBeInTheDocument()
+    expect(screen.getByText(/4 copies of a connection said exactly what another/)).toBeInTheDocument()
     expect(screen.getByText(/fingerprint is deferred/)).toBeInTheDocument()
   })
 
@@ -497,5 +501,119 @@ describe('copying a view package into a new data source', () => {
     })
     expect(screen.getByText(/declares all but 3/)).toBeInTheDocument()
     expect(screen.getByText(/every item and connection in the package is in the new data source/)).toBeInTheDocument()
+  })
+})
+
+
+// ── after the copy: what it couldn't keep exactly as the source has it ─────────────────────────
+const REVIEW: NonNullable<BootstrapJob['review']> = {
+  fingerprint: 'rv_1',
+  copies: {
+    connections: 2, versions: 4, copies: 5,
+    sample: [{ entityId: 'urn:a|CALLS|urn:b', edgeType: 'CALLS', source: 'urn:a', target: 'urn:b', versions: 2, copies: 3 }],
+  },
+  values: {
+    count: 2, items: 1, byProblem: { nan: 1, nul: 1 },
+    sample: [{ entityId: 'urn:v', seq: 0, entityKind: 'node', name: 'Orders', property: 'score', problem: 'nan', storedAs: 'NaN' }],
+  },
+  decision: null,
+}
+
+describe('when the copy holds what history cannot keep exactly as it is', () => {
+  const paused = { status: 'needs_decision' as const, phase: 'awaiting_decision' as const, awaiting: 'review' as const,
+    review: REVIEW, duplicates: null }
+
+  it('says why, shows what is held, and offers the lists to download', () => {
+    render_(paused)
+    expect(screen.getByText(/can’t be kept exactly as it is/)).toBeInTheDocument()
+    expect(screen.getByText(/2 connections are in the source more than once/)).toBeInTheDocument()
+    expect(screen.getByText(/keeps one connection per source, type and target/)).toBeInTheDocument()
+    expect(screen.getByText(/2 values can’t be stored as they are/)).toBeInTheDocument()
+    expect(screen.getByText(/1 not a number \(NaN\), 1 text with NUL characters/)).toBeInTheDocument()
+    expect(screen.getByText('Orders')).toBeInTheDocument()
+    expect(screen.getByText(/Download every version/).closest('a')).toHaveAttribute(
+      'href', '/api/v1/ws1/graph/bootstrap/review?dataSourceId=ds1&kind=copies&format=csv')
+    expect(screen.getByText(/Download every value/).closest('a')).toHaveAttribute(
+      'href', '/api/v1/ws1/graph/bootstrap/review?dataSourceId=ds1&kind=values&format=csv')
+    expect(screen.getByText(/the source graph is not changed/)).toBeInTheDocument()
+  })
+
+  it('continues only once every kind held is decided, then asks, and sends the list it was shown', () => {
+    render_(paused)
+    const steps = screen.getByRole('list', { name: 'Review steps' })
+    expect(within(steps).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      '1Connections held more than once', '2Values to store as text', '3Continue'])
+    const go = screen.getByRole('button', { name: /Continue with these choices/ })
+    expect(go).toBeDisabled()
+    fireEvent.click(screen.getByLabelText(/Merge the copies/))
+    expect(within(steps).getByText(/Connections held more than once/)).toHaveTextContent('(decided)')
+    expect(within(steps).getAllByRole('listitem')[1]).toHaveAttribute('aria-current', 'step')
+    expect(go).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Property to leave out'), { target: { value: 'ts' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Leave this property out' }))
+    fireEvent.click(screen.getByLabelText(/Store them as text/))
+    expect(go).toBeEnabled()
+    fireEvent.click(go)
+    expect(screen.getByText(/2 connection\(s\) are copied merged/)).toBeInTheDocument()
+    expect(screen.getByText(/without ts/)).toBeInTheDocument()
+    expect(decideReviewMutate).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, continue' }))
+    expect(decideReviewMutate).toHaveBeenCalledWith(
+      { fingerprint: 'rv_1', copies: { rule: 'merge', excludeProperties: ['ts'] }, values: 'as_text', reason: undefined },
+      expect.anything())
+  })
+
+  it('says the list changed when the decision is refused for it', () => {
+    decideReviewMutate.mockImplementation((_body, { onError }) =>
+      onError(new BootstrapDecisionError('stale_decision')))
+    render_({ ...paused, review: { ...REVIEW, values: { ...REVIEW.values, count: 0 } } })
+    fireEvent.click(screen.getByLabelText(/Keep the first copy of each/))
+    fireEvent.click(screen.getByRole('button', { name: /Continue with these choices/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, continue' }))
+    expect(screen.getByRole('alert')).toHaveTextContent(/changed — review it again/)
+  })
+
+  it('re-checks the source or gives up, asking first', () => {
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Re-check source/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, start over' }))
+    expect(retryMutate).toHaveBeenCalledWith({ mode: 'restart', reason: undefined }, expect.anything())
+  })
+
+  it('opens the connections one by one', () => {
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Review the connections one by one/ }))
+    expect(screen.getByRole('dialog', { name: 'Connections held more than once' })).toBeInTheDocument()
+  })
+
+  it('tells someone who cannot decide that a manager will', () => {
+    render(<BootstrapProgress job={{ ...base, ...paused } as BootstrapJob} wsId="ws1" dataSourceId="ds1" canManage={false} />)
+    expect(screen.getByText(/Waiting for a workspace manager/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Continue/ })).toBeNull()
+  })
+
+  it('does not show the duplicates decision while it waits on the review', () => {
+    render_({ ...paused, duplicates: DUPLICATES })
+    expect(screen.queryByText('Some identifiers are used more than once')).toBeNull()
+  })
+})
+
+describe('a failed copy says which checks failed, in words', () => {
+  it('lists every blocking check that did not hold', () => {
+    render_({
+      status: 'failed', phase: 'validate', error: 'The source graph changed while we were copying it.',
+      failure: { code: 'integrity', action: 'restart' },
+      report: {
+        checks: [
+          { key: 'edge_sample_matches', ok: false, blocking: true, detail: '3 of 4 re-checked connections match exactly' },
+          { key: 'nodes_seen', ok: true, blocking: true, detail: 'scanned 4 of 4 items' },
+        ],
+        source: { nodes: 4, edges: 4 }, stored: { nodes: 4, edges: 4 }, labels: {}, edgeTypes: {},
+        sampleChecked: 4, sampleMismatched: [], mergedDuplicateConnections: 0, merkle: 'pending',
+      },
+    })
+    expect(screen.getByRole('list', { name: 'Checks that failed' })).toHaveTextContent(
+      '3 of 4 re-checked connections match exactly')
+    expect(screen.queryByText('scanned 4 of 4 items')).toBeNull()
   })
 })

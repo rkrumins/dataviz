@@ -98,12 +98,16 @@ class TestValidation:
         with pytest.raises(ValidationError, match="must be the whole query"):
             _validate_predicate(P(raw))
 
-    def test_a_display_rule_cannot_be_one(self):
-        item = SearchRuleItem.model_validate({"id": "r", "predicate": edges()})
-        with pytest.raises(ValidationError, match="A display rule tags entities"):
-            _validate_items([item])
-        # Counted as a search's own condition, it may.
-        _validate_items([item], rule=False)
+    def test_a_display_rule_may_be_one_its_ends_held_to_a_rules_limits(self):
+        """A rule that styles relationships is a Connections search. It is asked of every
+        relationship on the canvas, so its ends follow lineage one hop, as an entity rule does;
+        counted as a search's own condition, they follow it as far as a search's ends may."""
+        _validate_items([SearchRuleItem.model_validate({"id": "r", "predicate": edges()})])
+        far = SearchRuleItem.model_validate({"id": "r", "predicate": edges(targetWhere={
+            "kind": "related", "axis": "downstream", "maxHops": 2})})
+        with pytest.raises(ValidationError, match="a rule follows lineage one hop"):
+            _validate_items([far])
+        _validate_items([far], rule=False)
 
     def test_inside_a_container_may_be_an_end(self):
         assert _validate_predicate(P(edges(
@@ -130,9 +134,10 @@ class TestValidation:
                 "where": {"kind": "is", "refs": [{"urn": "x"}]}})))
 
     def test_the_edge_filter_is_checked(self):
-        with pytest.raises(ValidationError, match=r"\$.edgePredicate \(mode\).*not 'gt'"):
+        with pytest.raises(ValidationError, match=r"\$.edgePredicate \(mode\)"):
             _validate_predicate(P(edges(edgePredicate={
-                "kind": "edgeProperty", "key": "mode", "op": "gt", "value": 3})))
+                "kind": "edgeProperty", "key": "mode", "op": "gt", "value": "abc",
+                "valueType": "number"})))
 
     def test_an_ends_comparisons_are_resolved(self):
         with pytest.raises(ValidationError, match=r"\$.sourceWhere \(size\)"):

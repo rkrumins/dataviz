@@ -213,6 +213,9 @@ export interface ViewUpdateRequest {
     // change it only through `updateViewVisibility`.
     tags?: string[]
     isPinned?: boolean
+    /** Whether the view is meant to show everything in its source (`config.coverage`),
+     *  written on its own: no config need be sent with it. */
+    coverage?: 'complete' | 'specialised'
 }
 
 export interface ViewListParams {
@@ -935,6 +938,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         grouping: cfg.grouping,
         ...(cfg.membership ? { membership: cfg.membership } : {}),
         ...(cfg.search ? { search: cfg.search } : {}),
+        ...(cfg.coverage ? { coverage: cfg.coverage } : {}),
         isDefault: false,
         // The full tier — carried so the canvas can seed the Share dialog
         // without a re-fetch. `isPublic` survives as a deprecated

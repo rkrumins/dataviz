@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
     ArrowLeft, Bell, BellOff, CheckCircle2, Circle, Crosshair, Eye, EyeOff, Link2, Lock, Loader2,
-    MapPin, MessageSquare, RefreshCw, RotateCcw, Trash2, XCircle,
+    MessageSquare, RefreshCw, RotateCcw, Trash2, XCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
@@ -33,6 +33,8 @@ import { isStale, type DiscussionStatus, type ThreadDetail } from '@/services/di
 import { useDiscussionActions, useMentionSource, useThread } from './useDiscussions'
 import { MessageItem } from './MessageItem'
 import { OverflowMenu } from './OverflowMenu'
+import { EntityAnchor } from './EntityAnchor'
+import { anchorOfThread } from './anchorOf'
 import {
     STATUS_CLASS, STATUS_LABEL, listNames, messageLink, nameOf, stackPerson, subjectNoun,
 } from './discussionText'
@@ -244,10 +246,8 @@ export function ThreadView({ threadId, focusMessageId, onBack, onShowOnCanvas, o
 
                 {thread.entityId && (
                     <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1.5 min-w-0 max-w-full rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-2 py-1 text-[11.5px] font-medium text-amber-800 dark:text-amber-200">
-                            <MapPin className="w-3.5 h-3.5 shrink-0" aria-hidden />
-                            <span className="text-amber-700/80 dark:text-amber-300/80">About</span>
-                            <span className="truncate font-semibold">{thread.entityLabel || thread.entityId}</span>
+                        <span className="inline-flex min-w-0 max-w-full rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-2 py-1 text-[11.5px] font-medium text-amber-800 dark:text-amber-200">
+                            <EntityAnchor entity={anchorOfThread(thread)} variant="full" prefix="About" copy />
                         </span>
                         {onShowOnCanvas && (
                             <button type="button" onClick={() => onShowOnCanvas(thread.entityId!)}

@@ -364,6 +364,18 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
         note: 'The same links in Search Studio: a row an edge, each end with its parent, edge properties as columns.',
         draft: { kind: 'edges', sourceWhere: type('dataset') },
     },
+    edgeFilter: {
+        editorMode: 'form',
+        note: 'Connections filtered on their own properties: logic is stored natively, so every operator reaches it; mode is still kept as a value in the relationship\'s JSON, so it takes is set, is, is not and is one of.',
+        draft: {
+            kind: 'edges',
+            edgeTypes: ['TRANSFORMS'],
+            edgePredicate: { kind: 'edgeGroup', op: 'and', children: [
+                { kind: 'edgeProperty', key: 'logic', op: 'contains', value: 'Query' },
+                { kind: 'edgeProperty', key: 'mode', op: 'eq', value: 'stream' },
+            ] },
+        } as Predicate,
+    },
     compareKeys: {
         editorMode: 'form',
         note: 'One property against another of the same entity: datasets short of their expected row count.',

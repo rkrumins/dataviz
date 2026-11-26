@@ -733,7 +733,9 @@ async def update_view(
     the existing ``updated_by`` is preserved.
 
     The layout and scope in ``config`` are not written here; the stored
-    ones are kept (see ``_keep_config_layout``).
+    ones are kept (see ``_keep_config_layout``). Neither is a coverage it
+    leaves out (see ``_keep_coverage``); ``req.coverage`` writes one on its
+    own, over whatever ``config`` said.
     """
     # populate_existing: the endpoint loaded the row before the lock; read
     # what the lock holds, not that.
@@ -756,8 +758,14 @@ async def update_view(
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
-        _keep_config_layout(req.config, _load_config(row))
+        stored = _load_config(row)
+        _keep_config_layout(req.config, stored)
+        _keep_coverage(req.config, stored)
         row.config = json.dumps(req.config)
+    if req.coverage is not None:
+        config = _load_config(row)
+        config["coverage"] = req.coverage
+        row.config = json.dumps(config)
     # visibility is NOT written here: it is a security field with its own
     # authorization (publish gate) — see update_visibility. The endpoint
     # 422s before reaching this function; skipping it here keeps a direct
@@ -796,6 +804,19 @@ def _keep_display_rules(new_layout: Any, previous_layout: Any) -> None:
         new_layout["displayRules"] = rules
     else:
         new_layout.pop("displayRules", None)
+
+
+def _keep_coverage(new_config: Any, stored_config: dict) -> None:
+    """Keep the stored ``coverage`` on a whole replacement config that says nothing of it.
+
+    ``coverage`` says whether a view is meant to show everything in its source ('complete') or
+    only what it was made to show ('specialised'). It is changed on its own
+    (``ViewUpdateRequest.coverage``), so most config saves never mention it: one built by a
+    client that doesn't know the key, or from a copy read before it was set, would otherwise
+    drop it, and the view would go back to saying neither. A config that does carry the key
+    writes it."""
+    if isinstance(new_config, dict) and "coverage" not in new_config and "coverage" in stored_config:
+        new_config["coverage"] = stored_config["coverage"]
 
 
 def _keep_config_layout(new_config: Any, stored_config: dict) -> None:

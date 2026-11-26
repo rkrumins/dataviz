@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
+from pydantic import TypeAdapter
 
 from backend.app.providers import draft_search
 from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
@@ -28,8 +29,9 @@ from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import (
     DegreePredicate, DescendantOfPredicate, EntityTypePredicate, GroupPredicate,
-    HasPropertyPredicate, IsPredicate, NodeRef, PropertyPredicate, SearchCountsRequest,
-    SearchMembershipRequest, SearchOptions, SearchQuery, SearchScope, TagPredicate, TextPredicate,
+    HasPropertyPredicate, IsPredicate, NodeRef, Predicate, PropertyPredicate, SearchCountsRequest,
+    SearchMembershipEdge, SearchMembershipRequest, SearchOptions, SearchQuery, SearchScope,
+    TagPredicate, TextPredicate,
 )
 from backend.common.predicate_eval import NODE_FIELDS, matches
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
@@ -86,12 +88,48 @@ class Main(StubDeepSearchProvider):
         super().__init__(nodes=nodes, edges=edges, lineage_edge_types=["FLOWS_TO"])
         self.versions: List[str] = []
         self.catalog_complete = True
+        self.between: List[Any] = []
+        self.at: List[Any] = []
 
     def physical_graph_id(self):
         return "falkor:main"
 
     def _get_containment_edge_types(self):
         return ["CONTAINS"]
+
+    def _get_lineage_edge_types(self):
+        return ["FLOWS_TO"]
+
+    def _stored(self, e: Dict[str, Any]) -> Dict[str, Any]:
+        """``properties(r)`` of a fixture edge as FalkorDB stores it — each user property in the
+        JSON bag."""
+        import json as _json
+        return {"id": e["id"], "gvHash": "h", "properties": _json.dumps(e.get("properties") or {}),
+                **({"confidence": e["confidence"]} if "confidence" in e else {})}
+
+    async def relationships_between(self, pairs):
+        """As FalkorDB reads them: by the two ends, never by an id."""
+        self.between.append(list(pairs))
+        wanted = set(pairs)
+        out: Dict[Any, List[Any]] = {}
+        for e in self._edges:
+            if (e["source"], e["target"]) in wanted:
+                out.setdefault((e["source"], e["target"]), []).append((e["type"], self._stored(e)))
+        return out
+
+    async def relationships_at(self, urns, *, edge_types=None, except_types=(), limit):
+        """As FalkorDB reads them: at each of ``urns`` main holds, both ways, each once — or
+        None when there are more than ``limit``."""
+        from backend.app.providers.falkordb_provider import _edge_from_row
+        from backend.common.derived_artifacts import is_derived_edge_type
+        self.at.append((list(urns), edge_types, list(except_types), limit))
+        held, skip = set(urns) & set(self._by_urn), {t.upper() for t in except_types}
+        named = None if edge_types is None else {t.upper() for t in edge_types}
+        found = [_edge_from_row(e["source"], e["target"], e["type"], self._stored(e))
+                 for e in self._edges if (e["source"] in held or e["target"] in held)
+                 and not is_derived_edge_type(e["type"])
+                 and (e["type"].upper() in named if named is not None else e["type"].upper() not in skip)]
+        return None if len(found) > limit else found
 
     async def deep_search_count(self, query, *, context=None, advance=True):
         self.versions.append(context.data_version)
@@ -130,19 +168,25 @@ async def catalog_of(provider: StubDeepSearchProvider, scope, context, complete=
 
 class Draft:
     """The draft's side: a scripted versioning service over ``MAIN``, committed to by ``commit``
-    — what each commit wrote kept by seq, so a fold can read the draft as it was."""
+    — what each commit wrote kept by seq, so a fold can read the draft as it was. ``cascade``:
+    deleting a node deletes its relationships in the same commit, as the service does."""
 
-    def __init__(self):
-        self.main = {n["urn"]: dict(n) for n in MAIN}
+    def __init__(self, main_nodes=MAIN, main_edges=MAIN_EDGES, cascade=False):
+        self.main = {n["urn"]: dict(n) for n in main_nodes}
         self.nodes = {u: dict(n) for u, n in self.main.items()}
-        self.edges = {e["id"]: dict(e) for e in MAIN_EDGES}
+        self.edges = {e["id"]: dict(e) for e in main_edges}
+        self.main_edges = list(main_edges)
+        self.cascade = cascade
         self.seq = 0
         self.history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         # The type of each edge row a commit wrote — None for a delete, whose row names none.
         self.edge_rows: Dict[int, List[Optional[str]]] = {}
+        # Each edge a commit wrote, as it wrote it — None for a delete.
+        self.edge_history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         self.loads: List[List[str]] = []
         self.windows: List[Any] = []
         self.as_of: List[Any] = []
+        self.edges_as_of: List[Any] = []
         # Its own graph: no patch set another test's draft cached is ever read for it.
         self.graph_id = f"g-{uuid.uuid4().hex[:8]}"
 
@@ -150,7 +194,14 @@ class Draft:
         self.seq += 1
         self.history[self.seq] = {f"id-{u}": (dict(n, urn=u) if n else None)
                                   for u, n in nodes.items()}
-        self.edge_rows[self.seq] = [e["type"] for e in add_edges] + [None for _ in drop_edges]
+        gone = {u for u, n in nodes.items() if n is None}
+        drops = list(drop_edges) + ([e for e in self.edges.values() if e["id"] not in
+                                     {d["id"] for d in drop_edges}
+                                     and (e["source"] in gone or e["target"] in gone)]
+                                    if self.cascade else [])
+        self.edge_rows[self.seq] = [e["type"] for e in add_edges] + [None for _ in drops]
+        self.edge_history[self.seq] = {**{e["id"]: dict(e) for e in add_edges},
+                                       **{e["id"]: None for e in drops}}
         for u, n in nodes.items():
             if n is None:
                 self.nodes.pop(u, None)
@@ -158,8 +209,11 @@ class Draft:
                 self.nodes[u] = dict(n, urn=u)
         for e in add_edges:
             self.edges[e["id"]] = e
-        for e in drop_edges:
+        for e in drops:
             self.edges.pop(e["id"], None)
+
+    def edges_written(self) -> set:
+        return {eid for writes in self.edge_history.values() for eid in writes}
 
     def truth(self) -> StubDeepSearchProvider:
         return StubDeepSearchProvider(nodes=list(self.nodes.values()),
@@ -184,9 +238,9 @@ class Draft:
                                              "entityType": now["entityType"],
                                              "displayName": now["displayName"], "lazy": True})
                 delta["nodesNew"].append(u)
-            elif now is not None and now != was:
+            elif now is not None and was is not None:
                 delta["nodesModified"].append({"urn": u, "entityId": f"id-{u}"})
-        main_edges = {e["id"]: e for e in MAIN_EDGES}
+        main_edges = {e["id"]: e for e in self.main_edges}
         for eid, e in self.edges.items():
             if eid not in main_edges:
                 delta["edgesUpsert"].append({"id": eid, "sourceUrn": e["source"],
@@ -209,17 +263,47 @@ class Draft:
         return {u: truth._ancestors(truth._by_urn[u]) for u in urns if u in truth._by_urn}
 
     async def draft_search_window(self, *, graph_id, branch_id, commit_id, since_seq=None,
-                                  limit=0, containment_types=None):
+                                  limit=0, containment_types=None, edge_ids=False):
         seq = int(commit_id.split("-")[1]) if commit_id else None
         self.windows.append((since_seq, seq))
+        out: Dict[str, Any] = {"seq": seq, "nodes": None, "edges": False, "renamed": False,
+                               **({"edgeIds": None} if edge_ids else {})}
         if since_seq is None:
-            return {"seq": seq, "nodes": None, "edges": False}
+            return out
         nodes = sorted({eid for s, writes in self.history.items()
                         if since_seq < s <= seq for eid in writes})
+        written = sorted({eid for s, writes in self.edge_history.items()
+                          if since_seq < s <= seq for eid in writes})
         moves = {t.upper() for t in containment_types or ()}
         edges = any(t is None or containment_types is None or t.upper() in moves
                     for s, rows in self.edge_rows.items() if since_seq < s <= seq for t in rows)
-        return {"seq": seq, "nodes": nodes if len(nodes) <= limit else None, "edges": edges}
+        if containment_types is not None and not edges:
+            # What each edge was before the window: retyped out of the hierarchy, it moved things.
+            mains = {e["id"]: e for e in self.main_edges}
+            for eid in written:
+                held = [w[eid] for s, w in sorted(self.edge_history.items())
+                        if s <= since_seq and eid in w]
+                was = held[-1] if held else mains.get(eid)
+                if was is not None and (not was.get("type") or was["type"].upper() in moves):
+                    edges = True
+            edges = edges or len(written) > limit
+        out.update(nodes=nodes if len(nodes) <= limit else None, edges=edges)
+        if edge_ids:
+            out["edgeIds"] = written if len(written) <= limit else None
+        return out
+
+    async def draft_edges_as_of(self, *, graph_id, branch_id, entity_ids, seq):
+        self.edges_as_of.append((list(entity_ids), seq))
+        out = {}
+        for eid in entity_ids:
+            held = [w[eid] for s, w in sorted(self.edge_history.items()) if s <= seq and eid in w]
+            if held:
+                e = held[-1]
+                out[eid] = None if e is None else {
+                    "id": eid, "sourceUrn": e["source"], "targetUrn": e["target"],
+                    "edgeType": e["type"], "confidence": e.get("confidence"),
+                    "properties": e.get("properties") or {}}
+        return out
 
     async def draft_nodes_as_of(self, *, graph_id, branch_id, entity_ids, seq):
         self.as_of.append((list(entity_ids), seq))
@@ -252,9 +336,9 @@ RULES = {
 }
 
 
-def _first_draft() -> Draft:
+def _first_draft(draft: Optional[Draft] = None) -> Draft:
     """A draft that changes c2, removes c3 and creates c4 under t2."""
-    draft = Draft()
+    draft = draft or Draft()
     draft.commit({"c2": {**draft.main["c2"], "tier": "gold", "rows": 50},
                   "c3": None,
                   "c4": {"entityType": "Column", "displayName": "phone", "tier": "gold",
@@ -517,6 +601,112 @@ async def test_membership_of_a_relationship_rule_is_mains_less_what_the_draft_re
     assert out["notes"] == [draft_search.MEMBERSHIP_MAINS.format(n=1)]
 
 
+class EdgeDraft(Draft):
+    """A draft that serves its relationships' values as the versioning service does."""
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node",
+                               as_of_seq=None):
+        if kind != "edge":
+            return await super().overlay_payloads(graph_id=graph_id, branch_id=branch_id,
+                                                  entity_ids=entity_ids, kind=kind)
+        return [{"id": e, "sourceUrn": self.edges[e]["source"], "targetUrn": self.edges[e]["target"],
+                 "edgeType": self.edges[e]["type"], "properties": self.edges[e].get("properties") or {}}
+                for e in entity_ids if e in self.edges]
+
+
+P_EDGES = TypeAdapter(Predicate).validate_python
+
+
+def _flow(src, tgt, **props):
+    return {"id": f"e:{src}>{tgt}", "source": src, "target": tgt, "type": "FLOWS_TO", "properties": props}
+
+
+EDGE_RULES = {
+    "to_gold": P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "targetWhere": {
+        "kind": "property", "key": "tier", "op": "eq", "value": "gold"}}),
+    "streams": P_EDGES({"kind": "edges", "edgePredicate": {
+        "kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}}),
+}
+
+
+def _asked_edges(draft, ids):
+    held = {**{e["id"]: e for e in MAIN_EDGES}, **draft.edges}
+    return [SearchMembershipEdge(id=i, source=held[i]["source"], target=held[i]["target"]) for i in ids]
+
+
+async def test_edge_membership_judges_the_relationships_the_draft_changed_on_the_draft():
+    """c2 → c4 and c1 → c4 are new in the draft (c4 created gold), c1 → c3 lost its end (c3
+    removed): each is answered as the draft holds it — the truth over the draft's graph."""
+    draft = _first_draft(EdgeDraft())
+    draft.commit({}, add_edges=[_flow("c2", "c4", mode="stream"), _flow("c1", "c4", mode="batch")])
+    asked = _asked_edges(draft, ["e:c1>c3", "e:c2>c4", "e:c1>c4"])
+    items = list(EDGE_RULES.items())
+    out = await _overlay(draft).deep_search_edge_membership(SCOPE, items, asked, context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": ["e:c2>c4", "e:c1>c4"],
+                                                 "streams": ["e:c2>c4"]}
+    assert out["notes"] == []
+    # Main alone: c1 → c3 still reaches a gold column, and the draft's relationships are unknown.
+    main = await Main().deep_search_edge_membership(SCOPE, items, asked)
+    assert main["matches"] == {"to_gold": ["e:c1>c3"], "streams": []}
+
+
+async def test_edge_membership_of_a_relationship_the_draft_removed_is_nothing():
+    draft = EdgeDraft()
+    draft.commit({}, drop_edges=[_flow("c1", "c3")])
+    asked = _asked_edges(draft, ["e:c1>c3"])
+    out = await _overlay(draft).deep_search_edge_membership(
+        SCOPE, [("to_gold", EDGE_RULES["to_gold"])], asked, context=CONTEXT)
+    assert out["matches"] == {"to_gold": []}
+
+
+async def test_edge_membership_judges_one_whose_end_alone_changed_on_the_draft():
+    """c1 → c2 is main's, unchanged; the draft changed c2 to gold, so it now reaches a gold
+    column: main's values, read between its ends, judged on the draft's ends — no note."""
+    edges = [*MAIN_EDGES, _flow("c1", "c2", mode="stream")]
+    main = Main(edges=edges)
+    draft = _first_draft_on(EdgeDraft(main_edges=edges))
+    asked = [SearchMembershipEdge(id="e:c1>c2", source="c1", target="c2")]
+    items = list(EDGE_RULES.items())
+    out = await _overlay(draft, main).deep_search_edge_membership(SCOPE, items, asked,
+                                                                  context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": ["e:c1>c2"], "streams": ["e:c1>c2"]}
+    assert out["notes"] == []
+    assert main.between == [[("c1", "c2")]], "read between its ends, never by its id"
+    assert (await main.deep_search_edge_membership(SCOPE, items, asked))["matches"] == \
+        {"to_gold": [], "streams": ["e:c1>c2"]}
+
+
+async def test_edge_membership_of_one_whose_end_changed_so_it_no_longer_matches_is_nothing():
+    """c1 → c3 is main's, unchanged, and reaches a gold column there; the draft made c3 bronze."""
+    draft = EdgeDraft()
+    draft.commit({"c3": {**draft.main["c3"], "tier": "bronze"}})
+    asked = _asked_edges(draft, ["e:c1>c3", "e:t1>c1"])
+    items = [("to_gold", EDGE_RULES["to_gold"]),
+             ("any_to_gold", P_EDGES({"kind": "edges", "edgeClass": "any", "targetWhere": {
+                 "kind": "property", "key": "tier", "op": "eq", "value": "gold"}}))]
+    out = await _overlay(draft).deep_search_edge_membership(SCOPE, items, asked, context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": [], "any_to_gold": ["e:t1>c1"]}
+    assert out["notes"] == []
+    assert (await Main().deep_search_edge_membership(SCOPE, items, asked))["matches"] == \
+        {"to_gold": ["e:c1>c3"], "any_to_gold": ["e:c1>c3", "e:t1>c1"]}
+
+
+async def test_edge_membership_of_one_whose_end_changed_is_mains_when_its_value_cant_be_read():
+    class NoBetween(Main):
+        relationships_between = None
+
+    draft = EdgeDraft()
+    draft.commit({"c3": {**draft.main["c3"], "tier": "bronze"}})
+    out = await _overlay(draft, NoBetween()).deep_search_edge_membership(
+        SCOPE, [("to_gold", EDGE_RULES["to_gold"])], _asked_edges(draft, ["e:c1>c3"]),
+        context=CONTEXT)
+    assert out["matches"] == {"to_gold": ["e:c1>c3"]}
+    assert out["notes"] == [draft_search.MEMBERSHIP_NOT_DRAFT_AWARE]
+
+
 async def test_membership_falls_back_to_main_when_the_draft_cant_be_read():
     class Broken(Draft):
         async def overlay_version(self, **kw):
@@ -752,6 +942,125 @@ async def test_draft_matches_are_none_when_the_draft_cant_answer_for_them(monkey
     assert asked == []
 
 
+class _EdgeOverlay:
+    """A draft's patch set of relationships, for ``edge_draft_matches``: ``upsert`` (id → its
+    type, ends and properties), ``removed`` ids and the urns of the nodes it changed."""
+
+    def __init__(self, upsert, removed=(), nodes=(), fork=False, lineage=("FLOWS_TO",)):
+        from backend.common.models.graph import GraphEdge
+        self.edges = {eid: GraphEdge(id=eid, edgeType=t, sourceUrn=s, targetUrn=g, properties=props)
+                      for eid, (t, s, g, props) in upsert.items()}
+        self.removed, self.nodes, self.fork, self.lineage = set(removed), set(nodes), fork, lineage
+        self.loaded: List[List[str]] = []
+
+    def _searches_draft(self):
+        return not self.fork
+
+    def _get_containment_edge_types(self):
+        return ["CONTAINS"]
+
+    def _get_lineage_edge_types(self):
+        if self.lineage is None:
+            raise RuntimeError("no ontology")
+        return list(self.lineage)
+
+    async def _delta_(self):
+        async def edges(batch):
+            self.loaded.append([e.id for e in batch])
+            return batch
+        return SimpleNamespace(edge_upsert=self.edges, edge_remove={e: None for e in self.removed},
+                               node_modified={u: f"id-{u}" for u in self.nodes}, node_upsert={},
+                               node_remove=set(), shared={}, edges=edges)
+
+
+def _ends_judge(meets: Dict[str, set], asked=None, notes=(), refuse=False):
+    """Membership over ``meets`` (rule id → the urns it matches): what each end meets."""
+    from backend.app.services.advanced_search_service import ValidationError
+    from backend.common.models.search import SearchMembershipResult
+
+    async def judge(request):
+        if refuse:
+            raise ValidationError("not a rule")
+        if asked is not None:
+            asked.append((sorted(request.urns), [i.predicate.kind for i in request.items]))
+        return SearchMembershipResult(matches={i.id: [u for u in request.urns if u in meets.get(i.id, ())]
+                                               for i in request.items}, notes=list(notes))
+    return judge
+
+
+async def test_edge_draft_matches_are_the_relationships_the_draft_made_or_changed_that_match():
+    """Of the types the search takes — every link by default, never the hierarchy's or a roll-up —
+    filtered on the draft's values, with the source meeting From and the target To (or, either way
+    round, the other); one the draft removed is never asked."""
+    overlay = _EdgeOverlay({
+        "e1": ("FLOWS_TO", "a", "b", {"tier": "gold"}), "e2": ("FEEDS", "b", "a", {"tier": "gold"}),
+        "e3": ("CONTAINS", "a", "b", {"tier": "gold"}), "e4": ("AGGREGATED", "a", "b", {"tier": "gold"}),
+        "e5": ("FLOWS_TO", "a", "c", {"tier": "silver"}), "e6": ("FLOWS_TO", "a", "b", {})},
+        removed=["e6"], nodes=["b"])
+    asked = []
+    gold = {"kind": "edgeProperty", "key": "tier", "op": "eq", "value": "gold"}
+    from_a = {"kind": "edges", "edgePredicate": gold, "sourceWhere": {"kind": "is", "refs": [{"urn": "a"}]}}
+    out = await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, from_a,
+                                                _ends_judge({"from": {"a"}, "to": {"a", "b"}}, asked))
+    assert out == {"ids": ["e1"], "unsearched": "ends"}, "the draft changed b: an end may now match"
+    assert overlay.loaded == [["e1", "e2", "e5"]]
+    assert asked == [(["a", "b"], ["is", "all"])], "e5 filtered out first"
+    either = {**from_a, "direction": "either"}
+    out = await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, either,
+                                                _ends_judge({"from": {"a"}, "to": {"a", "b"}}))
+    assert out == {"ids": ["e1", "e2"], "unsearched": "ends"}
+    # A class, or named types; no end tested, so no note of the ends.
+    for predicate, ids in (({"kind": "edges", "edgeClass": "lineage"}, ["e1", "e5"]),
+                           ({"kind": "edges", "edgeClass": "containment"}, ["e3"]),
+                           ({"kind": "edges", "edgeClass": "any"}, ["e1", "e2", "e3", "e5"]),
+                           ({"kind": "edges", "edgeTypes": ["feeds"]}, ["e2"])):
+        out = await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, predicate,
+                                                    _ends_judge({"from": {"a", "b"}, "to": {"a", "b", "c"}}))
+        assert out == {"ids": ids}, predicate
+
+
+async def test_edge_draft_matches_are_none_when_the_draft_cant_answer_for_them(monkeypatch):
+    overlay = _EdgeOverlay({"e1": ("FLOWS_TO", "a", "b", {})})
+    edges = {"kind": "edges", "sourceWhere": {"kind": "isOrphan"}}
+    meets = {"from": {"a"}, "to": {"b"}}
+    for judge, why in ((_ends_judge(meets, notes=[draft_search.RELATIONSHIPS]), "inexact"),
+                       (_ends_judge(meets, refuse=True), "inexact"),
+                       (_ends_judge(meets, notes=[draft_search.MEMBERSHIP_NOT_DRAFT_AWARE]), "unread")):
+        assert await draft_search.edge_draft_matches(overlay, {"viewId": "v"}, edges, judge) == \
+            {"unsearched": why}
+    assert await draft_search.edge_draft_matches(
+        _EdgeOverlay({}, fork=True), {"viewId": "v"}, edges, _ends_judge(meets)) == {"unsearched": "fork"}
+    assert await draft_search.edge_draft_matches(
+        _EdgeOverlay({}, lineage=None), {"viewId": "v"}, {"kind": "edges", "edgeClass": "lineage"},
+        _ends_judge(meets)) == {"unsearched": "inexact"}
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 0)
+    assert await draft_search.edge_draft_matches(
+        overlay, {"viewId": "v"}, edges, _ends_judge(meets)) == {"unsearched": "too_large"}
+
+
+def test_an_edge_filter_reads_its_own_fields_and_its_properties_by_every_operator():
+    from backend.common.models.search import (
+        EdgeGroupPredicate, EdgeHasPropertyPredicate, EdgePropertyPredicate,
+    )
+    from backend.common.predicate_eval import edge_matches
+
+    edge = {"id": "e1", "confidence": 0.8, "properties": {"tier": "Gold", "rank": 5}}
+    assert edge_matches(edge, None)
+    assert edge_matches(edge, EdgePropertyPredicate(key="confidence", op="gt", value=0.5, valueType="number"))
+    assert edge_matches(edge, EdgePropertyPredicate(key="tier", op="eq", value="gold"))      # in any case
+    assert not edge_matches(edge, EdgePropertyPredicate(key="tier", op="eq", value="gold",
+                                                        caseSensitive=True))
+    assert edge_matches(edge, EdgePropertyPredicate(key="rank", op="in", value=[5.0], valueType="number"))
+    # A user's property is stored natively within the name budget: every operator reads it.
+    assert edge_matches(edge, EdgePropertyPredicate(key="rank", op="gt", value=4, valueType="number"))
+    assert edge_matches(edge, EdgePropertyPredicate(key="tier", op="startsWith", value="go"))
+    assert not edge_matches(edge, EdgePropertyPredicate(key="rank", op="between", value=[6, 9],
+                                                        valueType="number"))
+    assert edge_matches(edge, EdgeGroupPredicate(op="not", children=[EdgeHasPropertyPredicate(key="owner")]))
+    assert not edge_matches(edge, EdgeGroupPredicate(op="and", children=[
+        EdgeHasPropertyPredicate(key="tier"), EdgeHasPropertyPredicate(key="confidence", negate=True)]))
+
+
 # ---------------------------------------------------------------------------
 # The shared evaluator: the FalkorDB compiler's meaning
 # ---------------------------------------------------------------------------
@@ -792,3 +1101,588 @@ def test_what_cant_be_answered_on_the_drafts_values_is_said():
                                 set()) == draft_search.PLATFORM_FIELD
     assert draft_search.inexact(RULES["gold"], {"x"}, frozenset({"x"})) == \
         draft_search.NAMES_CHANGED
+    # A rule that styles relationships is answered by its ends: an edge filter is its own values.
+    assert draft_search.inexact(EDGE_RULES["streams"], set()) is None
+    assert draft_search.inexact(EDGE_RULES["to_gold"], set()) is None
+    assert draft_search.inexact(P_EDGES({"kind": "edges", "sourceWhere": {"kind": "isOrphan"}}),
+                                set()) == draft_search.RELATIONSHIPS
+    assert draft_search.inexact(EDGE_RULES["to_gold"], {"x"}, frozenset({"x"})) == \
+        draft_search.NAMES_CHANGED
+
+
+# ---------------------------------------------------------------------------
+# The relationship catalog
+# ---------------------------------------------------------------------------
+
+#: Main's relationships with properties — one to an entity outside the view (x1, under no root).
+REL_NODES = MAIN + [{"urn": "x1", "entityType": "Table", "displayName": "outside"}]
+REL_EDGES = MAIN_EDGES[:-1] + [
+    {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 5}},
+    {**_edge("c2", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "owner": "kim"}},
+    {**_edge("c1", "x1", "FLOWS_TO"), "properties": {"mode": "zzz"}},
+]
+
+
+def _rel_stats(nodes, edges, scope) -> CatalogStats:
+    """The relationship catalog of a graph, read whole: every relationship with both ends in
+    the scope, by type, its properties as stored."""
+    truth = StubDeepSearchProvider(nodes=nodes, edges=edges, lineage_edge_types=["FLOWS_TO"])
+    inside = {n["urn"] for n in truth._in_scope(scope)}
+    stats = CatalogStats()
+    for e in edges:
+        if e["source"] in inside and e["target"] in inside:
+            stats.add_entities(e["type"], 1)
+            stats.add_properties(e["type"], e.get("properties") or {}, frozenset())
+    return stats
+
+
+class RelMain(Main):
+    """Main holding ``REL_EDGES`` (or ``edges``): its relationship catalog, and its relationships
+    read between their ends (and at an entity) as FalkorDB stores them — each user property in
+    the JSON bag."""
+
+    def __init__(self, nodes=REL_NODES, edges=REL_EDGES):
+        super().__init__(nodes=nodes, edges=edges)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False, subject="entities"):
+        assert subject == "relationships"
+        from backend.app.providers.falkordb_search.session import store_for
+        stats = _rel_stats(self._nodes, self._edges, scope)
+        session = Session(f"rcat-{uuid.uuid4().hex[:8]}", "catalog:relationships",
+                          context.data_version, None, 0, [], [], 1, scanned=1,
+                          count=sum(stats.entities.values()), status=COMPLETE)
+        await store_for(self).save(session, None, 600, accumulator=stats.to_json())
+        return answer_of(stats, session, context, subject="relationships")
+
+
+class RelDraft(Draft):
+    """A draft over ``REL_EDGES`` (or ``edges``): its patch set names each relationship it added,
+    changed (with where main holds it) or removed, and serves each one's value."""
+
+    def __init__(self, nodes=REL_NODES, edges=REL_EDGES, cascade=False):
+        super().__init__(nodes, edges, cascade)
+
+    def truth(self) -> StubDeepSearchProvider:
+        return StubDeepSearchProvider(nodes=list(self.nodes.values()),
+                                      edges=list(self.edges.values()),
+                                      lineage_edge_types=["FLOWS_TO"])
+
+    async def branch_overlay_delta(self, *, graph_id, branch_id):
+        delta = await super().branch_overlay_delta(graph_id=graph_id, branch_id=branch_id)
+        main_edges = {e["id"]: e for e in self.main_edges}
+        delta["edgesUpsert"], delta["edgesRemove"] = [], []
+        written = self.edges_written()
+        for eid, e in self.edges.items():
+            held = main_edges.get(eid)
+            if held is not None and eid not in written:
+                continue                            # main's: the draft never wrote it
+            row = {"id": eid, "sourceUrn": e["source"], "targetUrn": e["target"],
+                   "edgeType": e["type"], "lazy": True}
+            if held is not None:
+                row["was"] = {"sourceUrn": held["source"], "targetUrn": held["target"],
+                              "edgeType": held["type"]}
+            delta["edgesUpsert"].append(row)
+        for eid, e in main_edges.items():
+            if eid not in self.edges:
+                delta["edgesRemove"].append({"id": eid, "sourceUrn": e["source"],
+                                             "targetUrn": e["target"], "edgeType": e["type"]})
+        return delta
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node",
+                               as_of_seq=None):
+        if kind != "edge":
+            return await super().overlay_payloads(graph_id=graph_id, branch_id=branch_id,
+                                                  entity_ids=entity_ids, kind=kind)
+        return [{"id": eid, "sourceUrn": self.edges[eid]["source"],
+                 "targetUrn": self.edges[eid]["target"], "edgeType": self.edges[eid]["type"],
+                 "properties": self.edges[eid].get("properties") or {}}
+                for eid in entity_ids if eid in self.edges]
+
+
+def _rel_draft() -> RelDraft:
+    """A draft that changes one relationship, removes one, adds one — and changes the one to
+    the entity outside the view, which stays out."""
+    draft = RelDraft()
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "stream", "lag": 9}},
+        {**_edge("c3", "c1", "FLOWS_TO"), "properties": {"mode": "batch", "since": 2024}},
+        {**_edge("c1", "x1", "FLOWS_TO"), "properties": {"mode": "yyy"}},
+    ], drop_edges=[_edge("c2", "c3", "FLOWS_TO")])
+    return draft
+
+
+async def test_the_relationship_catalog_is_the_drafts():
+    draft, main = _rel_draft(), RelMain()
+    out = await _overlay(draft, main).deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=2000,
+                                                         subject="relationships")
+    truth = _rel_stats(list(draft.nodes.values()), list(draft.edges.values()), SCOPE)
+    want = answer_of(truth, Session("t", "t", "1", None, 0, [], [], 1, status=COMPLETE,
+                                    count=sum(truth.entities.values())),
+                     CONTEXT, subject="relationships")
+    assert out["status"] == "complete" and out["subject"] == "relationships"
+    assert out["entities"] == want["entities"]
+    assert out["entityTypes"] == want["entityTypes"]
+    got = {p["key"]: p for p in out["properties"]}
+    assert set(got) == {p["key"] for p in want["properties"]} == {"mode", "lag", "since"}
+    for p in want["properties"]:
+        for field in ("count", "byEntityType", "kinds", "distinct", "values"):
+            assert got[p["key"]][field] == p[field], (p["key"], field)
+    # "owner" went with the removed relationship; "zzz" and "yyy" are outside the view.
+    assert {v["value"] for v in got["mode"]["values"]} == {"stream", "batch"}
+    # Main's side was read between each relationship's ends, never by its id.
+    assert main.between and all(isinstance(p, tuple) for part in main.between for p in part)
+
+
+async def test_a_relationship_catalog_of_a_draft_too_large_is_mains_said_so(monkeypatch):
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 1)
+    out = await _overlay(_rel_draft(), RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    assert draft_search.TOO_LARGE_RELATIONSHIP_CATALOG.format(n=1) in out["notes"]
+    assert {p["key"] for p in out["properties"]} == {"mode", "lag", "owner"}
+
+
+# ---------------------------------------------------------------------------
+# A relationship rule's count
+# ---------------------------------------------------------------------------
+
+#: Main's relationships for relationship rules' counts: two types of link and the hierarchy, with
+#: properties — one to an entity outside the view (x1), one with both ends the draft changes.
+COUNT_EDGES = REL_EDGES + [
+    {**_edge("c3", "c2", "FLOWS_TO"), "properties": {"mode": "stream"}},
+    {**_edge("t1", "t2", "FLOWS_TO"), "properties": {"mode": "batch"}},
+    {**_edge("t2", "c1", "USES"), "properties": {"mode": "stream"}},
+]
+
+_GOLD = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}
+_STREAM = {"kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}
+
+COUNT_RULES = {
+    "links": P_EDGES({"kind": "edges"}),
+    "to_gold": EDGE_RULES["to_gold"],
+    "streams": EDGE_RULES["streams"],
+    "stream_to_gold": P_EDGES({"kind": "edges", "edgePredicate": _STREAM, "targetWhere": _GOLD}),
+    "gold_either_way": P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "direction": "either",
+                                "sourceWhere": _GOLD}),
+    "gold_and_table": P_EDGES({"kind": "edges", "edgeClass": "any", "direction": "either",
+                               "sourceWhere": _GOLD,
+                               "targetWhere": {"kind": "entityType", "op": "in", "values": ["table"]}}),
+    "from_big": P_EDGES({"kind": "edges", "edgeClass": "lineage", "sourceWhere": {
+        "kind": "property", "key": "rows", "op": "gt", "value": 8, "valueType": "number"}}),
+    "holds_gold": P_EDGES({"kind": "edges", "edgeClass": "containment", "targetWhere": _GOLD}),
+}
+
+
+def _count_draft() -> RelDraft:
+    """A draft that changes entities at the ends of relationships it doesn't change — c2 now
+    gold, c3 no longer, c1's rows; c3 → c2 has both ends changed — and adds (c4 under t2, and c4
+    → c1), changes (c1 → c3's values; e:c1>x1 moved to c1 → c2) and removes (c2 → c3)
+    relationships."""
+    draft = RelDraft(REL_NODES, COUNT_EDGES)
+    draft.commit({"c1": {**draft.main["c1"], "rows": 1},
+                  "c2": {**draft.main["c2"], "tier": "gold"},
+                  "c3": {**draft.main["c3"], "tier": "bronze"},
+                  "c4": {"entityType": "Column", "displayName": "phone", "tier": "gold", "rows": 30}},
+                 add_edges=[_edge("t2", "c4"),
+                            {**_edge("c4", "c1", "FLOWS_TO"), "properties": {"mode": "stream"}},
+                            {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "stream", "lag": 9}},
+                            {"id": "e:c1>x1", "source": "c1", "target": "c2", "type": "FLOWS_TO",
+                             "properties": {"mode": "batch"}}],
+                 drop_edges=[_edge("c2", "c3", "FLOWS_TO")])
+    return draft
+
+
+async def _main_counts(main, scope, items):
+    return {rid: (await main.deep_search_count(SearchQuery(predicate=p, scope=scope),
+                                               context=CONTEXT))["count"] for rid, p in items}
+
+
+@pytest.mark.parametrize("scope", [SCOPE, TYPED], ids=["roots", "types"])
+async def test_relationship_counts_are_the_drafts(scope):
+    """Main's count moved by every relationship whose match the draft changes — those it adds,
+    changes or removes, and those at an entity it changes — beside an entity rule's."""
+    draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+    items = [*COUNT_RULES.items(), ("gold", RULES["gold"])]
+    counts, deltas = await _count(_overlay(draft, main), scope, items)
+    assert deltas["status"] == "complete" and deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, scope, items)
+    mains = await _main_counts(RelMain(REL_NODES, COUNT_EDGES), scope, items)
+    assert (mains["to_gold"], counts["to_gold"]) == (2, 3)
+    assert {rid for rid in counts if counts[rid] != mains[rid]} >= {
+        "to_gold", "streams", "stream_to_gold", "gold_either_way", "from_big", "gold"}
+    # Main's relationships at what the draft changed: of the rules' types, never a roll-up — and
+    # never at an entity the draft created, which main doesn't hold.
+    assert [(urns, types, skip) for urns, types, skip, _ in main.at] == \
+        [(["c1", "c2", "c3"], None, [])]
+
+
+async def test_relationship_counts_of_a_draft_that_removes_an_entity():
+    """A relationship at an entity the draft removed matches nothing on the draft, whether the
+    patch set removes it too (t1 → c1) or not (c1 → c3, c1 → x1, t2 → c1)."""
+    draft, main = RelDraft(REL_NODES, COUNT_EDGES), RelMain(REL_NODES, COUNT_EDGES)
+    draft.commit({"c1": None}, drop_edges=[_edge("t1", "c1")])
+    items = list(COUNT_RULES.items())
+    counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert counts["streams"] == 1                       # c3 → c2; t2 → c1 went with c1
+
+
+async def test_a_relationship_rule_read_takes_only_the_rules_types():
+    """Named types and classes are one read's types; every link is every type but the
+    hierarchy's, unless a rule takes it too. A rule whose ends no change moves (``streams``: from
+    and to anything) reads none."""
+    draft = _count_draft()
+    for rules, want, read in (
+            ([COUNT_RULES["to_gold"], COUNT_RULES["from_big"]], (["FLOWS_TO"], []), True),
+            ([COUNT_RULES["holds_gold"], COUNT_RULES["to_gold"]], (["CONTAINS", "FLOWS_TO"], []),
+             True),
+            ([COUNT_RULES["streams"]], (None, ["CONTAINS"]), False),
+            ([COUNT_RULES["streams"], COUNT_RULES["holds_gold"]], (None, []), True),
+            ([COUNT_RULES["gold_and_table"]], (None, []), True)):
+        assert draft_search._edge_types_read(_overlay(draft, RelMain()), rules) == want
+        main = RelMain(REL_NODES, COUNT_EDGES)
+        items = [(f"r{i}", p) for i, p in enumerate(rules)]
+        counts, _ = await _count(_overlay(draft, main), SCOPE, items)
+        assert counts == await _truth_counts(draft, SCOPE, items)
+        assert [(types, skip) for _, types, skip, _ in main.at] == ([want] if read else [])
+
+
+async def test_a_draft_that_changes_what_no_rule_reads_reads_no_relationships():
+    """However many relationships an entity holds, a change no rule's From or To reads moves no
+    match of one the patch set didn't change: none of them is read, and the counts are exact."""
+    draft, main = RelDraft(REL_NODES, COUNT_EDGES), RelMain(REL_NODES, COUNT_EDGES)
+    draft.commit({u: {**draft.main[u], "note": "reviewed"} for u in ("c1", "c2", "c3")})
+    items = list(COUNT_RULES.items())
+    counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+    assert deltas["status"] == "complete" and deltas["approximate"] == {}
+    assert set(deltas["deltas"].values()) <= {0}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert main.at == []
+
+
+@pytest.mark.parametrize("batch", [1, 1000])
+async def test_a_relationship_between_a_moved_and_an_unmoved_entity_counts_once(monkeypatch, batch):
+    """c3 is no longer gold (it moves "to gold"'s To); c2, the least of the two, changes only
+    what no rule reads. Main's relationships between them (c2 → c3, c3 → c2) are read at c3 alone
+    and counted there, once, whether the two are judged in one step or apart."""
+    monkeypatch.setattr(draft_search, "BATCH", batch)
+    draft, main = RelDraft(REL_NODES, COUNT_EDGES), RelMain(REL_NODES, COUNT_EDGES)
+    draft.commit({"c2": {**draft.main["c2"], "note": "reviewed"},
+                  "c3": {**draft.main["c3"], "tier": "bronze"}})
+    items = list(COUNT_RULES.items())
+    overlay = _overlay(draft, main)
+    for _ in range(10):
+        deltas = await overlay.deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=0)
+        if deltas["status"] == "complete":
+            break
+    assert deltas["status"] == "complete" and deltas["approximate"] == {}
+    counts, _ = await _count(overlay, SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    mains = await _main_counts(RelMain(REL_NODES, COUNT_EDGES), SCOPE, items)
+    assert counts["to_gold"] != mains["to_gold"]
+    assert {u for urns, *_ in main.at for u in urns} == {"c3"}
+
+
+async def test_a_relationship_rule_whose_end_follows_relationships_keeps_mains_count():
+    draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+    items = [("from_root", P_EDGES({"kind": "edges", "sourceWhere": {
+                 "kind": "degree", "direction": "in", "op": "eq", "value": 0}})),
+             ("to_gold", COUNT_RULES["to_gold"])]
+    counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+    assert deltas["approximate"] == {"from_root": draft_search.RELATIONSHIPS}
+    mains = await _main_counts(RelMain(REL_NODES, COUNT_EDGES), SCOPE, items)
+    assert counts["from_root"] == mains["from_root"]
+    assert counts["to_gold"] == (await _truth_counts(draft, SCOPE, items))["to_gold"]
+
+
+async def test_a_relationship_rule_whose_class_cant_be_read_keeps_mains_count():
+    class NoOntology(RelMain):
+        def _get_lineage_edge_types(self):
+            raise RuntimeError("no ontology")
+
+    draft = _count_draft()
+    items = [("from_big", COUNT_RULES["from_big"]), ("to_gold", COUNT_RULES["to_gold"])]
+    counts, deltas = await _count(_overlay(draft, NoOntology(REL_NODES, COUNT_EDGES)), SCOPE, items)
+    assert deltas["approximate"] == {"from_big": draft_search.NOT_DRAFT_AWARE}
+    assert counts["to_gold"] == (await _truth_counts(draft, SCOPE, items))["to_gold"]
+
+
+async def test_relationship_counts_past_the_cap_are_mains_said_so(monkeypatch):
+    """Five relationships the patch set names and three entities main holds that it changed: past
+    the cap to plan, none of it is read; within it, past it once main's relationships at the two
+    that move the rule's ends (c2, c3: five of them) are more than what is left of it — told so
+    before any is read — main's count, said so, never a wrong number; within that, exact."""
+    items = [("gold_and_table", COUNT_RULES["gold_and_table"]), ("gold", RULES["gold"])]
+    mains = await _main_counts(RelMain(REL_NODES, COUNT_EDGES), SCOPE, items)
+    for cap, read in ((7, False), (8, True)):
+        monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", cap)
+        draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+        counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+        note = draft_search.TOO_LARGE_RELATIONSHIPS.format(n=cap)
+        assert deltas["approximate"] == {"gold_and_table": note}, cap
+        assert deltas["status"] == "complete"
+        assert counts["gold_and_table"] == mains["gold_and_table"]
+        assert counts["gold"] == (await _truth_counts(draft, SCOPE, items))["gold"]
+        assert [(urns, limit) for urns, _, _, limit in main.at] == \
+            ([(["c2", "c3"], cap - 5)] if read else [])
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 10)
+    draft = _count_draft()
+    counts, deltas = await _count(_overlay(draft, RelMain(REL_NODES, COUNT_EDGES)), SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert note == ("Your draft changed more than 8 relationships and entities at their ends, so "
+                    "these counts show the published graph.")
+
+
+async def test_relationship_counts_are_read_a_step_at_a_time_across_requests(monkeypatch):
+    monkeypatch.setattr(draft_search, "BATCH", 1)
+    draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+    overlay = _overlay(draft, main)
+    items = list(COUNT_RULES.items())
+    seen = []
+    for _ in range(20):
+        deltas = await overlay.deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=0)
+        seen.append((deltas["status"], deltas["progress"]["scanned"]))
+        if deltas["status"] == "complete":
+            break
+    assert seen == [*(("running", n) for n in range(1, 8)), ("complete", 8)]
+    counts, _ = await _count(overlay, SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert [urns for urns, *_ in main.at] == [["c1"], ["c2"], ["c3"]]
+
+
+async def test_entity_and_relationship_counts_run_together():
+    """Running while either correction is, their progress summed."""
+    draft = _count_draft()
+    overlay = _overlay(draft, RelMain(REL_NODES, COUNT_EDGES))
+    items = [("gold", RULES["gold"]), ("to_gold", COUNT_RULES["to_gold"])]
+    deltas = await overlay.deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=2000)
+    assert deltas["status"] == "complete"
+    # D's four entities; the five relationships the patch set names and three entities main holds.
+    assert deltas["progress"] == {"scanned": 4 + 8, "total": 4 + 8}
+    assert set(deltas["deltas"]) == {"gold", "to_gold"}
+
+
+async def test_the_counts_service_moves_a_relationship_rules_count_by_the_drafts():
+    draft = _count_draft()
+    request = SearchCountsRequest.model_validate({
+        "scope": {"viewId": "v"}, "waitMs": 2000,
+        "items": [{"id": "to_gold", "predicate": _json(COUNT_RULES["to_gold"])}]})
+    out = await _service(_overlay(draft, RelMain(REL_NODES, COUNT_EDGES))).counts(
+        request, run_context=CONTEXT)
+    count = out.counts["to_gold"]
+    assert (count.count, count.status, count.approximate, count.note) == (3, "complete", False, None)
+
+
+# ---------------------------------------------------------------------------
+# A relationship rule's count, folded commit after commit
+# ---------------------------------------------------------------------------
+
+async def _settled(draft, scope, items, main=None):
+    """Each rule's count on the draft, its correction run to the end across requests."""
+    overlay = _overlay(draft, main or RelMain(REL_NODES, COUNT_EDGES))
+    for _ in range(50):
+        deltas = await overlay.deep_search_count_deltas(scope, items, context=CONTEXT, wait_ms=0)
+        if deltas["status"] == "complete":
+            break
+    counts, deltas = await _count(overlay, scope, items)
+    return counts, deltas
+
+
+async def test_a_later_commit_to_a_relationship_is_folded_in_not_read_again():
+    """The second commit changes one relationship again: only it is read, as the draft held it
+    before the commit and as it holds it now — main's relationships at no entity."""
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    counts, _ = await _settled(draft, SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 1}}])
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.edges_as_of == [(["e:c1>c3"], 1)]
+    assert main.at == [] and deltas["progress"] == {"scanned": 1, "total": 1}
+
+
+async def test_a_later_commit_that_moves_an_end_folds_in_the_relationships_there():
+    """c2 is silver again: main's relationships at c2 and the patch set's there from the first
+    commit (c1 → c2, moved from x1) are counted out as they matched before and in as now."""
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c2": {**draft.main["c2"], "tier": "silver"}})
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert [urns for urns, *_ in main.at] == [["c2"]]
+    assert draft.edges_as_of == [] and (["id-c2"], 1) in draft.as_of
+
+
+async def test_a_later_commit_no_rule_reads_reads_no_relationship():
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c3": {**draft.nodes["c3"], "note": "reviewed"}})
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert main.at == [] and deltas["progress"]["total"] == 1
+
+
+@pytest.mark.parametrize("batch", [1, 1000])
+async def test_a_relationship_between_two_ends_a_fold_moved_counts_once(monkeypatch, batch):
+    """c2 and c3 both move (c3 → c2 runs between them), in one step or apart."""
+    monkeypatch.setattr(draft_search, "BATCH", batch)
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c2": {**draft.main["c2"], "tier": "silver"},
+                  "c3": {**draft.main["c3"], "tier": "gold"}})
+    counts, deltas = await _settled(draft, SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.as_of, "folded in"
+
+
+@pytest.mark.parametrize("change", ["deletion", "node_deleted", "containment", "retype",
+                                    "renamed", "over_half"])
+async def test_what_a_fold_cant_read_past_is_read_whole(change):
+    """A deleted relationship or node, one written in the hierarchy or retyped out of it, a node
+    named anew, a window over half the draft: the second commit's correction reads the draft
+    whole."""
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    if change == "deletion":
+        draft.commit({}, drop_edges=[_edge("c3", "c2", "FLOWS_TO")])
+    elif change == "node_deleted":
+        draft.commit({"c3": None})                   # its relationships left as they are
+    elif change == "containment":
+        draft.commit({}, add_edges=[_edge("t2", "c2")])
+    elif change == "retype":
+        draft.commit({}, add_edges=[{**_edge("t1", "c2"), "type": "FLOWS_TO"}])
+    elif change == "renamed":
+        draft.commit({"c3": {**draft.nodes["c3"], "tier": "silver"}})
+        window = draft.draft_search_window
+
+        async def renamed(**kw):
+            return {**await window(**kw), "renamed": True}
+
+        draft.draft_search_window = renamed
+    else:
+        # Six of the 11 items the draft now has (its five relationships, six entities of D).
+        draft.commit({u: {**draft.nodes[u], "note": "x"}
+                      for u in ("t1", "t2", "c1", "c2", "c3", "x1")})
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.edges_as_of == []
+    assert deltas["progress"]["total"] == len(draft_search._relationship_items(
+        (await _overlay(draft)._delta_())))
+
+
+async def test_a_correction_past_the_cap_is_never_folded_from(monkeypatch):
+    draft, items = _count_draft(), [("gold_and_table", COUNT_RULES["gold_and_table"])]
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 8)
+    _, deltas = await _settled(draft, SCOPE, items)
+    assert deltas["approximate"]                         # past it: main's count, said so
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 200_000)
+    draft.commit({"c3": {**draft.nodes["c3"], "note": "x"}})
+    counts, deltas = await _settled(draft, SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert deltas["progress"]["total"] == 8, "read whole"
+
+
+async def test_a_change_to_what_a_rules_class_takes_is_never_folded_across():
+    """The lineage class names another type: the correction's line is another one."""
+    class Retyped(RelMain):
+        def _get_lineage_edge_types(self):
+            return ["FLOWS_TO", "USES"]
+
+    draft, items = _count_draft(), [("from_big", COUNT_RULES["from_big"])]
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c3": {**draft.nodes["c3"], "note": "x"}})
+    _, deltas = await _settled(draft, SCOPE, items, Retyped(REL_NODES, COUNT_EDGES))
+    assert deltas["progress"]["total"] == 8 and draft.edges_as_of == []
+
+
+async def test_the_relationship_catalog_is_never_folded():
+    draft = _rel_draft()
+    await _overlay(draft, RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 1}}])
+    out = await _overlay(draft, RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    want = _rel_stats(list(draft.nodes.values()), list(draft.edges.values()), SCOPE)
+    assert out["entities"] == sum(want.entities.values())
+    assert draft.edges_as_of == []
+
+
+_FOLD_NODES = ["t1", "t2", "c1", "c2", "c3", "x1"]
+_FOLD_LINKS = [("c1", "c2"), ("c2", "c1"), ("c3", "c2"), ("c1", "x1"), ("t1", "t2"),
+               ("t2", "c1"), ("c2", "c3"), ("c1", "c3"), ("c3", "c1")]
+
+
+def _random_commit(draft: RelDraft, rnd) -> None:
+    """One commit of a few writes: entities' values (back to main's at times), relationships
+    added, changed, re-pointed or retyped — and now and then what a fold can't read past (a
+    deletion, the hierarchy)."""
+    nodes: Dict[str, Optional[Dict[str, Any]]] = {}
+    adds: List[Dict[str, Any]] = []
+    drops: List[Dict[str, Any]] = []
+    for _ in range(rnd.randint(1, 3)):
+        live = [u for u in _FOLD_NODES if u in draft.nodes and u not in nodes]
+        roll = rnd.random()
+        if roll < 0.4 and live:
+            u = rnd.choice(live)
+            if rnd.random() < 0.25 and u in draft.main:
+                nodes[u] = dict(draft.main[u])
+            else:
+                key, value = rnd.choice([("tier", "gold"), ("tier", "silver"), ("tier", "bronze"),
+                                         ("rows", 1), ("rows", 9), ("rows", 30), ("note", "n")])
+                nodes[u] = {**draft.nodes[u], key: value}
+        elif roll < 0.85:
+            src, tgt = rnd.choice(_FOLD_LINKS)
+            if src in draft.nodes and tgt in draft.nodes:
+                eid = rnd.choice([f"e:{src}>{tgt}", *[e for e in draft.edges
+                                                       if draft.edges[e]["type"] != "CONTAINS"]])
+                adds.append({"id": eid, "source": src, "target": tgt,
+                             "type": rnd.choice(["FLOWS_TO", "FLOWS_TO", "USES"]),
+                             "properties": {"mode": rnd.choice(["stream", "batch"]),
+                                            "lag": rnd.randint(1, 3)}})
+        elif roll < 0.93:
+            links = [e for e in draft.edges.values() if e["type"] != "CONTAINS"]
+            if links:
+                drops.append(rnd.choice(links))
+        elif roll < 0.97:
+            adds.append(_edge("t2", rnd.choice(["c1", "c2"])))
+        elif "c3" in draft.nodes and "c3" not in nodes:
+            nodes["c3"] = None
+    adds = list({e["id"]: e for e in adds}.values())
+    drops = [e for e in drops if e["id"] not in {a["id"] for a in adds}]
+    draft.commit(nodes, add_edges=adds, drop_edges=drops)
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("batch", [1, 2, 1000])
+@pytest.mark.parametrize("scope", [SCOPE, TYPED], ids=["roots", "types"])
+async def test_relationship_counts_folded_commit_after_commit_are_the_drafts(
+        monkeypatch, seed, batch, scope):
+    """Random commits, one after another: after each, every rule's count on the draft is the
+    draft's own — whether its correction folded the commit in or read the draft whole."""
+    import random
+
+    monkeypatch.setattr(draft_search, "BATCH", batch)
+    rnd = random.Random(seed * 7 + batch)
+    draft, items = RelDraft(REL_NODES, COUNT_EDGES, cascade=seed % 2 == 0), list(COUNT_RULES.items())
+    folds = 0
+    for n in range(10):
+        _random_commit(draft, rnd)
+        before = len(draft.as_of) + len(draft.edges_as_of)
+        counts, deltas = await _settled(draft, scope, items)
+        assert deltas["approximate"] == {}, (seed, n)
+        assert counts == await _truth_counts(draft, scope, items), (seed, n)
+        folds += len(draft.as_of) + len(draft.edges_as_of) > before
+    assert folds, "some commit was folded in"

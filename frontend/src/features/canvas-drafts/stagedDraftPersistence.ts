@@ -69,6 +69,10 @@ export interface StagedDraftSnapshot {
    *  have reached the server before the refresh; without it a restored entity belonged to no
    *  column and was invisible. Absent in snapshots written before it existed. */
   pins?: Record<string, string>
+  /** Columns mapped to an unsaved entity (layer id → its temp urn), for the same reason: restored
+   *  without them, the column would stand empty and the entity show as a row. Absent in snapshots
+   *  written before it existed. */
+  anchors?: Record<string, string>
 }
 
 /** Past this many changes a snapshot is kept in IndexedDB. */

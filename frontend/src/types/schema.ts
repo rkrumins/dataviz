@@ -206,6 +206,13 @@ export interface ViewConfiguration {
    *  its base are what it shows. Written only by the server; absent on every other view. */
   search?: import('./searchView').SearchViewDefinition;
 
+  /** Whether a Context View is meant to show everything in its source (`config.coverage`):
+   *  'complete' — new top-level entities of its types are offered on the canvas as they
+   *  arrive; 'specialised' — a lens on part of the source, never offered them. Absent on
+   *  views made before views said: read as specialised. Changed on its own
+   *  (`PUT /views/{id}` `coverage`), never by a layout write. */
+  coverage?: 'complete' | 'specialised';
+
   // Permissions
   isDefault: boolean;
   /** The full visibility tier ('private' | 'workspace' | 'enterprise').
@@ -361,8 +368,17 @@ export interface ViewLayerConfig {
    *
    * Purely a rendering promotion: the anchor still carries its own assignment,
    * so a client that doesn't know this field renders the column the old way.
+   * The two always change together (layerMutations `mapLayerToEntity` / `unmapLayer`).
    */
   anchorUrn?: string;
+
+  /**
+   * The column's name is its anchor's: the header shows the entity's live
+   * display name while the column is mapped, and `name` holds the last one
+   * seen (what any other reader of `name` shows). Set when a column is mapped
+   * while nobody had named it; a rename clears it.
+   */
+  nameFromAnchor?: boolean;
 
   /**
    * The layer's own properties — an owner, a purpose, an SLA: whatever the
@@ -508,12 +524,20 @@ export interface DisplayRuleConfig {
   /** How the rule paints what it matches, besides its chip. Absent: the chip
    *  alone, as every rule did before styles. */
   style?: DisplayRuleStyle;
+  /** What the rule applies to. Absent: entities, as every rule did before
+   *  relationship rules. `relationships`: its predicate is a Connections
+   *  search, and it styles the lines of the relationships it matches. */
+  target?: DisplayRuleTarget;
 }
 
+export type DisplayRuleTarget = 'entities' | 'relationships';
+
 /**
- * A display rule's look on the entities it matches. Chips stack — every
- * matching rule adds its own — but a card has one tint and one frame: where
- * two rules paint the same card, the one first in the view's list wins.
+ * A display rule's look on what it matches. Chips stack — every matching
+ * rule adds its own — but a card has one tint and one frame, and a line one
+ * colour, dash and width: where two rules paint the same card or line, the
+ * one first in the view's list wins. `fill` and `frame` paint an entity's
+ * card; `dash` and `width` a relationship's line, drawn in the rule's colour.
  */
 export interface DisplayRuleStyle {
   /** Show the rule's tag chip. Absent: shown. */
@@ -522,6 +546,10 @@ export interface DisplayRuleStyle {
   fill?: boolean;
   /** Draw a frame round the card, in the rule's colour. */
   frame?: 'solid' | 'dashed';
+  /** Draw the line dashed or dotted. Absent: solid. */
+  dash?: 'solid' | 'dashed' | 'dotted';
+  /** The line's width, in pixels (1–6). Absent: 2.5. */
+  width?: number;
 }
 
 export interface LogicalNodeConfig {

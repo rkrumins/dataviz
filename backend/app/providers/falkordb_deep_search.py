@@ -60,7 +60,7 @@ import logging
 import re
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -79,13 +79,14 @@ from backend.app.services.native_query.parse_cost import grouped, negated, opera
 from backend.common.adapters.circuit import ProviderBusy, ProviderTimeout, ProviderUnavailable
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.edge_properties import (
-    EDGE_NATIVE_KEYS,
+    EDGE_IDENTITY_KEYS,
     JSON_OPS,
     folds,
     key_needle,
     value_texts,
 )
 from backend.common.search_semantics import (
+    POSITIVE_OF,
     SemanticsError,
     element_texts,
     fold_case,
@@ -1248,44 +1249,52 @@ class _Compiler:
         raise CompileError(f"unknown edge predicate kind: {kind!r}")
 
     def _visit_edge_property(self, ep) -> str:
-        if ep.key in EDGE_NATIVE_KEYS:
-            return self._compile_comparison(
-                f"{self._edge_var}.{_safe_property_name(ep.key)}", ep)
+        """An edge holds a property natively — as the writers store one within the graph's
+        property-name budget, and another tool's graph keeps them — or in its JSON
+        (``r.properties``: past the budget, and on relationships written before edges were stored
+        natively). Every operator reads the native value; presence and equality (``JSON_OPS``)
+        read the JSON as well, so a graph whose relationships are still bag-only is searched as
+        it is, with nothing to migrate first."""
+        col = f"{self._edge_var}.{_safe_property_name(ep.key)}"
         try:
             cmp = resolve_predicate(ep)
         except SemanticsError as exc:
             raise CompileError(f"edge property {ep.key!r}: {exc}") from exc
-        if cmp.op not in JSON_OPS:
-            raise CompileError(
-                f"edge property {ep.key!r} is kept in the edge's JSON: it can be "
-                f"tested with is set, is, is not or is one of — not {cmp.op!r}")
+        if ep.key in EDGE_IDENTITY_KEYS or cmp.op not in JSON_OPS:
+            return compile_comparison(col, cmp, self._bind)
+        def present() -> str:
+            return f"({col} IS NOT NULL OR {self._edge_key_present(ep.key)})"
+
         if cmp.op in ("isSet", "isNotSet"):
-            present = self._edge_key_present(ep.key)
-            return present if cmp.op == "isSet" else f"NOT ({present})"
-        # ``"key": <value>`` followed by a comma, or ending the object
-        # (``edge_properties``).
+            return present() if cmp.op == "isSet" else f"NOT {present()}"
+        positive = POSITIVE_OF.get(cmp.op)
+        pos = replace(cmp, op=positive) if positive else cmp
+        equal = f"({compile_comparison(col, pos, self._bind)} OR {self._edge_json_equal(ep.key, pos)})"
+        if positive is None:
+            return equal
+        if cmp.include_missing:
+            return f"NOT {equal}"
+        return f"({present()} AND NOT {equal})"
+
+    def _edge_json_equal(self, key: str, cmp) -> str:
+        """``"key": <value>`` in the edge's JSON, followed by a comma or ending the object
+        (``edge_properties``)."""
         text = self._edge_json()
         if folds(cmp):
             text = f"toLower({text})"
         hits = []
         for value in value_texts(cmp):
-            needle = key_needle(ep.key) + value
+            needle = key_needle(key) + value
             if folds(cmp):
                 needle = fold_case(needle)
             hits.append(f"{text} CONTAINS {self._bind(needle + ',')}")
             hits.append(f"{text} ENDS WITH {self._bind(needle + '}')}")
-        equal = "(" + " OR ".join(hits) + ")"
-        if cmp.op in ("eq", "in"):
-            return equal
-        if cmp.include_missing:
-            return f"NOT {equal}"
-        return f"({self._edge_key_present(ep.key)} AND NOT {equal})"
+        return "(" + " OR ".join(hits) + ")"
 
     def _visit_edge_has_property(self, ep) -> str:
-        if ep.key in EDGE_NATIVE_KEYS:
-            expr = f"EXISTS({self._edge_var}.{_safe_property_name(ep.key)})"
-        else:
-            expr = self._edge_key_present(ep.key)
+        expr = f"EXISTS({self._edge_var}.{_safe_property_name(ep.key)})"
+        if ep.key not in EDGE_IDENTITY_KEYS:
+            expr = f"({expr} OR {self._edge_key_present(ep.key)})"
         return f"NOT ({expr})" if ep.negate else expr
 
     def _edge_json(self) -> str:
@@ -2922,6 +2931,35 @@ def _accumulate_tag_values(raw: Any, into: Dict[str, int]) -> None:
         into[stripped] = into.get(stripped, 0) + 1
 
 
+async def _sample_edges_per_type(provider, cap: int, timeout_s: float) -> List[List[Any]]:
+    """``[type, r]`` rows: up to ``cap`` edges, shared between the graph's
+    relationship types — each type its own sample, so one with millions of
+    edges (containment, rollups) never leaves another unseen."""
+    res = await provider._ro_query("CALL db.relationshipTypes() YIELD relationshipType "
+                                   "RETURN relationshipType", timeout=timeout_s)
+    types = sorted({str(r[0]) for r in res.result_set or [] if r and r[0]})
+    if not types:
+        return []
+    per_type = max(_EDGE_SAMPLE_FLOOR, cap // len(types))
+    gate = asyncio.Semaphore(_EDGE_SAMPLE_PARALLEL)
+
+    async def sample(edge_type: str) -> List[List[Any]]:
+        async with gate:
+            out = await provider._ro_query(
+                f"MATCH ()-[r:{_sanitize_label(edge_type)}]->() WITH r LIMIT $lim "
+                "RETURN type(r) AS edgeType, r",
+                params={"lim": per_type}, timeout=timeout_s)
+            return out.result_set or []
+
+    return [row for rows in await asyncio.gather(*(sample(t) for t in types)) for row in rows]
+
+
+#: Edges each relationship type's sample reads at the least, however many types share the cap.
+_EDGE_SAMPLE_FLOOR = 50
+#: Types sampled at once.
+_EDGE_SAMPLE_PARALLEL = 8
+
+
 async def _discover_edge_metadata(
     provider, *, timeout_s: float = 5.0,
 ) -> Dict[str, Dict[str, Any]]:
@@ -2937,16 +2975,11 @@ async def _discover_edge_metadata(
     """
     _s = get_deep_search_settings()
     try:
-        res = await provider._ro_query(
-            "MATCH ()-[r]->() WITH r LIMIT $lim RETURN type(r) AS edgeType, r",
-            params={"lim": _s.discover_edge_sample_cap},
-            timeout=timeout_s,
-        )
+        rows = await _sample_edges_per_type(provider, _s.discover_edge_sample_cap, timeout_s)
     except Exception as exc:
         logger.warning("discover: edge sampling failed: %s", exc)
         return {}
 
-    rows = res.result_set or []
     per_type: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         if not row or len(row) < 2:
@@ -3012,9 +3045,13 @@ def _edge_user_properties(raw: Any) -> Dict[str, Any]:
 
 def _edge_properties(native: Any) -> Dict[str, Any]:
     """An edge's properties as a reader sees them: a user's, parsed from
-    its JSON, beside the platform's own fields."""
+    its JSON, beside the platform's own fields. A name both hold: the JSON's
+    value, as every reader takes it (``falkordb_provider.edge_user_properties``)
+    — but the edge's own id, confidence and hash are always the platform's."""
     props = dict(native or {})
-    return {**_edge_user_properties(props.pop("properties", None)), **props}
+    bag = _edge_user_properties(props.pop("properties", None))
+    envelope = {k: props.pop(k) for k in ("id", "confidence", "gvHash") if k in props}
+    return {**props, **bag, **envelope}
 
 
 # ---------------------------------------------------------------------------

@@ -152,3 +152,19 @@ describe('DisplayRuleList when the rules could not be checked', () => {
         expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 })
+
+
+describe('DisplayRuleList — a rule that styles relationships', () => {
+    beforeEach(() => useDisplayRuleMatchStore.getState().clear())
+
+    it('reads as the line it draws', () => {
+        renderList(rule({ target: 'relationships', predicate: { kind: 'edges' },
+            style: { dash: 'dashed', width: 4, chip: false } }))
+        expect(screen.getByText('Relationships · dashed, bold line · no chip')).toBeInTheDocument()
+    })
+
+    it('reads as a solid line when it names no look', () => {
+        renderList(rule({ target: 'relationships', predicate: { kind: 'edges' } }))
+        expect(screen.getByText('Relationships · solid line')).toBeInTheDocument()
+    })
+})

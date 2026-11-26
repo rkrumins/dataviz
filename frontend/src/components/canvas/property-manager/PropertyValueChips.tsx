@@ -2,14 +2,18 @@
  * PropertyValueChips — premium, readable presentation primitives for the
  * Properties catalogue: a type tile (icon + tone by inferred value type),
  * sample-value chips with inline "+N" expand, and entity-type pills with
- * overflow. Replaces the faint low-contrast value text with legible,
- * scannable chips. Pure + presentational.
+ * overflow — or relationship-type pills, coloured as the canvas draws each
+ * type. Replaces the faint low-contrast value text with legible, scannable
+ * chips. Pure + presentational.
  */
 import { Braces } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { useEdgeVisual } from '@/hooks/useEntityVisual'
+
+import { edgeTypeName } from '../search/panel/vocabulary/edgeWords'
 
 import { entityTypeStyle } from './entityTypeStyles'
 import { typeMeta, type ValueType } from './propertyValueTypes'
@@ -127,6 +131,38 @@ export function EntityTypeChips({ types, max = 3 }: { types: string[]; max?: num
                     <span className="text-[10px] text-ink-muted/70 tabular-nums">+{rest}</span>
                 </HoverTip>
             )}
+        </span>
+    )
+}
+
+
+/** Relationship-type pills with a "+N" overflow: each named as people read it and tinted with the
+ *  colour the canvas draws the type in. */
+export function RelationshipTypeChips({ types, max = 3 }: { types: string[]; max?: number }) {
+    if (types.length === 0) return null
+    const rest = types.length - max
+    return (
+        <span className="inline-flex flex-wrap items-center gap-1">
+            {types.slice(0, max).map((t) => <RelationshipTypeChip key={t} type={t} />)}
+            {rest > 0 && (
+                <HoverTip label={types.map(edgeTypeName).join(', ')} className="inline-flex">
+                    <span className="text-[10px] text-ink-muted/70 tabular-nums">+{rest}</span>
+                </HoverTip>
+            )}
+        </span>
+    )
+}
+
+function RelationshipTypeChip({ type }: { type: string }) {
+    const color = useEdgeVisual(type).strokeColor
+    const name = edgeTypeName(type)
+    return (
+        <span
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border max-w-[120px]"
+            style={{ color, borderColor: `${color}40`, backgroundColor: `${color}14` }}
+        >
+            <span aria-hidden className="w-1.5 h-1.5 shrink-0 rounded-full" style={{ background: color }} />
+            <span className="truncate" title={name}>{name}</span>
         </span>
     )
 }

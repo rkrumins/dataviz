@@ -1,7 +1,8 @@
 """A view's library: its display rules, its saved queries and its reusable
 changes — and the pack the rules and queries travel in between views.
 
-A rule tags on-screen entities that match its predicate; a saved query is a
+A rule tags on-screen entities that match its predicate — or, applied to
+relationships, styles the lines of those a Connections search matches; a saved query is a
 search kept under a name; a reusable change is a bulk property change kept
 under a name, to run again. All belong to the view (a rule to the branch it was
 written on, as the view's layout does). Rules and queries are exported and
@@ -36,13 +37,24 @@ class _Base(BaseModel):
 
 
 class DisplayRuleStyle(_Base):
-    """How a rule paints the entities it matches, beside (or instead of) its chip. A rule with
-    no style shows its chip and nothing else. Where two rules paint one card, the one first in
-    the view's list wins; chips are never contested — every matching rule adds its own."""
-    chip: bool = Field(True, description="Show the rule's tag chip on each entity it matches.")
+    """How a rule paints what it matches, beside (or instead of) its chip. A rule with no style
+    shows its chip and nothing else — a relationship rule its chip on a line drawn in its colour.
+    Where two rules paint one card or line, the one first in the view's list wins; chips are never
+    contested — every matching rule adds its own. ``fill`` and ``frame`` paint an entity's card;
+    ``dash`` and ``width`` a relationship's line."""
+    chip: bool = Field(True, description="Show the rule's tag chip on each entity or line it matches.")
     fill: bool = Field(False, description="Tint each matching card in the rule's colour.")
     frame: Optional[Literal["solid", "dashed"]] = Field(
         None, description="Draw a box round each matching card, in the rule's colour.")
+    dash: Optional[Literal["solid", "dashed", "dotted"]] = Field(
+        None, description="Draw each matching line solid (left out), dashed or dotted.")
+    width: Optional[float] = Field(
+        None, ge=1, le=6, description="Each matching line's width, in pixels. Left out: 2.5.")
+
+
+#: What a rule applies to: the entities its predicate matches, or the relationships a
+#: Connections search (``kind: edges``) matches.
+DisplayRuleTarget = Literal["entities", "relationships"]
 
 
 class DisplayRule(_Base):
@@ -55,6 +67,35 @@ class DisplayRule(_Base):
     enabled: bool = True
     created_at: Optional[str] = Field(None, alias="createdAt", max_length=64)
     style: Optional[DisplayRuleStyle] = None
+    target: DisplayRuleTarget = Field(
+        "entities",
+        description="``entities``: the rule tags the entities its predicate matches. "
+                    "``relationships``: its predicate is a Connections search, and the rule "
+                    "styles the lines of the relationships it matches.")
+
+    @model_validator(mode="after")
+    def _style_fits_target(self) -> "DisplayRule":
+        style = self.style
+        if style is None:
+            return self
+        if self.target == "relationships" and (style.fill or style.frame):
+            raise ValueError("a relationship rule draws lines: it takes a dash and a width, "
+                             "not a fill or a frame")
+        if self.target == "entities" and (style.dash or style.width is not None):
+            raise ValueError("an entity rule paints cards: it takes a fill and a frame, "
+                             "not a dash or a width")
+        return self
+
+    def stored(self) -> Dict[str, Any]:
+        """The rule as a view keeps it: an entity rule without ``target``, as every rule was
+        before relationship rules, so it is stored and exported byte for byte as it was; a
+        relationship rule's style without the fill a line never has."""
+        out = self.model_dump(by_alias=True, exclude_none=True)
+        if self.target == "entities":
+            out.pop("target")
+        elif "style" in out:
+            out["style"].pop("fill")
+        return out
 
 
 class SavedQuery(_Base):

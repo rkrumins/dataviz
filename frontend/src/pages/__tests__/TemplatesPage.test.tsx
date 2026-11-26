@@ -5,8 +5,8 @@
  * library, search over names, descriptions and layers, a menu that offers only
  * what the server's `access` allows, delete with a confirmation and an Undo,
  * "Use template" opening the view wizard with it, and the drawer on a link —
- * plus the library's front shelves, favourites, how well each template fits a
- * workspace, requests to offer one to everyone, and a workspace's default.
+ * plus the library's front shelves, favourites, no claim about how a template
+ * fits any data, requests to offer one to everyone, and a workspace's default.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -275,36 +275,24 @@ describe('TemplatesPage', () => {
         expect(screen.queryByRole('region', { name: 'Recently used' })).not.toBeInTheDocument()
     })
 
-    it('shows how well each template fits a workspace, and sorts by it', async () => {
+    it('makes no claim about how a template fits any data', async () => {
         wsState.workspaces = [{ ...FINANCE, dataSources: [{ id: 'ds_fin', isPrimary: true }] }]
         useAuthStore.setState({ permissions: { global: [], ws: { ws_fin: ['workspace:datasource:read'] } } } as never)
         service.list.mockResolvedValue({
-            items: [
-                t('tpl_half', 'Half fit', {
-                    layers: [
-                        { id: 'h1', name: 'Tables', entityTypes: ['Table'], order: 0 },
-                        { id: 'h2', name: 'Charts', entityTypes: ['Chart'], order: 1 },
-                    ],
-                }),
-                t('tpl_full', 'Full fit', { updatedAt: '2026-09-01T00:00:00Z' }),
-            ],
-            total: 2,
+            items: [t('tpl_half', 'Half fit', {
+                layers: [
+                    { id: 'h1', name: 'Tables', entityTypes: ['Table'], order: 0 },
+                    { id: 'h2', name: 'Charts', entityTypes: ['Chart'], order: 1 },
+                ],
+            })],
+            total: 1,
         })
         renderAt()
-        await screen.findByRole('button', { name: 'Full fit' })
-        const fitFor = screen.getByRole('combobox', { name: "Show how well templates fit a workspace's data" })
-        expect(fitFor).toHaveValue('ws_fin')
-        expect(within(card('Full fit')).getByRole('img', { name: '100% match' })).toBeInTheDocument()
-        expect(within(card('Half fit')).getByRole('img', { name: '50% match' })).toBeInTheDocument()
-
-        const names = () => screen.getAllByRole('button', { name: /^(Full|Half) fit$/ }).map(b => b.textContent)
-        expect(names()).toEqual(['Half fit', 'Full fit'])
-        fireEvent.change(screen.getByRole('combobox', { name: 'Sort templates' }), { target: { value: 'match' } })
-        expect(names()).toEqual(['Full fit', 'Half fit'])
-
-        fireEvent.change(fitFor, { target: { value: '' } })
-        expect(screen.queryByRole('img', { name: /match/ })).not.toBeInTheDocument()
-        expect(screen.getByRole('combobox', { name: 'Sort templates' })).toHaveValue('updated')
+        await screen.findByRole('button', { name: 'Half fit' })
+        expect(within(card('Half fit')).queryByRole('img', { name: /match/ })).not.toBeInTheDocument()
+        expect(screen.queryByRole('combobox', { name: /workspace's data/ })).not.toBeInTheDocument()
+        expect(screen.queryByRole('option', { name: /match|from your data/i })).not.toBeInTheDocument()
+        expect(screen.queryByText(/Matches \d+ of|by hand/)).not.toBeInTheDocument()
     })
 
     it('opens with the library at a glance, each tile showing what it counts', async () => {

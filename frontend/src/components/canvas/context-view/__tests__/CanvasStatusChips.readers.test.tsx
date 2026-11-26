@@ -76,21 +76,21 @@ describe('CanvasStatusChips — loaded entities outside the view', () => {
   })
 })
 
-describe('CanvasStatusChips — placements not found here', () => {
-  const chip = (canEdit?: boolean) => {
-    render(<CanvasStatusChips {...none} canEdit={canEdit}
+describe('CanvasStatusChips — placements that point at entities no longer in this source', () => {
+  const chip = (onCleanUpNotFound?: () => void) => {
+    render(<CanvasStatusChips {...none} canEdit={!!onCleanUpNotFound} onCleanUpNotFound={onCleanUpNotFound}
       notFoundPlacements={[{ urn: 'urn:li:dataset:orders', label: 'orders', layerName: 'Sources' }]} />)
-    fireEvent.click(screen.getByRole('button', { name: /1 placement not found here/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^1 placement points at an entity no longer in this source/ }))
   }
 
   it('tells a reader they are kept', () => {
     chip()
-    expect(screen.getByText(/They’re kept, and appear as soon as the entity arrives here\./)).toBeInTheDocument()
-    expect(document.body.textContent).not.toMatch(/edit the view/)
+    expect(screen.getByText(/Until they’re cleaned up they stay placed, and show again if they come back\./)).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/clean them up/i)
   })
 
-  it('tells an editor how to remove them', () => {
-    chip(true)
-    expect(screen.getByText(/To remove them, edit the view and see Assignments\./)).toBeInTheDocument()
+  it('offers an editor, in a draft, to clean them up', () => {
+    chip(() => {})
+    expect(screen.getByRole('button', { name: 'Clean them up' })).toBeInTheDocument()
   })
 })

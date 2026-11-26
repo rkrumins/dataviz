@@ -23,6 +23,8 @@ import type { AskResult, DiscussionStatus, PeopleMap, ThreadSummary } from '@/se
 import { useSubjectSummary, useSubjectThreads } from './useDiscussions'
 import { AskComposer } from './AskComposer'
 import { WhoToAsk } from './WhoToAsk'
+import { EntityAnchor } from './EntityAnchor'
+import { anchorOfThread, describeAnchor } from './anchorOf'
 import { StatusPill } from './ThreadView'
 import type { DrawerEntity, DrawerSubject } from './drawerStore'
 import { nameOf, stackPerson, subjectNoun } from './discussionText'
@@ -46,7 +48,7 @@ export function ThreadCard({ thread, people, onOpen, showAnchor = true, showSubj
     const others = thread.participantIds.filter((id) => id !== thread.askedBy).map((id) => stackPerson(id, people))
     return (
         <button type="button" data-thread-row onClick={onOpen} aria-current={selected || undefined}
-            aria-label={`${thread.unread ? 'Unread. ' : ''}${asker} asked${showSubject ? ` about ${thread.subject.name}` : ''}: ${thread.excerpt}`}
+            aria-label={`${thread.unread ? 'Unread. ' : ''}${asker} asked${showSubject ? ` about ${thread.subject.name}` : ''}${showAnchor && thread.entityId ? ` about ${describeAnchor(anchorOfThread(thread))}` : ''}: ${thread.excerpt}`}
             className={cn('group w-full text-left rounded-2xl border px-3.5 py-3 transition-[background-color,border-color,box-shadow] duration-150',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                 selected ? 'border-accent-lineage/40 bg-accent-lineage/[0.07] shadow-sm' : thread.unread
@@ -80,8 +82,8 @@ export function ThreadCard({ thread, people, onOpen, showAnchor = true, showSubj
                             </span>
                         )}
                         {showAnchor && thread.entityId && (
-                            <span className="inline-flex items-center gap-1 min-w-0 max-w-[12rem] rounded-full bg-amber-500/10 px-1.5 py-px text-[10.5px] font-semibold text-amber-800 dark:text-amber-200">
-                                <MapPin className="w-3 h-3 shrink-0" aria-hidden /><span className="truncate">{thread.entityLabel || thread.entityId}</span>
+                            <span className="inline-flex min-w-0 max-w-[16rem] rounded-full bg-amber-500/10 px-1.5 py-px text-[10.5px] font-medium text-amber-800 dark:text-amber-200">
+                                <EntityAnchor entity={anchorOfThread(thread)} />
                             </span>
                         )}
                         <span className="inline-flex items-center gap-1 tabular-nums">
@@ -207,8 +209,7 @@ export function DiscussionPanel({
                 ]} />
                 {about && (
                     <span className="inline-flex items-center gap-1 min-w-0 max-w-full rounded-lg border border-amber-500/25 bg-amber-500/[0.07] pl-1.5 pr-1 h-7 text-[11.5px] font-medium text-amber-800 dark:text-amber-200">
-                        <MapPin className="w-3 h-3 shrink-0" aria-hidden />
-                        <span className="truncate font-semibold">{about.label}</span>
+                        <EntityAnchor entity={about} />
                         <button type="button" onClick={() => setAbout(null)} aria-label={`Show questions about all of ${noun}`}
                             className="ml-0.5 rounded p-0.5 hover:bg-amber-500/15"><X className="w-3 h-3" aria-hidden /></button>
                     </span>

@@ -5,7 +5,8 @@
  *
  *   node scripts/conversations-shot.mjs [shot ...]
  *
- * A shot is `page[:state][:dark][:390]`, e.g. `thread:answered:dark` or `ask:entity:390`.
+ * A shot is `page[:state][:dark][:390]`, e.g. `thread:answered:dark` or `ask:entity:390`; `:hover`
+ * hovers the first entity a question is about, e.g. `thread:anchored:hover`.
  * HARNESS_PORT picks Vite's port (default 5377).
  */
 import { spawn, execFile } from 'node:child_process'
@@ -19,7 +20,7 @@ const OUT = process.env.HARNESS_OUT || '.harness'
 
 const PAGES = [
   'view-drawer', 'thread:open', 'thread:answered', 'thread:private', 'thread:anchored', 'thread:deleted', 'thread:closed',
-  'ask', 'ask:entity', 'rows', 'inbox',
+  'ask', 'ask:entity', 'ask:entity:hover', 'view-drawer:hover', 'thread:anchored:hover', 'rows', 'inbox',
   'profile:overview', 'profile:conversations', 'profile:thread', 'profile:watching', 'profile-other', 'contacts:named', 'contacts:derived',
   'contacts:edit', 'source-tab', 'hovercard', 'cards',
 ]
@@ -69,9 +70,10 @@ try {
     const [page] = parts
     const extra = parts.slice(1)
     const query = new URLSearchParams({ page })
-    const state = extra.find(x => !['dark', '390', 'entity'].includes(x))
+    const state = extra.find(x => !['dark', '390', 'entity', 'hover'].includes(x))
     if (state) query.set('state', state)
     if (extra.includes('entity')) query.set('entity', '1')
+    if (extra.includes('hover')) query.set('hover', '1')
     if (extra.includes('dark')) query.set('theme', 'dark')
     const size = extra.includes('390') ? '390,844' : '1280,900'
     const out = join(OUT, `conversations-${shot.replace(/:/g, '-')}.png`)

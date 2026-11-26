@@ -14,11 +14,17 @@ draft's is evaluated in Python on the values the draft holds (``common.predicate
 FalkorDB compiler's meaning, as the stub provider answers with it).
 
 * **membership** (≤ 1,000 urns): main's answer, with the urns in ``D`` answered on the draft —
-  a removed entity matches nothing, a created one gets its chips.
+  a removed entity matches nothing, a created one gets its chips. A rule that styles relationships
+  (≤ 1,000 of them): main's answer, with those the draft created, changed or removed — and those
+  at an entity it changed — judged on the draft (``edge_membership``).
 * **counts**: main's count session (keyed by main's version, so shared with main and kept across
   the draft's commits) plus the correction, read ``BATCH`` entities of ``D`` a step, in a session
   of its own that any request continues. A draft's next commit folds in only what that commit
-  wrote — the draft's values before and after it — never ``D`` again.
+  wrote — the draft's values before and after it — never ``D`` again. A rule that styles
+  relationships has a correction of its own: the relationships the patch set names, then main's
+  at the entities of ``D`` that enter or leave a rule's From or To, ``BATCH`` a step
+  (``_relationship_deltas``) — and a later commit folded in as counts are, from what that commit
+  wrote of relationships and entities (``_folded_sides``).
 * **catalog**: main's catalog with each entity of ``D`` taken out as main holds it and put back
   as the draft does (``CatalogStats.add_entity`` / ``folded``). A range can't be narrowed without
   reading again: where the draft took out a value at either end, the range is marked not exact.
@@ -31,7 +37,9 @@ the draft changed — keeps main's answer, flagged (``approximate``, a note). An
 correction does the same: main's answer, said to be main's, never a 500 or a wrong number. So does
 a draft too large to read whole: a correction that would read more than ``DRAFT_SEARCH_MAX_DELTA``
 entities of ``D`` afresh answers with main's counts and catalog (``TOO_LARGE``, ``TOO_LARGE_CATALOG``); a fold of a later
-commit reads only what it wrote, and stays exact at any size.
+commit reads only what it wrote, and stays exact at any size. A relationship rule's count answers
+as main's (``TOO_LARGE_RELATIONSHIPS``) once the relationships and entities its correction reads
+would pass it.
 """
 from __future__ import annotations
 
@@ -41,7 +49,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from backend.app.providers.falkordb_search.catalog import (
     CatalogStats,
@@ -58,7 +66,7 @@ from backend.app.providers.falkordb_search.session import (
 from backend.app.services.deep_search import CompileError, SearchRunContext
 from backend.app.services.versioning import config as vconfig
 from backend.common.interfaces.provider import resolve_identities_by_query
-from backend.common.models.graph import GraphNode, NodeQuery
+from backend.common.models.graph import GraphEdge, GraphNode, NodeQuery
 from backend.common.models.search import MatchAllPredicate
 from backend.common.predicate_eval import NODE_FIELDS, matches
 
@@ -97,9 +105,17 @@ MEMBERSHIP_MAINS = ("{n} of your rules can't be answered on your draft's values 
                     "for what your draft changed, their chips show the published graph's answer.")
 MEMBERSHIP_NOT_DRAFT_AWARE = ("Your draft's changes couldn't be read just now, so the chips show "
                               "the published graph — they will catch up.")
+EDGE_MEMBERSHIP_MAINS = ("{n} of your relationship rules can't be answered on your draft's values "
+                         "alone — their ends follow relationships, test the view's layers or name "
+                         "what the draft changes: for the relationships your draft changed, or "
+                         "whose ends it changed, their look shows the published graph's answer.")
 TOO_LARGE = "Your draft changed more than {n:,} entities, so these counts show the published graph."
+TOO_LARGE_RELATIONSHIPS = ("Your draft changed more than {n:,} relationships and entities at their "
+                           "ends, so these counts show the published graph.")
 TOO_LARGE_CATALOG = ("Your draft changed more than {n:,} entities, so these properties and values show "
                      "the published graph.")
+TOO_LARGE_RELATIONSHIP_CATALOG = ("Your draft changed more than {n:,} relationships, so these "
+                                  "properties and values show the published graph.")
 
 #: A rule kind whose answer for an entity depends on other entities or on the view.
 _RELATIONAL = frozenset({"related", "degree", "isOrphan", "isLeaf", "isRoot", "hasIncoming",
@@ -114,8 +130,9 @@ def _platform_only() -> FrozenSet[str]:
 
 def inexact(predicate, changed: Set[str], named: FrozenSet[str] = frozenset()) -> Optional[str]:
     """Why ``predicate`` can't be answered on the draft's values entity by entity — the note to
-    show — or None when it can. ``changed``: the draft's ``D``; ``named``: the urns the rule's
-    name references resolved to, on the published graph."""
+    show — or None when it can (a Connections search: when its From and To can). ``changed``: the
+    draft's ``D``; ``named``: the urns the rule's name references resolved to, on the published
+    graph."""
     if named & changed:
         return NAMES_CHANGED
     platform = _platform_only()
@@ -124,6 +141,9 @@ def inexact(predicate, changed: Set[str], named: FrozenSet[str] = frozenset()) -
         kind = p.kind
         if kind == "group":
             return next((w for w in (why(c) for c in p.children) if w), None)
+        if kind == "edges":             # a Connections search: what its ends ask of each entity
+            return next((w for w in (why(end) for end in (p.source_where, p.target_where)
+                                     if end is not None) if w), None)
         if kind in _RELATIONAL:
             return RELATIONSHIPS
         if kind == "layer" and getattr(p, "_placement", None) is not None:
@@ -198,6 +218,64 @@ def _changed_order(d) -> List[str]:
     held = d.shared.get("draft-search:order")
     if held is None:
         held = d.shared["draft-search:order"] = sorted(changed_set(d))
+    return held
+
+
+def _changed_edge_order(d) -> List[str]:
+    """Every relationship the patch set adds, changes or removes, by id, in one order — kept
+    with the patch set."""
+    held = d.shared.get("draft-search:edge-order")
+    if held is None:
+        held = d.shared["draft-search:edge-order"] = sorted(set(d.edge_upsert) | set(d.edge_remove))
+    return held
+
+
+def _relationship_items(d) -> List[Tuple[str, str]]:
+    """What a correction of relationship counts steps through, in one order — kept with the
+    patch set: each relationship the patch set names (``("e", id)``), then each entity of ``D``
+    main may hold (``("n", urn)``: not one the draft created), whose relationships on main it
+    reads."""
+    held = d.shared.get("draft-search:relationship-items")
+    if held is None:
+        held = d.shared["draft-search:relationship-items"] = (
+            [("e", eid) for eid in _changed_edge_order(d)]
+            + [("n", urn) for urn in _changed_order(d) if urn not in d.node_new])
+    return held
+
+
+def _patch_edges_at(d, urns: Set[str], written: Set[str]) -> List[Any]:
+    """The patch set's live relationships (``edge_upsert``) with an end at any of ``urns``, each
+    once, but those in ``written`` — from an index of them by end, kept with the patch set."""
+    held = d.shared.get("draft-search:edges-at")
+    if held is None:
+        held = {}
+        for eid, e in d.edge_upsert.items():
+            if eid not in d.edge_remove:
+                for u in {e.source_urn, e.target_urn}:
+                    held.setdefault(u, []).append(eid)
+        d.shared["draft-search:edges-at"] = held
+    ids = sorted({eid for u in urns for eid in held.get(u, ()) if eid not in written})
+    return [d.edge_upsert[eid] for eid in ids]
+
+
+def _resolved(types: Callable[[], Sequence[str]]) -> Optional[List[str]]:
+    """The relationship types the ontology names for a class now, sorted, in upper case — None
+    when they can't be read."""
+    try:
+        return sorted({t.upper() for t in types()})
+    except Exception:
+        return None
+
+
+def _changed_edge_places(d) -> Set[Tuple[str, str, str]]:
+    """Where main holds each relationship the patch set changes or removes — its ends and its
+    type as the graph labels it, in upper case (one a type between two ends) — kept with the
+    patch set."""
+    held = d.shared.get("draft-search:edge-places")
+    if held is None:
+        held = d.shared["draft-search:edge-places"] = {
+            (e.source_urn, e.target_urn, _label(e.edge_type or "REL").upper())
+            for e in (*d.edge_remove.values(), *d.edge_was.values())}
     return held
 
 
@@ -388,6 +466,100 @@ class DraftSearch:
         result["elapsedMs"] = int((time.monotonic() - started) * 1000)
         return result
 
+    async def edge_membership(self, scope, items: Sequence[Tuple[str, Any]], edges: Sequence[Any],
+                              named: Mapping[str, FrozenSet[str]]) -> Dict[str, Any]:
+        """Main's Connections rule membership for ``edges`` (the relationships on screen), with
+        those the draft changed judged on the draft: one it removed, or whose end it removed,
+        matches nothing; one it created or changed is tested on its values — its type and its
+        filter (``predicate_eval.edge_matches``) — and on its ends as the draft holds them, rule
+        membership on the draft (:meth:`membership`). So is one it didn't change whose end it
+        changed: main's values, read between its two ends (:meth:`_main_edges`), on the draft's
+        ends. A rule whose ends can't be answered on the draft's values keeps main's answer for
+        them, and says so."""
+        from backend.common.predicate_eval import edge_matches
+
+        started = time.monotonic()
+        out = await self.base.deep_search_edge_membership(scope, items, edges, context=self.main_ctx)
+        result = {"matches": dict(out.get("matches") or {}), "errors": dict(out.get("errors") or {}),
+                  "elapsedMs": out.get("elapsedMs", 0), "notes": list(out.get("notes") or [])}
+        d = self.d
+        wanted = list({e.id: e for e in edges}.values())
+        gone = {e.id for e in wanted if e.id in d.edge_remove
+                or e.source in d.node_remove or e.target in d.node_remove}
+        drafted_ids = [e.id for e in wanted if e.id in d.edge_upsert and e.id not in gone]
+        rules = [(rid, p) for rid, p in items if rid not in result["errors"]]
+        touched = [e for e in wanted if e.id not in gone and e.id not in d.edge_upsert
+                   and (e.source in self.changed or e.target in self.changed)]
+        if not gone and not drafted_ids and not touched:
+            return result
+        try:
+            drafted = await d.edges([d.edge_upsert[eid] for eid in drafted_ids])
+            # The rules whose ends the draft's values answer, each with its type test.
+            exact: Dict[str, Any] = {}
+            for rid, p in rules:
+                typed = _edge_type_test(self.overlay, p)
+                held = named.get(rid, frozenset())
+                if typed is not None and not any(inexact(w, self.changed, held) for w in (
+                        p.source_where, p.target_where) if w is not None):
+                    exact[rid] = typed
+            if touched and exact:
+                drafted += await self._main_edges(touched)
+            ends = [(f"{rid}\0{end}", where or MatchAllPredicate())
+                    for rid, p in rules if rid in exact
+                    for end, where in (("from", p.source_where), ("to", p.target_where))]
+            urns = sorted({u for e in drafted for u in (e.source_urn, e.target_urn)})
+            meets: Dict[str, Set[str]] = {rid: set() for rid, _ in ends}
+            if ends and urns:
+                judged = await self.membership(scope, ends, urns, {
+                    rid: named.get(rid.split("\0")[0], frozenset()) for rid, _ in ends})
+                if judged["notes"]:
+                    raise LookupError(judged["notes"][0])   # an end answered as main's
+                meets = {rid: set(judged["matches"].get(rid) or ()) for rid, _ in ends
+                         if rid not in judged["errors"]}
+        except Exception:
+            logger.warning("draft edge membership: answered as main for the draft's changes",
+                           exc_info=True)
+            result["notes"].append(MEMBERSHIP_NOT_DRAFT_AWARE)
+            return result
+        answered = set(drafted_ids) | {e.id for e in touched}      # on the draft, by an exact rule
+        mains = 0
+        for rid, p in rules:
+            listed = {eid for eid in result["matches"].get(rid, []) if eid not in gone}
+            source, target = meets.get(f"{rid}\0from"), meets.get(f"{rid}\0to")
+            if rid in exact and source is not None and target is not None:
+                listed -= answered
+                listed |= {e.id for e in drafted if exact[rid](e.edge_type) and edge_matches(
+                    {"id": e.id, "confidence": e.confidence, "properties": e.properties},
+                    p.edge_predicate) and (
+                    (e.source_urn in source and e.target_urn in target)
+                    or (p.direction == "either" and e.source_urn in target
+                        and e.target_urn in source))}
+            elif drafted_ids or touched:
+                mains += 1          # main's answer, less what the draft removed
+            result["matches"][rid] = [e.id for e in wanted if e.id in listed]
+        if mains:
+            result["notes"].append(EDGE_MEMBERSHIP_MAINS.format(n=mains))
+        result["elapsedMs"] = int((time.monotonic() - started) * 1000)
+        return result
+
+    async def _main_edges(self, edges: Sequence[Any]) -> List[Any]:
+        """Main's value of each of ``edges`` (relationships on screen: an id and two ends), read
+        between its ends (``relationships_between``), never by its id — the one there of that id
+        (its own, else the reader's ``source|TYPE|target``), as a reader serves it. One main
+        doesn't hold there is left out."""
+        from backend.app.providers.falkordb_provider import _edge_from_row
+
+        held = await self._admitted(lambda: self.base.relationships_between(
+            [(e.source, e.target) for e in edges]))
+        out = []
+        for e in edges:
+            for rel_type, props in held.get((e.source, e.target), ()):
+                row = _edge_from_row(e.source, e.target, rel_type, props)
+                if row.id == e.id:
+                    out.append(row)
+                    break
+        return out
+
     def _hits(self, scope, read: _Read, rules, states: Sequence[_State]) -> Dict[str, Set[int]]:
         """Which of ``states`` (by position: a fold holds an entity twice, as it was and as it
         is) each rule matches on the draft — CPU, run off the event loop. A rule the evaluator
@@ -409,13 +581,18 @@ class DraftSearch:
                            named: Mapping[str, FrozenSet[str]], wait_ms: int) -> Dict[str, Any]:
         """How far each rule's count on the draft is from main's: ``{"deltas": {id: int},
         "approximate": {id: note}, "status", "progress"}``, read a step at a time until
-        ``wait_ms`` is spent (at least one step)."""
+        ``wait_ms`` is spent (at least one step) — the entity rules' correction, then the
+        relationship rules' (:meth:`_relationship_deltas`), each its own: running while either
+        is, their progress summed."""
+        started = time.monotonic()
         approx = {rid: why for rid, p in items
                   for why in [inexact(p, self.changed, named.get(rid, frozenset()))] if why}
-        exact = [(rid, p) for rid, p in items if rid not in approx]
-        if not exact:
-            return {"deltas": {}, "approximate": approx, "status": "complete",
-                    "progress": {"scanned": 0, "total": 0}}
+        exact = [(rid, p) for rid, p in items if rid not in approx and p.kind != "edges"]
+        typed = {rid: _edge_type_test(self.overlay, p) for rid, p in items
+                 if rid not in approx and p.kind == "edges"}
+        # A class whose types can't be read just now: what it takes can't be told.
+        approx.update({rid: NOT_DRAFT_AWARE for rid, test in typed.items() if test is None})
+        linked = [(rid, p) for rid, p in items if typed.get(rid) is not None]
         rules_id = [[rid, p.model_dump(mode="json", by_alias=True)] for rid, p in exact]
 
         async def step(states: List[_State], acc: Dict[str, Any]) -> None:
@@ -433,23 +610,357 @@ class DraftSearch:
                             for i, s in enumerate(states))
                 acc["deltas"][rid] = acc["deltas"].get(rid, 0) + delta
 
-        state = await self._advance("counts", scope, rules_id, {"deltas": {}}, step, wait_ms)
-        if state.get("tooLarge"):
-            note = TOO_LARGE.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)
-            return {"deltas": {}, "approximate": {rid: note for rid, _ in items},
-                    "status": "complete", "progress": {"scanned": 0, "total": 0}}
-        acc = state["acc"]
-        for rid, why in (acc.get("approximate") or {}).items():
-            approx.setdefault(rid, why if why in _NOTES else RELATIONSHIPS)
-        return {"deltas": {rid: n for rid, n in acc["deltas"].items() if rid not in approx},
-                "approximate": approx, "status": state["status"],
-                "progress": {"scanned": state["cursor"], "total": state["total"]}}
+        parts: List[Tuple[Dict[str, Any], str, bool]] = []
+        if exact:
+            parts.append((await self._advance("counts", scope, rules_id, {"deltas": {}}, step,
+                                              wait_ms // 2 if linked else wait_ms),
+                          TOO_LARGE, False))
+        if linked:
+            left = max(0, wait_ms - int((time.monotonic() - started) * 1000))
+            parts.append((await self._relationship_deltas(scope, linked, typed, named, left),
+                          TOO_LARGE_RELATIONSHIPS, True))
+        deltas: Dict[str, int] = {}
+        running, scanned, total = False, 0, 0
+        for state, too_large, edges in parts:
+            if state.get("tooLarge") or state["acc"].get("over"):
+                note = too_large.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)
+                approx.update({rid: note for rid, p in items if (p.kind == "edges") == edges})
+                continue
+            for rid, why in (state["acc"].get("approximate") or {}).items():
+                approx.setdefault(rid, why if why in _NOTES else RELATIONSHIPS)
+            deltas.update(state["acc"]["deltas"])
+            running = running or state["status"] != "complete"
+            scanned, total = scanned + state["cursor"], total + state["total"]
+        return {"deltas": {rid: n for rid, n in deltas.items() if rid not in approx},
+                "approximate": approx, "status": "running" if running else "complete",
+                "progress": {"scanned": scanned, "total": total}}
+
+    async def _relationship_deltas(self, scope, rules: Sequence[Tuple[str, Any]],
+                                   typed: Mapping[str, Callable[[Optional[str]], bool]],
+                                   named: Mapping[str, FrozenSet[str]], wait_ms: int
+                                   ) -> Dict[str, Any]:
+        """The relationship rules' correction (``rules``: Connections searches whose ends the
+        draft's values answer; ``typed``: each one's type test): each one's count on the draft
+        less main's, summed over every relationship whose match the draft can change — its match
+        on the draft (0 or 1) less its match on main:
+
+        * each relationship the patch set adds, changes or removes (:meth:`_changed_sides`);
+        * each one main holds at an entity of ``D`` that the patch set didn't change
+          (:meth:`_unchanged_sides`): its values are main's on both sides, only its ends'
+          membership can differ — so only those at an entity that enters or leaves a rule's From
+          or To on the draft (:meth:`_moved`) are read, whatever else the draft changed of it.
+
+        A side matches when its type is the rule's, its values meet the edge filter
+        (``predicate_eval.edge_matches``) and its ends the rule's From and To in the scope — or,
+        ``either``, To and From: rule membership, main's on main and the draft's on the draft
+        (:meth:`membership`). On the draft, one with an end the draft removed matches nothing.
+        Stepped ``BATCH`` items at a time (:meth:`_advance`, :func:`_relationship_items`), the
+        patch set's relationships first. Its ``acc`` holds ``over`` once the relationships read
+        would pass ``DRAFT_SEARCH_MAX_DELTA``: then main's counts answer — told before any is
+        read (``relationships_at``), so an entity past it costs no more than the cap.
+
+        A later commit is folded in (``fold_edges``, :meth:`_folded_sides`): the correction the
+        draft had at the seq before it, moved by what each relationship's match on the draft was
+        then and is now — read only for what the commits since wrote."""
+        types, except_types = _edge_types_read(self.overlay, [p for _, p in rules])
+        rules_id: List[Any] = [[rid, p.model_dump(mode="json", by_alias=True)] for rid, p in rules]
+        # The types the rules take, as the ontology resolves them now: a correction is reused only
+        # while they hold.
+        rules_id.append(["\0types", types, except_types,
+                         _resolved(self.overlay._get_lineage_edge_types),
+                         _resolved(self.overlay._get_containment_edge_types),
+                         sorted(t.upper() for t in self.overlay._containment_types)])
+
+        async def step(batch: List[Tuple[str, str]], acc: Dict[str, Any]) -> None:
+            if acc.get("over"):
+                return                                  # past the cap: nothing more is read
+            lost = acc.setdefault("approximate", {})
+            read = self._folded_sides if "from" in acc else self._full_sides
+            sides = await read(scope, rules, batch, acc, lost, named, types, except_types)
+            if sides is None:
+                acc["over"] = True
+                return
+            await self._count_sides(scope, rules, typed, sides, acc, lost, named)
+
+        return await self._advance("relationship-counts", scope, rules_id,
+                                   {"deltas": {}, "read": 0}, step, wait_ms,
+                                   through=_relationship_items, fold_edges=True)
+
+    async def _full_sides(self, scope, rules, batch, acc, lost, named, types, except_types
+                          ) -> Optional[List[Tuple[int, Any, str]]]:
+        """A step of a correction read afresh: both sides of each relationship the patch set
+        names and of main's at the entities of ``D`` that moved — None past the cap."""
+        ids = [x for kind, x in batch if kind == "e"]
+        urns = [x for kind, x in batch if kind == "n"]
+        budget = vconfig.DRAFT_SEARCH_MAX_DELTA - acc["read"] - len(ids)
+        moved = (await self._moved(scope, rules, urns, lost, named)
+                 if urns and budget >= 0 else set())
+        found: Optional[List[Any]] = []
+        if moved:
+            found = await self._admitted(lambda: self.base.relationships_at(
+                sorted(moved), edge_types=types, except_types=except_types, limit=budget))
+        if budget < 0 or found is None:
+            return None
+        acc["read"] += len(ids) + len(found)
+        return [*await self._changed_sides(ids),
+                *await self._unchanged_sides(scope, rules, urns, moved, found, lost, named)]
+
+    async def _folded_sides(self, scope, rules, batch, acc, lost, named, types, except_types
+                            ) -> Optional[List[Tuple[int, Any, str]]]:
+        """A step of a fold of the commits after ``acc["from"]`` (S): each relationship whose
+        match on the draft those commits can have moved, counted out as the draft held it at S
+        and in as it holds it now — None past the cap. Main is the same at both (the
+        correction's line and the draft's version pin it), so what main matches cancels:
+
+        * each edge they wrote (``("we", id)``): as the draft held it at S
+          (``draft_edges_as_of``; main's, read between its ends, where the draft read main's
+          then) and as it holds it now — every one of them is the patch set's now
+          (:meth:`_plan`);
+        * each relationship the draft holds at an entity they wrote (``("wn", id)``) that entered
+          or left a rule's From or To between S and now (:meth:`_moved`, ``since``) — main's
+          there that the patch set doesn't change, and the patch set's there that they didn't
+          write: its value the same at both, only its ends' membership moved. Each is counted at
+          the least of its moved ends."""
+        d, since = self.d, acc["from"]
+        written, wrote = d.shared[f"draft-search:fold:{since}"]
+        ids = _urn_of_id(d) or {}
+        we = [x for kind, x in batch if kind == "we"]
+        urns = [ids[x] for kind, x in batch if kind == "wn"]
+        budget = vconfig.DRAFT_SEARCH_MAX_DELTA - acc["read"] - len(we)
+        if budget < 0:
+            return None
+        sides: List[Tuple[int, Any, str]] = []
+        if we:
+            svc = self.overlay._svc
+            before = await svc.draft_edges_as_of(graph_id=self.overlay._gid,
+                                                 branch_id=self.overlay._branch,
+                                                 entity_ids=we, seq=since)
+            sides += [(-1, GraphEdge(**before[eid]), "S") for eid in we if before.get(eid)]
+            sides += [(-1, e, "S") for e in await self._main_values(
+                [eid for eid in we if eid not in before])]
+            sides += [(1, e, "T") for e in await d.edges([d.edge_upsert[eid] for eid in we])]
+        moved = await self._moved(scope, rules, urns, lost, named, since=since) if urns else set()
+        if moved:
+            found = await self._admitted(lambda: self.base.relationships_at(
+                sorted(moved), edge_types=types, except_types=except_types, limit=budget))
+            if found is None:
+                return None
+            drafted = await d.edges(_patch_edges_at(d, moved, set(written)))
+            if len(found) + len(drafted) > budget:
+                return None
+            acc["read"] += len(found) + len(drafted)
+            sides += await self._unchanged_sides(scope, rules, urns, moved, found, lost, named,
+                                                 since=since, wrote=set(wrote), drafted=drafted)
+        acc["read"] += len(we)
+        return sides
+
+    async def _count_sides(self, scope, rules, typed, sides: Sequence[Tuple[int, Any, str]],
+                           acc: Dict[str, Any], lost: Dict[str, str],
+                           named: Mapping[str, FrozenSet[str]]) -> None:
+        """Each rule's count moved by ``sides`` — ``(sign, edge, when)``, ``when`` the graph it is
+        judged on: ``main``; ``T``, the draft now; ``S``, the draft at the seq a fold folds from
+        (``acc["from"]``), where an end the fold's commits wrote is judged as the draft held it
+        then (:meth:`_meets_at`) and any other as it is now."""
+        from backend.common.predicate_eval import edge_matches
+
+        d = self.d
+        wrote: Set[str] = set()
+        if "from" in acc:
+            wrote = set(d.shared[f"draft-search:fold:{acc['from']}"][1])
+        # Of each rule, the sides its type and its filter take.
+        taken = {rid: [i for i, (_, e, when) in enumerate(sides) if typed[rid](e.edge_type)
+                       and not (when == "T" and (e.source_urn in d.node_remove
+                                                 or e.target_urn in d.node_remove))
+                       and edge_matches({"id": e.id, "confidence": e.confidence,
+                                         "properties": e.properties}, p.edge_predicate)]
+                 for rid, p in rules if rid not in lost}
+        ends = [(f"{rid}\0{end}", where or MatchAllPredicate())
+                for rid, p in rules if taken.get(rid)
+                for end, where in (("from", p.source_where), ("to", p.target_where))]
+
+        def oracle(urn: str, when: str) -> str:
+            if when == "S" and urn in wrote:
+                return "S"
+            return "T" if when != "main" and urn in self.changed else "main"
+
+        asked: Dict[str, Set[str]] = {"main": set(), "T": set(), "S": set()}
+        for picked in taken.values():
+            for i in picked:
+                _, e, when = sides[i]
+                for u in (e.source_urn, e.target_urn):
+                    asked[oracle(u, when)].add(u)
+        held = {"main": await self._meets(scope, ends, asked["main"], lost),
+                "T": await self._meets(scope, ends, asked["T"], lost, named),
+                "S": await self._meets_at(scope, ends, asked["S"], lost, acc.get("from"))}
+        for rid, p in rules:
+            if rid in lost or not taken.get(rid):
+                continue
+
+            def meets(urn: str, end: str, when: str) -> bool:
+                return urn in held[oracle(urn, when)][f"{rid}\0{end}"]
+
+            acc["deltas"][rid] = acc["deltas"].get(rid, 0) + sum(
+                sign for sign, e, when in (sides[i] for i in taken[rid]) if (
+                    (meets(e.source_urn, "from", when) and meets(e.target_urn, "to", when))
+                    or (p.direction == "either" and meets(e.source_urn, "to", when)
+                        and meets(e.target_urn, "from", when))))
+
+    async def _main_values(self, ids: Sequence[str]) -> List[Any]:
+        """Main's value of each of ``ids`` (relationships the patch set names) main holds — where
+        it holds it (``edge_remove`` / ``edge_was``: its ends and type), read between its ends
+        (``relationships_between``), never by its id."""
+        from backend.app.providers.falkordb_provider import _edge_from_row, _sanitize_label
+
+        d = self.d
+        held = [e for e in (d.edge_remove.get(eid) or d.edge_was.get(eid) for eid in ids)
+                if e is not None]
+        out: List[Any] = []
+        if held:
+            values = await self._admitted(lambda: self.base.relationships_between(
+                [(e.source_urn, e.target_urn) for e in held]))
+            for e in held:
+                want = _sanitize_label(e.edge_type or "REL").upper()
+                for rel_type, props in values.get((e.source_urn, e.target_urn), ()):
+                    if rel_type.upper() == want:
+                        out.append(_edge_from_row(e.source_urn, e.target_urn, rel_type, props))
+                        break
+        return out
+
+    async def _changed_sides(self, ids: Sequence[str]) -> List[Tuple[int, Any, str]]:
+        """Both sides of each of ``ids`` (relationships the patch set names), as ``(sign, edge,
+        when)``: main's (:meth:`_main_values`), counted out; and the draft's, as the draft holds
+        it, counted in."""
+        d = self.d
+        drafted = [d.edge_upsert[eid] for eid in ids
+                   if eid in d.edge_upsert and eid not in d.edge_remove]
+        return ([(-1, e, "main") for e in await self._main_values(ids)]
+                + [(1, e, "T") for e in await d.edges(drafted)])
+
+    async def _unchanged_sides(self, scope, rules: Sequence[Tuple[str, Any]], urns: Sequence[str],
+                               moved: Set[str], found: Sequence[Any], lost: Dict[str, str],
+                               named: Mapping[str, FrozenSet[str]], *, since: Optional[int] = None,
+                               wrote: Set[str] = frozenset(), drafted: Sequence[Any] = ()
+                               ) -> List[Tuple[int, Any, str]]:
+        """Both sides of each of ``found`` — main's relationships at ``moved``, the entities of
+        this step's ``urns`` (of ``D``) that :meth:`_moved` — that the patch set didn't change, as
+        :meth:`_changed_sides` gives them: its values main's on both. Each is counted at the least
+        of its ends that moved (each read there), so one between two of them counts once: an end
+        of ``D`` another step takes is asked whether it moved too.
+
+        Folding (``since``): main's on main is the draft's at S, and ``drafted`` — the patch
+        set's at ``moved`` that the fold's commits didn't write — join them, the same at S as
+        now; the ends that may have moved are those the commits wrote (``wrote``)."""
+        d = self.d
+        places = await asyncio.to_thread(_changed_edge_places, d)
+        kept = [e for e in found                        # the patch set's: counted by its id
+                if (e.source_urn, e.target_urn, _label(e.edge_type or "REL").upper()) not in places]
+        kept += list(drafted)
+        stepped = set(urns)
+        if since is None:
+            far = {u for e in kept for u in (e.source_urn, e.target_urn)
+                   if u in self.changed and u not in d.node_new and u not in stepped}
+        else:
+            far = {u for e in kept for u in (e.source_urn, e.target_urn)
+                   if u in wrote and u not in stepped}
+        moving = moved | (await self._moved(scope, rules, sorted(far), lost, named, since=since)
+                          if far else set())
+        before = "main" if since is None else "S"
+        sides: List[Tuple[int, Any, str]] = []
+        for e in kept:
+            ends = [u for u in (e.source_urn, e.target_urn) if u in moving]
+            if ends and min(ends) in moved:
+                sides += [(-1, e, before), (1, e, "T")]
+        return sides
+
+    async def _moved(self, scope, rules: Sequence[Tuple[str, Any]], urns: Sequence[str],
+                     lost: Dict[str, str], named: Mapping[str, FrozenSet[str]],
+                     since: Optional[int] = None) -> Set[str]:
+        """Which of ``urns`` (entities of ``D`` main holds) enter or leave a rule's From or To on
+        the draft: meet one on main and not on the draft, or the other way — one the draft removed
+        meets none. A relationship the patch set didn't change has main's values on both sides, so
+        its type and its filter answer alike on both: its match can move only at such an end.
+        ``since``: on the draft between that seq and now (``urns``: entities written since)."""
+        ends = [(f"{rid}\0{end}", where or MatchAllPredicate())
+                for rid, p in rules if rid not in lost
+                for end, where in (("from", p.source_where), ("to", p.target_where))]
+        if not ends or not urns:
+            return set()
+        asked = set(urns)
+        before = (await self._meets(scope, ends, asked, lost) if since is None
+                  else await self._meets_at(scope, ends, asked, lost, since))
+        on_draft = await self._meets(scope, ends, asked, lost, named)
+        return {u for u in asked if any((u in before[k]) != (u in on_draft[k])
+                                        for k, _ in ends if k.split("\0")[0] not in lost)}
+
+    async def _meets_at(self, scope, ends: Sequence[Tuple[str, Any]], urns: Set[str],
+                        lost: Dict[str, str], since: Optional[int]) -> Dict[str, Set[str]]:
+        """Which of ``urns`` — entities the commits after ``since`` wrote — met each of ``ends``
+        on the draft as it was at ``since``: as the draft held them then (``draft_nodes_as_of``),
+        judged as :meth:`membership` judges the draft now (the commits moved nothing in the
+        hierarchy: :meth:`_plan`); main's, for those the draft read as main's then."""
+        meets: Dict[str, Set[str]] = {rid: set() for rid, _ in ends}
+        if not ends or not urns:
+            return meets
+        ids = {urn: eid for eid, urn in (_urn_of_id(self.d) or {}).items()}
+        ordered = sorted(urns)
+        for at in range(0, len(ordered), BATCH):
+            part = ordered[at:at + BATCH]
+            before = await self.overlay._svc.draft_nodes_as_of(
+                graph_id=self.overlay._gid, branch_id=self.overlay._branch,
+                entity_ids=[ids[u] for u in part if u in ids], seq=since)
+            held = {u: before[ids[u]] for u in part if ids.get(u) in before}
+            mains = {u for u in part if u not in held}
+            if mains:
+                for rid, got in (await self._meets(scope, ends, mains, lost)).items():
+                    meets[rid] |= got
+            states = [_State(-1, u, GraphNode(**held[u]["node"]) if held[u].get("node") else None)
+                      for u in sorted(held)]
+            if not states:
+                continue
+            read = await self._read(scope, ends, states)
+            for rid, why in read.main_errors.items():
+                lost.setdefault(rid.split("\0")[0], why)
+            hits = await asyncio.to_thread(self._hits, scope, read, ends, states)
+            for rid, _ in ends:
+                if rid.split("\0")[0] in lost:
+                    continue
+                if rid not in hits:
+                    raise LookupError(MEMBERSHIP_MAINS.format(n=1))   # an end answered as main's
+                meets[rid].update(states[i].urn for i in hits[rid])
+        return meets
+
+    async def _meets(self, scope, ends: Sequence[Tuple[str, Any]], urns: Set[str],
+                     lost: Dict[str, str], named: Optional[Mapping[str, FrozenSet[str]]] = None
+                     ) -> Dict[str, Set[str]]:
+        """Which of ``urns`` meet each of ``ends`` (a rule's From and To as rule membership in
+        ``scope``), ``BATCH`` urns a statement: main's — or, ``named`` given, the draft's
+        (:meth:`membership`). A rule one of whose ends errs is ``lost``, with why."""
+        meets: Dict[str, Set[str]] = {rid: set() for rid, _ in ends}
+        ordered = sorted(urns) if ends else []
+        for at in range(0, len(ordered), BATCH):
+            part = ordered[at:at + BATCH]
+            if named is None:
+                out = await self.base.deep_search_membership(scope, ends, part,
+                                                             context=self.main_ctx)
+            else:
+                out = await self.membership(scope, ends, part, {
+                    rid: named.get(rid.split("\0")[0], frozenset()) for rid, _ in ends})
+                if out["notes"]:
+                    raise LookupError(out["notes"][0])  # an end answered as main's
+            for rid, why in (out.get("errors") or {}).items():
+                lost.setdefault(rid.split("\0")[0], why)
+            for rid, _ in ends:
+                meets[rid].update((out.get("matches") or {}).get(rid) or ())
+        return meets
 
     # ---- catalog ------------------------------------------------------ #
     async def catalog(self, scope, main_answer: Dict[str, Any], wait_ms: int,
-                      values_for: Optional[str] = None) -> Dict[str, Any]:
+                      values_for: Optional[str] = None, subject: str = "entities") -> Dict[str, Any]:
         """Main's catalog ``main_answer`` with the draft's changes folded in — ``values_for``: a key
-        whose every kept value is listed (as main's own catalog lists it)."""
+        whose every kept value is listed (as main's own catalog lists it); ``subject``
+        ``relationships``: main's relationship catalog, with the relationships the draft added,
+        changed or removed folded in (:meth:`_fold_relationships`)."""
+        relationships = subject == "relationships"
         skip = _skipped_keys()
         # The change's statistics as this request folds them, read from the correction once —
         # and written back to it only when it is saved (``keep``).
@@ -467,21 +978,26 @@ class DraftSearch:
                     change.add_entity(_label(s.node.entity_type), s.node.properties,
                                       s.node.tags, skip, s.sign)
 
-        async def step(states: List[_State], acc: Dict[str, Any]) -> None:
-            read = await self._read(scope, [], states, nodes=True)
+        async def step(items: List[Any], acc: Dict[str, Any]) -> None:
             if "stats" not in live:
                 live["stats"] = await asyncio.to_thread(CatalogStats.from_json, acc["stats"])
-            await asyncio.to_thread(fold, read, states, live["stats"])
+            if relationships:
+                await self._fold_relationships(scope, items, live["stats"])
+                return
+            read = await self._read(scope, [], items, nodes=True)
+            await asyncio.to_thread(fold, read, items, live["stats"])
 
         def keep(acc: Dict[str, Any]) -> None:
             if "stats" in live:
                 acc["stats"] = live["stats"].to_json()
 
-        state = await self._advance("catalog", scope, [], {"stats": CatalogStats().to_json()},
-                                    step, wait_ms, keep)
+        state = await self._advance("relationship-catalog" if relationships else "catalog", scope,
+                                    [], {"stats": CatalogStats().to_json()}, step, wait_ms, keep,
+                                    through=_changed_edge_order if relationships else None)
         if state.get("tooLarge"):
+            note = TOO_LARGE_RELATIONSHIP_CATALOG if relationships else TOO_LARGE_CATALOG
             return {**main_answer, "notes": [*(main_answer.get("notes") or []),
-                                             TOO_LARGE_CATALOG.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)]}
+                                             note.format(n=vconfig.DRAFT_SEARCH_MAX_DELTA)]}
         main_progress = main_answer.get("progress") or {}
         progress = {"scanned": int(main_progress.get("scanned") or 0) + state["cursor"],
                     "total": int(main_progress.get("total") or 0) + state["total"]}
@@ -496,7 +1012,8 @@ class DraftSearch:
             raise LookupError("main's catalog is not kept where its session is")
         merged, wide = CatalogStats.from_json(raw).folded(
             live.get("stats") or CatalogStats.from_json(state["acc"]["stats"]))
-        answer = answer_of(merged, main_session, self.main_ctx, wide, values_for=values_for)
+        answer = answer_of(merged, main_session, self.main_ctx, wide, values_for=values_for,
+                           subject=subject)
         answer.update({
             "status": state["status"],
             "entities": sum(merged.entities.values()),
@@ -506,9 +1023,70 @@ class DraftSearch:
         })
         return answer
 
+    async def _fold_relationships(self, scope, ids: List[str], change: CatalogStats) -> None:
+        """One step of a relationship catalog's correction, into ``change``: each of ``ids`` taken
+        out as main holds it — when main holds it, both its ends in the scope — and counted back as
+        the draft holds it, when the draft does, both its ends in the scope there. Main's value is
+        read from the graph between its two ends (``relationships_between``), never by its id; an
+        end the draft didn't change is in the scope on the draft as it is on main. As an entity
+        correction leaves ``residual`` (which keys the projector will keep in the JSON isn't known
+        here), so does this. Never a rollup."""
+        from backend.app.providers.falkordb_provider import _sanitize_label, edge_user_properties
+        from backend.common.derived_artifacts import is_derived_edge_type
+
+        d = self.d
+        held = {eid: d.edge_remove.get(eid) or d.edge_was.get(eid) for eid in ids}
+        held = {eid: e for eid, e in held.items()
+                if e is not None and not is_derived_edge_type(e.edge_type)}
+        drafted = [d.edge_upsert[eid] for eid in ids
+                   if eid in d.edge_upsert and eid not in d.edge_remove]
+        drafted = [e for e in await d.edges(drafted) if not is_derived_edge_type(e.edge_type)]
+        main_values = await self._admitted(lambda: self.base.relationships_between(
+            [(e.source_urn, e.target_urn) for e in held.values()]))
+
+        ends = {u for e in held.values() for u in (e.source_urn, e.target_urn)}
+        draft_ends = {u for e in drafted for u in (e.source_urn, e.target_urn)}
+        mine = sorted(u for u in draft_ends if u in self.changed)
+        nodes = {n.urn: n for n in await d.served([u for u in mine if u not in d.node_remove])}
+        states = [_State(1, u, nodes.get(u)) for u in mine]
+        membership = await self.base.deep_search_membership(
+            scope, [(_SCOPE, MatchAllPredicate())], sorted(ends | draft_ends),
+            context=self.main_ctx)
+        read = await self._read(scope, [], states, membership=membership)
+        on_main = read.main_in
+
+        def on_draft(urn: str) -> bool:
+            if urn not in self.changed:
+                return urn in on_main
+            node = nodes.get(urn)
+            return node is not None and self._in_scope(scope, read, _State(1, urn, node))
+
+        spelled: Dict[str, str] = {}               # the type main stores each held one as
+        for eid, e in held.items():
+            if e.source_urn not in on_main or e.target_urn not in on_main:
+                continue
+            want = _sanitize_label(e.edge_type or "REL").upper()
+            for rel_type, native in main_values.get((e.source_urn, e.target_urn), ()):
+                if rel_type.upper() == want:
+                    spelled[eid] = rel_type
+                    change.add_entities(rel_type, -1)
+                    change.add_properties(rel_type, edge_user_properties(rel_type, native)[0],
+                                          frozenset(), -1)
+                    break
+        for e in drafted:
+            if not (on_draft(e.source_urn) and on_draft(e.target_urn)):
+                continue
+            rel_type = _sanitize_label(e.edge_type or "REL")
+            if e.id in spelled and spelled[e.id].upper() == rel_type.upper():
+                rel_type = spelled[e.id]
+            change.add_entities(rel_type, 1)
+            change.add_properties(rel_type, e.properties or {}, frozenset(), 1)
+
     # ---- the correction's session -------------------------------------- #
     async def _advance(self, kind: str, scope, rules_id, fresh: Dict[str, Any], step,
-                       wait_ms: int, keep=None) -> Dict[str, Any]:
+                       wait_ms: int, keep=None,
+                       through: Optional[Callable[[Any], List[Any]]] = None,
+                       fold_edges: bool = False) -> Dict[str, Any]:
         """This request's share of a correction: continue the one this draft version has, or
         start it — folding in only the commits since the latest complete one of the same draft,
         rules and scope over the same main, when that is fewer entities than ``D`` — and run its
@@ -519,7 +1097,13 @@ class DraftSearch:
 
         The corrections a newer one supersedes are deleted, not left to their TTL: the complete one
         of an earlier version, once the newer completes; one still running for an earlier version,
-        once the newer starts."""
+        once the newer starts.
+
+        ``through``: the correction steps through what ``through(d)`` lists of the patch set — the
+        relationships it names (:func:`_changed_edge_order`), or those and the entities of ``D``
+        main holds (:func:`_relationship_items`) — a batch at a time, rather than its entities;
+        ``fold_edges``, folding in only what the commits since wrote of edges and nodes
+        (:meth:`_plan`), as ``("we", id)`` and ``("wn", id)`` items."""
         version = list(self.overlay._version or ())
         line = _digest([kind, self.overlay._gid, self.overlay._branch, self.main_ctx.data_version,
                         self.ctx.scope_hash, scope.model_dump(mode="json", by_alias=True),
@@ -530,7 +1114,7 @@ class DraftSearch:
         state = json.loads(await self.store.load_accumulator(sid) or "null") if session else None
         finished = False
         if session is None or state is None:
-            state = await self._plan(version, pointer, fresh)
+            state = await self._plan(version, pointer, fresh, through, fold_edges)
             if _too_large(state):
                 return {**state, "tooLarge": True}
             session = Session(sid, line, self.main_ctx.data_version, None, 0, [], [],
@@ -553,18 +1137,19 @@ class DraftSearch:
                     if latest is not None:
                         session = latest
                         state = json.loads(await self.store.load_accumulator(sid) or "null") or state
-                    items = await self._items(state)
+                    items = await self._items(state, through)
                     if items is None:
                         # The commits a fold reads are not what they were: read all of D.
                         state = {**state, "mode": "full", "cursor": 0, "acc": fresh}
-                        items = await self._items(state)
+                        items = await self._items(state, through)
                         state["total"] = session.total = len(items)
                         if _too_large(state):
                             return {**state, "tooLarge": True}
                     steps = 0
                     while session.status == RUNNING:
                         batch = items[state["cursor"]:state["cursor"] + BATCH]
-                        await step(await self._states(state, batch), state["acc"])
+                        await step(batch if through else await self._states(state, batch),
+                                   state["acc"])
                         state["cursor"] += len(batch)
                         session.scanned = state["cursor"]
                         steps += 1
@@ -602,10 +1187,17 @@ class DraftSearch:
                 await self.store.delete(before)
         await self.store.point(running, sid, _TTL_S)
 
-    async def _plan(self, version: List[Any], pointer: str, fresh: Dict[str, Any]) -> Dict[str, Any]:
+    async def _plan(self, version: List[Any], pointer: str, fresh: Dict[str, Any],
+                    through: Optional[Callable[[Any], List[Any]]] = None,
+                    fold_edges: bool = False) -> Dict[str, Any]:
         """A new correction for this draft version: a fold of the commits since the latest
-        complete one, when that can be, else a read of all of ``D``."""
-        order = await asyncio.to_thread(_changed_order, self.d)
+        complete one, when that can be, else a read of all of ``D`` — ``through``, of all it
+        lists, folded only with ``fold_edges`` (:meth:`_fold_edges`)."""
+        if through and not fold_edges:
+            order = await asyncio.to_thread(through, self.d)
+            return {"seq": None, "version": [str(v) for v in version[1:]], "mode": "full",
+                    "cursor": 0, "total": len(order), "acc": fresh, "status": "running"}
+        order = await asyncio.to_thread(through or _changed_order, self.d)
         head = await self.overlay._svc.draft_search_window(
             graph_id=self.overlay._gid, branch_id=self.overlay._branch,
             commit_id=version[0] if version else None)
@@ -616,6 +1208,8 @@ class DraftSearch:
         prev = await self.store.load(prev_sid) if prev_sid else None
         held = (json.loads(await self.store.load_accumulator(prev_sid) or "null")
                 if prev is not None and prev.status == COMPLETE else None)
+        if through:
+            return await self._fold_edges(version, state, held, len(order))
         if (held is None or seq is None or held.get("seq") is None or held["seq"] >= seq
                 or held.get("version") != state["version"]
                 or await asyncio.to_thread(_urn_of_id, self.d) is None):
@@ -629,9 +1223,58 @@ class DraftSearch:
         return {**state, "mode": "fold", "from": held["seq"], "total": len(window["nodes"]),
                 "acc": held["acc"]}
 
-    async def _items(self, state: Dict[str, Any]) -> Optional[List[str]]:
+    async def _fold_edges(self, version: List[Any], state: Dict[str, Any],
+                          held: Optional[Dict[str, Any]], size: int) -> Dict[str, Any]:
+        """A fold of relationship counts (:meth:`_folded_sides`) of the commits after the held
+        correction's seq — when nothing they wrote is past what one can fold: they moved nothing
+        in the hierarchy and named no node anew (``edges``, ``renamed``); every edge they wrote
+        the patch set holds now (none deleted), and every node they wrote is one of ``D`` by id
+        and still on the draft (one gone has no place there to judge it at the seq by); and the
+        held correction stayed within the cap. Else ``state``: read whole. Never more than half
+        as much as reading whole (``size`` items) would be."""
+        d = self.d
+        seq = state["seq"]
+        ids = await asyncio.to_thread(_urn_of_id, d)
+        if (held is None or seq is None or held.get("seq") is None or held["seq"] >= seq
+                or held.get("version") != state["version"] or held["acc"].get("over")
+                or ids is None):
+            return state
+        window = await self.overlay._svc.draft_search_window(
+            graph_id=self.overlay._gid, branch_id=self.overlay._branch, commit_id=version[0],
+            since_seq=held["seq"], limit=size // 2, edge_ids=True,
+            containment_types=list(self.overlay._containment_types))
+        nodes, edges = window.get("nodes"), window.get("edgeIds")
+        if (window.get("edges") or window.get("renamed") or nodes is None or edges is None
+                or len(nodes) + len(edges) > size // 2
+                or any(e not in d.edge_upsert or e in d.edge_remove for e in edges)
+                or any(n not in ids or ids[n] in d.node_remove for n in nodes)):
+            return state
+        acc = {"deltas": dict(held["acc"].get("deltas") or {}),
+               "approximate": dict(held["acc"].get("approximate") or {}),
+               "read": 0, "from": held["seq"]}
+        return {**state, "mode": "fold", "from": held["seq"], "total": len(nodes) + len(edges),
+                "acc": acc}
+
+    async def _items(self, state: Dict[str, Any],
+                     through: Optional[Callable[[Any], List[Any]]] = None) -> Optional[List[Any]]:
         """What the correction steps through: ``D``'s urns, or the entity ids a fold reads —
-        None when those are not what the fold was planned on."""
+        None when those are not what the fold was planned on; ``through``, what it lists, or a
+        fold's edges and nodes (:meth:`_fold_edges`)."""
+        if through and state["mode"] == "fold":
+            window = await self.overlay._svc.draft_search_window(
+                graph_id=self.overlay._gid, branch_id=self.overlay._branch,
+                commit_id=(self.overlay._version or (None,))[0], since_seq=state["from"],
+                limit=state["total"], edge_ids=True)
+            nodes, edges = window.get("nodes"), window.get("edgeIds")
+            ids = _urn_of_id(self.d) or {}
+            if (nodes is None or edges is None or len(nodes) + len(edges) != state["total"]
+                    or any(n not in ids for n in nodes)):
+                return None
+            # What the fold's steps judge an end at its seq by: the commits wrote it.
+            self.d.shared[f"draft-search:fold:{state['from']}"] = (edges, [ids[n] for n in nodes])
+            return [("we", e) for e in edges] + [("wn", n) for n in nodes]
+        if through:
+            return await asyncio.to_thread(through, self.d)
         if state["mode"] == "full":
             return await asyncio.to_thread(_changed_order, self.d)
         window = await self.overlay._svc.draft_search_window(
@@ -706,6 +1349,135 @@ async def draft_matches(overlay, scope: Mapping[str, Any], predicate: Any, judge
         # A draft's nodes in D each carry their entity id (``branch_overlay_delta``).
         ids += [d.node_modified[u] for u in out.matches.get(_TARGET) or ()]
     return {"ids": sorted(set(ids))}
+
+
+#: The rules a Connections search's ends are judged as, by :func:`edge_draft_matches`.
+_FROM, _TO = "from", "to"
+
+
+async def edge_draft_matches(overlay, scope: Mapping[str, Any], predicate: Any, judge) -> Dict[str, Any]:
+    """:func:`draft_matches` for a Connections search: which of the relationships a draft added or
+    changed — the edges its patch set names, less what it removed, in one order — the search
+    matches there, as their entity ids, sorted: ``{"ids": [...]}``. What a search of the published
+    graph can't name: a relationship new in the draft, or changed there to match.
+
+    Its own values are tested on the draft's: its type, one the search names (or of its class,
+    never a roll-up), and its filter (``predicate_eval.edge_matches``). Its ends are judged
+    ``BATCH`` urns at a time as rule membership on the draft (``judge``, as :func:`draft_matches`
+    judges): both in ``scope``, the source meeting From and the target To — or, ``either``, the
+    other way round. ``{"unsearched": why}`` as :func:`draft_matches` says it, ``inexact`` too
+    when the class's types can't be read; and ``ends`` beside the ids when the search tests its
+    ends and the draft changed entities — a relationship it didn't change, whose end it changed to
+    match, isn't among them."""
+    from pydantic import TypeAdapter
+
+    from backend.app.services.advanced_search_service import ValidationError
+    from backend.common.models.search import Predicate, SearchMembershipRequest, unwrap_edges
+    from backend.common.predicate_eval import edge_matches
+
+    searches = getattr(overlay, "_searches_draft", None)
+    if searches is None or not searches():
+        return {"unsearched": "fork"}
+    p = unwrap_edges(TypeAdapter(Predicate).validate_python(predicate))
+    typed = _edge_type_test(overlay, p)
+    if typed is None:
+        return {"unsearched": "inexact"}
+
+    d = await overlay._delta_()
+    if len(d.edge_upsert) > vconfig.DRAFT_SEARCH_MAX_DELTA:
+        return {"unsearched": "too_large"}
+    live = [e for e in sorted(d.edge_upsert.values(), key=lambda e: e.id)
+            if e.id not in d.edge_remove and typed(e.edge_type)]
+    every = {"kind": "all"}
+    items = [{"id": _FROM, "predicate": p.source_where.model_dump(mode="json", by_alias=True)
+              if p.source_where is not None else every},
+             {"id": _TO, "predicate": p.target_where.model_dump(mode="json", by_alias=True)
+              if p.target_where is not None else every}]
+    ids: List[str] = []
+    for at in range(0, len(live), BATCH // 2):          # two ends an edge: a statement's urns
+        batch = live[at:at + BATCH // 2]
+        if p.edge_predicate is not None:
+            batch = [e for e in await d.edges(batch) if edge_matches(
+                {"id": e.id, "confidence": e.confidence, "properties": e.properties}, p.edge_predicate)]
+        if not batch:
+            continue
+        request = SearchMembershipRequest.model_validate({
+            "scope": scope, "items": items,
+            "urns": list(dict.fromkeys(u for e in batch for u in (e.source_urn, e.target_urn)))})
+        try:
+            out = await judge(request)
+        except ValidationError:
+            return {"unsearched": "inexact"}
+        if MEMBERSHIP_NOT_DRAFT_AWARE in out.notes:
+            return {"unsearched": "unread"}
+        if out.notes or _FROM in out.errors or _TO in out.errors:
+            return {"unsearched": "inexact"}
+        meets = {rule: set(out.matches.get(rule) or ()) for rule in (_FROM, _TO)}
+        ids += [e.id for e in batch
+                if (e.source_urn in meets[_FROM] and e.target_urn in meets[_TO])
+                or (p.direction == "either" and e.source_urn in meets[_TO] and e.target_urn in meets[_FROM])]
+    ends = p.source_where is not None or p.target_where is not None
+    changed = ends and bool(await asyncio.to_thread(changed_set, d))
+    return {"ids": sorted(set(ids)), **({"unsearched": "ends"} if changed else {})}
+
+
+def _edge_type_test(overlay, p) -> Optional[Callable[[Optional[str]], bool]]:
+    """Whether a relationship of a type is one Connections search ``p`` takes: a type it names,
+    else one of its class (every link — every type but the hierarchy's — by default), never a
+    roll-up. None when the class's types can't be read: what it takes can't be told."""
+    from backend.common.derived_artifacts import is_derived_edge_type
+
+    named = {t.upper() for t in p.edge_types or ()}
+    edge_class = p.edge_class or "links"
+    if named or edge_class == "any":
+        kept = None
+    else:
+        try:
+            kept = {t.upper() for t in (overlay._get_lineage_edge_types() if edge_class == "lineage"
+                                        else overlay._get_containment_edge_types())}
+        except Exception:
+            return None
+
+    def typed(edge_type: Optional[str]) -> bool:
+        t = (edge_type or "").upper()
+        if is_derived_edge_type(t):
+            return False
+        if named:
+            return t in named
+        if kept is None:                    # any
+            return True
+        if edge_class == "links":           # every type but the hierarchy's
+            return t not in kept
+        return t in kept
+
+    return typed
+
+
+def _edge_types_read(overlay, rules) -> Tuple[Optional[List[str]], List[str]]:
+    """The relationship types one read takes for Connections searches ``rules``, whose types
+    :func:`_edge_type_test` could read: ``(types, [])`` — those they name, or their classes' — or,
+    when one takes every link or every type, ``(None, except)``: every type but the hierarchy's
+    that none of them takes. A roll-up never (the read leaves those out)."""
+    named: Dict[str, str] = {}
+    every = links = False
+    for p in rules:
+        edge_class = p.edge_class or "links"
+        if p.edge_types:
+            kept = p.edge_types
+        elif edge_class in ("any", "links"):
+            every, links = every or edge_class == "any", links or edge_class == "links"
+            continue
+        else:
+            kept = (overlay._get_lineage_edge_types() if edge_class == "lineage"
+                    else overlay._get_containment_edge_types())
+        for t in kept:
+            named.setdefault(t.upper(), t)
+    if every:
+        return None, []
+    if links:
+        return None, sorted({t for t in overlay._get_containment_edge_types()
+                             if t.upper() not in named})
+    return sorted(named.values()), []
 
 
 def _too_large(state: Dict[str, Any]) -> bool:

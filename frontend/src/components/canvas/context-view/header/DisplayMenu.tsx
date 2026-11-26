@@ -91,6 +91,7 @@ export function DisplayMenu({
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
   const headerSize = usePreferencesStore((s) => s.canvasHeaderSize) ?? 'comfortable'
   const showOffscreenLineMarkers = usePreferencesStore((s) => s.showOffscreenLineMarkers) ?? true
+  const showGraphDigest = usePreferencesStore((s) => s.showGraphDigest) ?? true
   const emptyLayerMessage = usePreferencesStore((s) => s.emptyLayerMessage) ?? 'always'
   const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
   // The Business view's Display is the canvas and how many lines it draws; how
@@ -102,7 +103,7 @@ export function DisplayMenu({
   const isCustom = !isDefaultState({
     canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage,
     showEntityIds: !technical || showEntityIds,
-    headerSize, showOffscreenLineMarkers, emptyLayerMessage,
+    headerSize, showOffscreenLineMarkers, showGraphDigest, emptyLayerMessage,
   })
 
   return (
@@ -119,7 +120,7 @@ export function DisplayMenu({
               <HoverTip
                 className="ml-auto inline-flex"
                 label="Put the canvas settings back to their defaults"
-                detail="Zoom, density, header size, icons, IDs, badges, off-screen markers, tree lines, the memory gauge and empty layers"
+                detail="Zoom, density, header size, icons, IDs, badges, off-screen markers, what’s new, tree lines, the memory gauge and empty layers"
               >
                 <button
                   type="button"

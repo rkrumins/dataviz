@@ -82,13 +82,16 @@ export interface PropertyNameBudgetProps {
      *  best-effort, so a graph that never completed one has fewer platform
      *  names than the constant claims, which under-counts this side. */
     source?: number | null
+    /** Where the platform's own writes stop adding names (a new one past it is kept as a
+     *  value): drawn as a mark on the track. Omitted → no mark. */
+    budget?: number | null
     /** Tight variant for a row; the full one gets the label and legend. */
     compact?: boolean
     className?: string
 }
 
 export function PropertyNameBudget({
-    total, platform, source, compact = false, className,
+    total, platform, source, budget, compact = false, className,
 }: PropertyNameBudgetProps) {
     if (total == null) {
         return (
@@ -109,6 +112,8 @@ export function PropertyNameBudget({
         ? Math.min(shown, (platform! / PROPERTY_NAME_CEILING) * 100)
         : 0
     const sourcePct = Math.max(0, shown - platformPct)
+    const budgetPct = budget != null && budget > 0 && budget < PROPERTY_NAME_CEILING
+        ? (budget / PROPERTY_NAME_CEILING) * 100 : null
     const title = `${total.toLocaleString()} of ${PROPERTY_NAME_CEILING.toLocaleString()} property names registered`
         + (hasSplit ? ` — ${platform!.toLocaleString()} reserved by the platform, ~${source!.toLocaleString()} from this source's data` : '')
 
@@ -142,7 +147,7 @@ export function PropertyNameBudget({
                 aria-valuemax={PROPERTY_NAME_CEILING}
                 aria-label={title}
             >
-                <div className="flex-1 h-2 rounded-full bg-black/8 dark:bg-white/8 overflow-hidden flex">
+                <div className="relative flex-1 h-2 rounded-full bg-black/8 dark:bg-white/8 overflow-hidden flex">
                     {hasSplit && platformPct > 0 && (
                         <div
                             className="h-full bg-slate-400/70 dark:bg-slate-500/70 transition-all duration-700"
@@ -155,6 +160,14 @@ export function PropertyNameBudget({
                         className={cn('h-full transition-all duration-700', band.fill)}
                         style={{ width: `${sourcePct}%` }}
                     />
+                    {budgetPct != null && (
+                        <span
+                            data-testid="property-name-budget-mark"
+                            aria-hidden
+                            className="absolute inset-y-0 w-0.5 bg-ink/70"
+                            style={{ left: `${budgetPct}%` }}
+                        />
+                    )}
                 </div>
                 <span className="text-[11px] font-semibold text-ink tabular-nums shrink-0">
                     {total.toLocaleString()}

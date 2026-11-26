@@ -116,11 +116,7 @@ def test_native_key_admission_counts_pending_payloads_like_held_ones(monkeypatch
     asyncio.run(p._apply(_Client("gvt_b"), _upserts(True)[0], [], [], []))
     assert picked["calls"][0] == picked["calls"][1]
     assert picked["calls"][0][1] == ["rare"], picked["calls"][0]
-    counts = {}
-    for props in asyncio.run(p._native_key_counts(_upserts(True)[0])):
-        for k in props:
-            counts[k] = counts.get(k, 0) + 1
-    assert counts == held
+    assert dict(asyncio.run(p._native_key_counts(_upserts(True)[0], at=2))) == held
 
 
 def test_urn_indexes_are_made_once_per_graph_and_label(monkeypatch):

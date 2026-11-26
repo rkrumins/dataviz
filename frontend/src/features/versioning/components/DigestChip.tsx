@@ -6,13 +6,18 @@
  * Read once when the graph opens (`useGraphDigest`): no polling. Says nothing while it loads or
  * when nothing is new, so the bar keeps collapsing when there is nothing to show; says so when the
  * digest can't be read, and the sheet offers to try again.
+ *
+ * Its × hides the news until something new is published: it marks the graph seen at the version it
+ * showed, as the sheet's "Mark as seen" does. Display › "Show what's new on this graph" off hides
+ * the news on every graph. A review waiting on the reader is a task, not news: it still shows.
  */
-import { AlertTriangle, Sparkles } from 'lucide-react'
+import { AlertTriangle, Sparkles, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount } from '@/lib/units'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { GraphDigest } from '@/services/versioningApiService'
-import { useGraphDigest } from '../hooks/useDigest'
+import { usePreferencesStore } from '@/store/preferences'
+import { useGraphDigest, useMarkDigestSeen } from '../hooks/useDigest'
 
 /** "3 new versions since your last visit", "12 versions in the last 7 days", "50+ …" when the
  *  7-day window is cut short. */
@@ -34,6 +39,8 @@ export function DigestChip({ workspaceId, graphId, onOpen }: {
   onOpen: () => void
 }) {
   const q = useGraphDigest(workspaceId, graphId)
+  const mark = useMarkDigestSeen(workspaceId, graphId ?? '')
+  const showNews = usePreferencesStore((s) => s.showGraphDigest) ?? true
   if (!graphId || q.isLoading) return null
   if (q.isError || !q.data) {
     return (
@@ -49,17 +56,19 @@ export function DigestChip({ workspaceId, graphId, onOpen }: {
   }
   const d = q.data
   const reviews = d.reviewsWaiting.length
-  if (d.versions.length === 0 && reviews === 0) return null
+  // The news of versions, unless the reader turned it off; a review waiting on them still shows.
+  const news = showNews && d.versions.length > 0
+  if (!news && reviews === 0) return null
   const reviewsPhrase = `${formatCount(reviews)}${d.reviewsMore ? '+' : ''} ${reviews === 1 && !d.reviewsMore ? 'review' : 'reviews'} waiting on you`
-  const label = d.versions.length > 0 ? versionsPhrase(d) : reviewsPhrase
-  const short = d.versions.length > 0
+  const label = news ? versionsPhrase(d) : reviewsPhrase
+  const short = news
     ? `${d.total == null ? `${formatCount(d.versions.length)}+` : formatCount(d.total)} new`
     : `${formatCount(reviews)} to review`
-  return (
+  const chip = (
     <HoverTip
       className="inline-flex"
       label={label}
-      detail={d.versions.length > 0 && reviews > 0
+      detail={news && reviews > 0
         ? `And ${reviewsPhrase}. Opens who changed what, with each change.`
         : 'Opens who changed what, with each change.'}
     >
@@ -75,5 +84,23 @@ export function DigestChip({ workspaceId, graphId, onOpen }: {
         <span className="hidden sm:inline">{label}</span>
       </button>
     </HoverTip>
+  )
+  if (!news) return chip
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      {chip}
+      <HoverTip className="inline-flex" label="Hide until something new is published"
+        detail="Marks this graph seen. To never show it, turn off Display › Show what’s new on this graph.">
+        <button
+          type="button"
+          onClick={() => mark.mutate(d.head.seq)}
+          disabled={mark.isPending}
+          aria-label="Hide until something new is published"
+          className="p-0.5 rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:opacity-50"
+        >
+          <X className="w-3 h-3" aria-hidden />
+        </button>
+      </HoverTip>
+    </span>
   )
 }

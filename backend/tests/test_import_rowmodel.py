@@ -199,3 +199,27 @@ def test_an_export_places_its_columns_after_the_node_core_only_when_it_carries_t
     at = cols.index("baseVersion") + 1
     assert cols[at:at + 5] == ["parentUrn", "parentName", "parentType", "path", "pathUrns"]
     assert cols.index("pathUrns") < cols.index("edgeType") < cols.index("prop.owner")
+
+
+def test_every_property_an_export_writes_comes_back_as_it_was():
+    """Export → import of the same record, as a flat file reads it: a value a cell can't give back
+    as it was (a blank, padding, a removal token, text that looks like a list, a control
+    character) travels in ``properties_json`` instead of its own column."""
+    from backend.app.services.versioning.import_export.rowmodel import cell_text, parse_list_cells
+
+    props = {"empty": "", "spaces": "  ", "padded": " x ", "token": "\\N", "null token": "\\NULL",
+             "listy": "[1,2]", "cr": "a\rb", "ctl": "a\x01b", " padded key ": "v",
+             "plain": "x", "n": 5, "flag": True, "list": ["a", "b"], "draft": "[draft]"}
+    for kind, rec in (("node", denormalize_node("n1", "h1", {"urn": "urn:x", "properties": props})),
+                      ("edge", denormalize_edge("e1", "h1", {"edgeType": "T", "properties": props}))):
+        # as ndjson carries it: values typed
+        assert normalize(dict(rec), kind)["properties"] == props, kind
+        # as csv carries it: every cell text, read back the way the csv reader does
+        text = parse_list_cells({k: cell_text(v) for k, v in rec.items()})
+        got = normalize(text, kind)["properties"]
+        assert {k: v for k, v in got.items() if k not in ("n", "flag")} == \
+            {k: v for k, v in props.items() if k not in ("n", "flag")}, kind
+        assert (got["n"], got["flag"]) == ("5", "True"), "csv carries numbers and booleans as text"
+
+    for ordinary in ("plain", "n", "flag", "list", "draft"):
+        assert f"prop.{ordinary}" in rec, f"{ordinary} keeps its own editable column"

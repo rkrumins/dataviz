@@ -13,7 +13,7 @@
  * so the AddFilterPalette portal + controlled inputs behave.
  */
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -59,7 +59,8 @@ vi.mock('@/providers/GraphProviderContext', async () => {
     // The preview only counts against the live backend.
     const { RemoteGraphProvider } = await import('@/providers/RemoteGraphProvider')
     const provider = Object.create(RemoteGraphProvider.prototype)
-    return { useGraphProvider: () => provider }
+    // A relationship rule's ends each say how many entities meet them, as a search's do.
+    return { useGraphProvider: () => provider, useGraphProviderIfAvailable: () => provider }
 })
 
 vi.mock('@/components/ui/DynamicIcon', () => ({
@@ -219,6 +220,99 @@ describe('DisplayRuleEditor', () => {
         expect(await screen.findByText(/entities will be tagged/i)).toBeInTheDocument()
         expect(screen.getByText('4,821')).toBeInTheDocument()
         expect(screen.queryByText(/found so far/i)).not.toBeInTheDocument()
+    })
+
+    it('guides a rule onto relationships: the Connections builder, then a line’s look', async () => {
+        const user = userEvent.setup()
+        const onSave = vi.fn()
+        render(<DisplayRuleEditor {...props({ onSave })} />)
+
+        // Step 1: what it applies to — entities until told otherwise.
+        const targets = screen.getByRole('radiogroup', { name: 'What this rule applies to' })
+        expect(within(targets).getByRole('radio', { name: /Entities/ })).toHaveAttribute('aria-checked', 'true')
+        await user.click(within(targets).getByRole('radio', { name: /Relationships/ }))
+
+        // Step 2: the relationships' condition — ends optional, through which, what each holds.
+        expect(screen.getByRole('region', { name: 'Apply to relationships where…' })).toBeInTheDocument()
+        expect(screen.getByRole('region', { name: 'From' })).toBeInTheDocument()
+        expect(screen.getByRole('region', { name: 'To' })).toBeInTheDocument()
+        expect(screen.getByText('Only edges where…')).toBeInTheDocument()
+        // Every link with nothing said is not a rule yet.
+        await user.type(screen.getByPlaceholderText(/Streaming feed/i), 'Feeds')
+        expect(screen.getByText(/Say which relationships/)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /create rule/i })).toBeDisabled()
+
+        // Step 3: the line's look, drawn as it will be.
+        expect(screen.queryByRole('switch', { name: 'Colour the card' })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('radio', { name: 'Dotted' }))
+        await user.click(screen.getByRole('radio', { name: 'Bold' }))
+        const line = screen.getByTestId('rule-line-preview')
+        expect(line).toHaveAttribute('stroke-width', '4')
+        expect(line).toHaveAttribute('stroke-dasharray', '0 8')
+        expect(onSave).not.toHaveBeenCalled()
+    })
+
+    it('saves a relationship rule as a Connections search, with its line style', async () => {
+        const user = userEvent.setup()
+        const onSave = vi.fn()
+        const feeds: Predicate = { kind: 'edges', edgeTypes: ['FEEDS'] }
+        render(
+            <DisplayRuleEditor
+                {...props({ onSave })}
+                rule={{
+                    id: 'r1', name: 'Feeds', color: '#ef4444', target: 'relationships',
+                    predicate: { kind: 'group', op: 'and', children: [feeds] },
+                    style: { dash: 'dashed' }, enabled: true, createdAt: '2026-01-01T00:00:00Z',
+                }}
+            />,
+        )
+        expect(screen.getByRole('radio', { name: /Relationships/ })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.getByRole('radio', { name: 'Dashed' })).toHaveAttribute('aria-checked', 'true')
+        await user.click(screen.getByRole('switch', { name: 'Show the tag chip on the line' }))
+        await user.click(screen.getByRole('button', { name: /save rule/i }))
+        const saved = onSave.mock.calls[0][0]
+        expect(saved).toMatchObject({ id: 'r1', target: 'relationships', predicate: feeds })
+        expect(saved.style).toEqual({ chip: false, dash: 'dashed' })
+    })
+
+    it('counts the relationships a relationship rule will style', async () => {
+        const feeds: Predicate = { kind: 'edges', edgeTypes: ['FEEDS'] }
+        vi.mocked(countRules).mockImplementation(async (_p, _v, rules) => {
+            expect(rules).toEqual([{ id: 'preview', predicate: feeds }])
+            return new Map([['preview', { count: 37, complete: true, percent: 100 }]])
+        })
+        render(
+            <DisplayRuleEditor
+                {...props()}
+                rule={{
+                    id: 'r1', name: 'Feeds', color: '#ef4444', target: 'relationships', predicate: feeds,
+                    enabled: true, createdAt: '2026-01-01T00:00:00Z',
+                }}
+            />,
+        )
+        expect(await screen.findByText(/relationships will be styled/i)).toBeInTheDocument()
+        expect(screen.getByText('37')).toBeInTheDocument()
+    })
+
+    it('keeps each target’s condition, so switching back finds it, and saves an entity rule as before', async () => {
+        const user = userEvent.setup()
+        const onSave = vi.fn()
+        render(
+            <DisplayRuleEditor
+                {...props({ onSave })}
+                rule={{
+                    id: 'r1', name: 'PII', color: '#6366f1', predicate: tagPredicate,
+                    enabled: true, createdAt: '2026-01-01T00:00:00Z',
+                }}
+            />,
+        )
+        await user.click(screen.getByRole('radio', { name: /Relationships/ }))
+        await user.click(screen.getByRole('radio', { name: /Entities/ }))
+        expect(screen.getByRole('button', { name: 'Tag: #PII' })).toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /save rule/i }))
+        const saved = onSave.mock.calls[0][0]
+        expect(saved.predicate).toEqual(tagPredicate)
+        expect('target' in saved).toBe(false)
     })
 
     it('shows why a rule cannot be counted', async () => {

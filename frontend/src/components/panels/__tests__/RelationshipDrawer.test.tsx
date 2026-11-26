@@ -2,17 +2,23 @@
  * RelationshipDrawer — the EntityDrawer for a relationship. Pins what a graph
  * owner relies on: it names both ends and walks to them on the shared trail,
  * says who created and last changed the relationship, lets a raw lineage
- * relationship be edited (staged), reversed and deleted in a draft, keeps roll-ups,
- * hierarchy links and published relationships read-only with the reason, and
- * guards unsaved edits against a move away.
+ * relationship be edited (staged), reversed — with what it holds — and deleted in a
+ * draft, edits only the properties of a hierarchy link or another kind, gives one
+ * not saved yet its properties, restores one deleted in the draft, keeps roll-ups
+ * and published relationships read-only with the reason, and guards unsaved edits
+ * against a move away.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactElement } from 'react'
+import { MemoryRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GraphEdge } from '@/providers/GraphDataProvider'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { useWorkspacesStore } from '@/store/workspaces'
 
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
@@ -27,13 +33,23 @@ const h = vi.hoisted(() => ({
   entry: undefined as Record<string, unknown> | undefined,
   /** The view's relationship types. */
   relTypes: [] as unknown[],
+  /** Drawn or reversed, and not saved yet. */
+  unsaved: false,
+  /** Bringing back what the draft deleted and saved. */
+  restore: vi.fn(),
+  /** What the view's discovery sample says relationships of each type carry. */
+  edgeKeys: {} as Record<string, string[]>,
+  edgeSamples: {} as Record<string, unknown[]>,
+  /** The data source's semantic layer, and whether this person may edit it. */
+  layer: null as Record<string, unknown> | null,
+  canEditLayer: true,
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
   useRelationshipRecord: (ref: { id: string } | null) => ({
     record: h.record,
     entityId: h.record?.id ?? ref?.id ?? null,
-    unsaved: false,
+    unsaved: h.unsaved,
     isLoading: false,
     isError: false,
     refetch: vi.fn(),
@@ -67,12 +83,24 @@ vi.mock('@/providers/GraphProviderContext', async (importOriginal) => ({
   useGraphProviderIfAvailable: () => h.provider,
 }))
 vi.mock('@/features/versioning/components/EntityHistory', () => ({
-  EntityHistory: ({ entityId }: { entityId: string }) => <div data-testid="entity-history">{entityId}</div>,
+  EntityHistory: ({ entityId, onRestore }: { entityId: string; onRestore?: () => void }) => (
+    <div data-testid="entity-history">{entityId}{onRestore && <button type="button" onClick={onRestore}>Restore it</button>}</div>
+  ),
+}))
+vi.mock('@/features/versioning/canvas/useRestoreGhost', () => ({ useRestoreGhost: () => h.restore }))
+vi.mock('@/components/canvas/search/builder/useDiscovery', () => ({
+  useDiscovery: () => ({ keysByEdgeType: h.edgeKeys, getEdgeValueSamples: (_type: string, key: string) => h.edgeSamples[key] ?? [] }),
+}))
+vi.mock('@/features/versioning/components/WatchButtons', () => ({
+  RelationshipWatchButton: (p: { graphId: string; edgeId: string; name: string }) =>
+    <button type="button">Watch {p.name} ({p.edgeId} in {p.graphId})</button>,
 }))
 vi.mock('@/hooks/useViewSchema', () => ({
   useViewRelationshipTypes: () => h.relTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
+vi.mock('@/hooks/useOntologyDefinition', () => ({ useOntologyDefinition: () => ({ ontology: h.layer, isLoading: false }) }))
+vi.mock('@/features/ontology/lib/useSemanticLayerAccess', () => ({ useSemanticLayerAccess: () => ({ canEdit: h.canEditLayer }) }))
 
 import { RelationshipDrawer } from '../RelationshipDrawer'
 
@@ -117,6 +145,12 @@ beforeEach(() => {
   h.beneathCalls = []
   h.entry = undefined
   h.relTypes = []
+  h.unsaved = false
+  h.restore = vi.fn()
+  h.edgeKeys = {}
+  h.edgeSamples = {}
+  h.layer = null
+  h.canEditLayer = true
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -243,17 +277,35 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.getByRole('button', { name: /Stage changes/ })).toBeInTheDocument()
   })
 
-  it.each([
-    ['a roll-up', 'AGGREGATED', /aggregation job/],
-    ['a hierarchy link', 'CONTAINS', /Move to/],
-  ])('keeps %s read-only and says why', (_what, type, reason) => {
-    h.record = { ...h.record!, edgeType: type }
-    setup(rel('e1', type))
+  it('keeps a roll-up read-only and says why', () => {
+    h.record = { ...h.record!, edgeType: 'AGGREGATED' }
+    setup(rel('e1', 'AGGREGATED'))
     render(<RelationshipDrawer canEdit onDeleteEdge={vi.fn()} onReverseEdge={vi.fn()} />)
     expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     expect(screen.queryByTitle('Delete relationship')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
-    expect(screen.getByText(reason)).toBeInTheDocument()
+    expect(screen.getByText(/aggregation job/)).toBeInTheDocument()
+  })
+
+  it.each([
+    ['a hierarchy link', 'CONTAINS', /Move to/],
+    ['a relationship not drawn on the canvas', 'OWNED_BY', /not drawn on the canvas/],
+  ])('edits the properties of %s — only those — and says so', async (_what, type, note) => {
+    const user = userEvent.setup()
+    h.record = { ...h.record!, edgeType: type }
+    h.relTypes = type === 'OWNED_BY' ? [{ id: 'OWNED_BY', name: 'Owned by', sourceTypes: [], targetTypes: [], isLineage: false }] : []
+    setup(rel('e1', type), { canvasEdges: [edge('e1', 'a', 'b', type)] })
+    render(<RelationshipDrawer canEdit onDeleteEdge={vi.fn()} onReverseEdge={vi.fn()} />)
+    expect(screen.getByText(note)).toBeInTheDocument()
+    expect(screen.queryByTitle('Delete relationship')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Edit owner' }))
+    const field = screen.getByRole('textbox', { name: 'owner' })
+    await user.clear(field)
+    await user.type(field, 'bo{Enter}')
+    expect(useStagedChangesStore.getState().changes).toMatchObject([{ type: 'edit_edge', targetId: 'e1', after: { properties: { owner: 'bo' } } }])
+    expect(screen.getByRole('tab', { name: /^Edit/ })).toBeInTheDocument()
   })
 
   it('on the published graph, offers a draft instead of Edit — in its top line, its tip saying why', async () => {
@@ -294,6 +346,13 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.queryByText('Updated')).not.toBeInTheDocument()
     expect(screen.getByText('History is available with version control.')).toBeInTheDocument()
     expect(screen.queryByTestId('entity-history')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Watch/ })).not.toBeInTheDocument()
+  })
+
+  it('offers Watch among its actions, by its id and named by its ends', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer />)
+    expect(screen.getByRole('button', { name: 'Watch Orders → Revenue (e1 in g)' })).toBeInTheDocument()
   })
 
   it('deletes through the canvas and closes', async () => {
@@ -306,14 +365,117 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(useCanvasStore.getState().drawerEdge).toBeNull()
   })
 
-  it('reverses through the canvas and closes', async () => {
+  it('reverses through the canvas with what it holds, and closes', async () => {
     const user = userEvent.setup()
     const onReverseEdge = vi.fn()
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit onReverseEdge={onReverseEdge} />)
     await user.click(screen.getByRole('button', { name: 'Reverse direction' }))
-    expect(onReverseEdge).toHaveBeenCalledWith('e1')
+    // The canvas line carries no properties: the drawer hands over its own read.
+    expect(onReverseEdge).toHaveBeenCalledWith('e1', { properties: { owner: 'ana' }, confidence: 0.9 })
     expect(useCanvasStore.getState().drawerEdge).toBeNull()
+  })
+
+  it('reversing it keeps its staged edit — what is shown is what goes', async () => {
+    const user = userEvent.setup()
+    const onReverseEdge = vi.fn()
+    useStagedChangesStore.getState().stage({ type: 'edit_edge', targetId: 'e1', before: { properties: { owner: 'ana' } }, after: { properties: { owner: 'bo' } }, summary: 'Edit' })
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit onReverseEdge={onReverseEdge} />)
+    await user.click(screen.getByRole('button', { name: 'Reverse direction' }))
+    expect(onReverseEdge).toHaveBeenCalledWith('e1', { properties: { owner: 'bo' }, confidence: 0.9 })
+  })
+
+  it('says where it is reversed that it is saved as a new relationship, its history starting over', async () => {
+    const user = userEvent.setup()
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit onReverseEdge={vi.fn()} />)
+    await user.hover(screen.getByRole('button', { name: 'Reverse direction' }))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/new relationship.*properties go with it.*history starts over/)
+  })
+})
+
+/** A relationship not saved yet — drawn on the canvas, or reversed — is given properties as a new
+ *  entity is: they ride on the change that makes it, and are sent with its create. */
+describe('RelationshipDrawer — a relationship not saved yet', () => {
+  const steward = { id: 'steward', name: 'Steward', type: 'string', required: true, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0 }
+  const drawn = () => {
+    h.unsaved = true
+    h.record = undefined
+    h.relTypes = [{ id: 'FLOWS_TO', name: 'Feeds', sourceTypes: [], targetTypes: [], isLineage: true, fields: [steward] }]
+    useStagedChangesStore.getState().stage({ type: 'create_edge', targetId: 'tmp', after: { edgeType: 'FLOWS_TO', source: 'a', target: 'b' }, summary: 'Create FLOWS_TO edge a → b' })
+    setup(rel('tmp'), { canvasEdges: [edge('tmp', 'a', 'b')] })
+  }
+
+  it('is given properties in the drawer — staged on its create — and still says what publishing needs', async () => {
+    const user = userEvent.setup()
+    drawn()
+    render(<RelationshipDrawer canEdit />)
+    expect(screen.getByText(/Not saved yet/)).toHaveTextContent('Feeds relationships need Steward before they can be published.')
+    expect(screen.queryByText(/to add properties/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('entity-history')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add properties' }))
+    await user.type(screen.getByPlaceholderText('Property name'), 'tier')
+    await user.type(screen.getByPlaceholderText('Enter a value…'), 'gold')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(useStagedChangesStore.getState().changes).toMatchObject([
+      { type: 'create_edge', targetId: 'tmp', after: { edgeType: 'FLOWS_TO', source: 'a', target: 'b', properties: { tier: 'gold' } } },
+    ])
+    expect(screen.getByText('tier')).toBeInTheDocument()
+  })
+
+  it('a required field it lacks is a row to add it, warned of — publishing refuses a new one without it', async () => {
+    const user = userEvent.setup()
+    drawn()
+    render(<RelationshipDrawer canEdit />)
+    const missing = screen.getByRole('list', { name: 'Required fields without a value' })
+    expect(missing).toHaveTextContent(/publishing refuses a new one without it/)
+    await user.click(within(missing).getByRole('button', { name: 'Edit Steward' }))
+    await user.type(within(missing).getByRole('textbox'), 'ana{Enter}')
+    expect((useStagedChangesStore.getState().changes[0]!.after as { properties?: unknown }).properties).toEqual({ steward: 'ana' })
+  })
+
+  it('is not reversed before it is saved', () => {
+    drawn()
+    render(<RelationshipDrawer canEdit onReverseEdge={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
+  })
+})
+
+/** Deleted in this draft and saved, it stands on the canvas as a ghost until the draft is published —
+ *  and comes back, as a deleted entity does, through the draft's restore of its changes. */
+describe('RelationshipDrawer — a relationship deleted in this draft', () => {
+  const ghost = () => {
+    h.record = undefined
+    h.summary = { ...h.summary, value: { kind: 'edge', deleted: true } }
+    setup(rel('e1'), { canvasEdges: [{ ...edge('e1', 'a', 'b'), data: { edgeType: 'FLOWS_TO', isGhost: true } } as LineageEdge] })
+  }
+
+  it('says so, and brings it back from its drawer', async () => {
+    const user = userEvent.setup()
+    ghost()
+    render(<RelationshipDrawer canEdit onDeleteEdge={vi.fn()} onReverseEdge={vi.fn()} />)
+    expect(screen.getByText(/Deleted in this draft/)).toBeInTheDocument()
+    expect(screen.queryByText(/could not be found/)).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Delete relationship')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Restore' }))
+    expect(h.restore).toHaveBeenCalledWith('e1')
+  })
+
+  it('brings it back from its history', async () => {
+    const user = userEvent.setup()
+    ghost()
+    render(<RelationshipDrawer canEdit />)
+    await user.click(within(screen.getByTestId('entity-history')).getByRole('button', { name: 'Restore it' }))
+    expect(h.restore).toHaveBeenCalledWith('e1')
+  })
+
+  it('offers no Restore on one still there', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    expect(within(screen.getByTestId('entity-history')).queryByRole('button', { name: 'Restore it' })).toBeNull()
   })
 })
 
@@ -522,5 +684,106 @@ describe('RelationshipDrawer — the fields its type defines', () => {
     setup(rel('e1'))
     render(<RelationshipDrawer />)
     expect(screen.queryByRole('list', { name: 'Required fields without a value' })).toBeNull()
+  })
+
+  it('Edit types every field of its type — optional ones too — and keeps a number a number', async () => {
+    const user = userEvent.setup()
+    h.relTypes = [{ ...flowsTo, fields: [...flowsTo.fields, field('rows', 'Rows', { type: 'number' })] }]
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /Edit/ }))
+    expect(screen.getByRole('textbox', { name: 'Steward(required)' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Tier' })).toBeInTheDocument()
+    // Published before the rule: a required field it lacks is offered, not warned of.
+    expect(screen.queryByText(/publishing refuses/)).not.toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Rows' }), '1,200')
+    await user.tab()
+    await user.click(screen.getByRole('button', { name: 'silver' }))
+    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+    expect(useStagedChangesStore.getState().changes).toMatchObject([{
+      type: 'edit_edge', targetId: 'e1', after: { properties: { owner: 'ana', rows: 1200, tier: 'silver' } },
+    }])
+  })
+
+  it('Edit warns of a required field left without a value on one new in the draft', async () => {
+    const user = userEvent.setup()
+    newInDraft({ tier: 'gold' })
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /Edit/ }))
+    expect(screen.getByText('Steward is required for Feeds relationships — publishing refuses a new one without it, or one it is emptied on.')).toBeInTheDocument()
+    // One row per field: the required one is not listed again.
+    expect(screen.queryByRole('list', { name: 'Required fields without a value' })).toBeNull()
+  })
+
+  it('offers the names others of its type carry as a property is added, with a value they hold', async () => {
+    const user = userEvent.setup()
+    h.edgeKeys = { flows_to: ['confidence', 'frequency', 'owner'] }
+    h.edgeSamples = { frequency: ['daily', 'hourly'] }
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /Edit/ }))
+    // What it holds already, and the relationship's own fields, are not offered.
+    expect(screen.queryByRole('button', { name: 'Add owner' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Add confidence' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Add frequency' }))
+    expect(screen.getByPlaceholderText('e.g. daily')).toBeInTheDocument()
+  })
+})
+
+/** A property its type has no field for is made one from its row — a field of the relationship's
+ *  type, in the semantic layer — by who may edit the layer, read-only or edited. */
+describe('RelationshipDrawer — make a property a field', () => {
+  const feeds = (fields: unknown[] = []) => ({ id: 'FLOWS_TO', name: 'Feeds', sourceTypes: [], targetTypes: [], isLineage: true, fields })
+  const withLayer = (ui: ReactElement) => render(
+    <QueryClientProvider client={new QueryClient()}><MemoryRouter>{ui}</MemoryRouter></QueryClientProvider>)
+
+  beforeEach(() => {
+    h.layer = { id: 'ont1', name: 'Finance', version: 1, isPublished: false, isSystem: false, deletedAt: null,
+      entityTypeDefinitions: {}, relationshipTypeDefinitions: { FLOWS_TO: { name: 'Feeds', fields: [] } } }
+    useWorkspacesStore.setState({
+      activeWorkspaceId: 'ws1', activeDataSourceId: 'ds1',
+      workspaces: [{ id: 'ws1', dataSources: [{ id: 'ds1', isPrimary: true, ontologyId: 'ont1' }] }],
+    } as never)
+  })
+
+  it('opens the dialog on the property, for the relationship\'s type — on the published graph too', async () => {
+    const user = userEvent.setup()
+    h.relTypes = [feeds()]
+    setup(rel('e1'))
+    withLayer(<RelationshipDrawer />)
+    await user.click(screen.getByRole('button', { name: 'Make owner a field' }))
+    const dialog = screen.getByRole('dialog', { name: 'Make owner a field' })
+    expect(within(dialog).getByRole('checkbox', { name: /Feeds/ })).toBeChecked()
+    expect(within(dialog).getByText('1 carries it')).toBeInTheDocument()
+    expect(within(dialog).getByRole('combobox', { name: 'Field type' })).toHaveValue('string')
+    expect(within(dialog).getByText(/Adds the field/)).toHaveTextContent('Adds the field owner to 1 relationship type')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Make owner a field' })).toBeNull()
+  })
+
+  it('is offered in a draft as the properties are edited', () => {
+    h.relTypes = [feeds()]
+    setup(rel('e1'))
+    withLayer(<RelationshipDrawer canEdit />)
+    expect(screen.getByRole('button', { name: 'Make owner a field' })).toBeInTheDocument()
+  })
+
+  it('is not offered on a field already, on a type the layer does not declare, nor to who may not edit the layer', () => {
+    h.relTypes = [feeds([{ id: 'owner', name: 'Owner', type: 'string', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0 }])]
+    setup(rel('e1'))
+    const { unmount } = withLayer(<RelationshipDrawer />)
+    expect(screen.getByText('owner')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Make owner a field' })).toBeNull()
+    unmount()
+
+    h.relTypes = []
+    withLayer(<RelationshipDrawer />)
+    expect(screen.queryByRole('button', { name: 'Make owner a field' })).toBeNull()
+
+    h.relTypes = [feeds()]
+    h.canEditLayer = false
+    withLayer(<RelationshipDrawer />)
+    expect(screen.queryByRole('button', { name: 'Make owner a field' })).toBeNull()
   })
 })

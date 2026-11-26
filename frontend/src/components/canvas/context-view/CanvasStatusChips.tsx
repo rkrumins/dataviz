@@ -12,9 +12,18 @@
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
- *  - "N placements not found here" — entities placed in the view that this
- *    graph doesn't hold (typically a view brought in from another
- *    environment); popover lists them and says what to do.
+ *  - "N Domains aren't in this view" — top-level entities of the types the
+ *    view is about that it doesn't place (UnplacedRootsChip): a column each,
+ *    all into one column, or not now. Only for a view meant to show everything.
+ *  - "Keep this view complete?" — in the same place, the one question a view
+ *    that never said is asked when it holds every one of them (KeepCompleteChip).
+ *  - "The X column's entity is gone" — a column whose entity this source
+ *    doesn't hold, while it is folded or scrolled out of sight; Show.
+ *  - "N placements point at entities no longer in this source" — entities
+ *    placed in the view that this source doesn't hold now (deleted, given a
+ *    new URN, or placed in another environment: from here it is only known
+ *    that they aren't here); popover lists them and offers to clean them up,
+ *    in a draft — or the way into one.
  *
  * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
  * the end of the layer strip (LineageGuide).
@@ -39,12 +48,19 @@ import { Unlink, Layers, ListPlus, Focus, SearchX, Waypoints } from 'lucide-reac
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { UnplacedRootsChip, type UnplacedRootsChipProps } from './UnplacedRootsChip'
+import { KeepCompleteChip, type KeepCompleteChipProps } from './KeepCompleteChip'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
   'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
+
+/** A view-health offer's button: what repairs the view, said once, never done for the reader. */
+export const HEALTH_ACTION_CLASS =
+  'w-full px-2.5 py-1.5 rounded-md text-[11.5px] font-medium text-accent-lineage bg-accent-lineage/10 ' +
+  'hover:bg-accent-lineage/15 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
 
 /** A placement in the view whose entity this graph doesn't hold. */
 export interface NotFoundPlacement {
@@ -79,6 +95,12 @@ export function CanvasStatusChips({
   selectedExternal,
   onPreviewExternal,
   notFoundPlacements = [],
+  onCleanUpNotFound,
+  onOpenDraft,
+  goneColumns = [],
+  onShowColumn,
+  unplacedRoots,
+  keepComplete,
   canEdit = false,
 }: {
   /** Flows from a drawn row whose other end is outside the view: none in a
@@ -118,6 +140,19 @@ export function CanvasStatusChips({
   onPreviewExternal?: () => void
   /** Placements the load asked the graph for and didn't get: kept in the view, marked not found. */
   notFoundPlacements?: NotFoundPlacement[]
+  /** In a draft: remove those placements, as one change. */
+  onCleanUpNotFound?: () => void
+  /** Outside a draft, for a reader who can open one: the way into it. */
+  onOpenDraft?: () => void
+  /** Columns whose entity is gone, out of sight (folded or scrolled away), in reading order. */
+  goneColumns?: Array<{ id: string; name: string }>
+  /** Bring a column into view. */
+  onShowColumn?: (layerId: string) => void
+  /** Top-level entities of the types the view is about that it doesn't place, and what to do. */
+  unplacedRoots?: UnplacedRootsChipProps | null
+  /** A view that never said whether it is meant to show everything, holding every one of them:
+   *  keep it complete, or only what's here. Asked in the unplaced roots' place. */
+  keepComplete?: KeepCompleteChipProps | null
   /** The viewer can edit the view. Without it the chips state the facts, and
    *  leave out what editing the view would do about them. */
   canEdit?: boolean
@@ -133,8 +168,9 @@ export function CanvasStatusChips({
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
   const showNotFound = notFoundPlacements.length > 0
+  const showGone = goneColumns.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound && !showGone && !unplacedRoots && !keepComplete) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -361,6 +397,29 @@ export function CanvasStatusChips({
         </PopoverPrimitive.Root>
       )}
 
+      {unplacedRoots ? <UnplacedRootsChip {...unplacedRoots} /> : keepComplete && <KeepCompleteChip {...keepComplete} />}
+
+      {showGone && (
+        <div className={CHIP_CLASS}>
+          <Unlink className="w-3 h-3 text-amber-500" />
+          <span>
+            {goneColumns.length === 1
+              ? `The ${goneColumns[0].name} column\u2019s entity is gone`
+              : `${goneColumns.length.toLocaleString()} columns\u2019 entities are gone`}
+          </span>
+          {onShowColumn && (
+            <button
+              type="button"
+              aria-label={`Show the ${goneColumns[0].name} column`}
+              className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              onClick={() => onShowColumn(goneColumns[0].id)}
+            >
+              Show
+            </button>
+          )}
+        </div>
+      )}
+
       {showNotFound && (
         <PopoverPrimitive.Root open={notFoundOpen} onOpenChange={setNotFoundOpen}>
           <PopoverPrimitive.Trigger asChild>
@@ -368,7 +427,11 @@ export function CanvasStatusChips({
               <SearchX className="w-3 h-3 text-amber-500" />
               {/* The space is for screen readers: the flex gap separates them on screen. */}
               <span className="tabular-nums">{notFoundPlacements.length.toLocaleString()}</span>{' '}
-              <span>{notFoundPlacements.length === 1 ? 'placement' : 'placements'} not found here</span>
+              <span>
+                {notFoundPlacements.length === 1
+                  ? 'placement points at an entity no longer in this source'
+                  : 'placements point at entities no longer in this source'}
+              </span>
             </button>
           </PopoverPrimitive.Trigger>
           <PopoverPrimitive.Portal>
@@ -378,10 +441,11 @@ export function CanvasStatusChips({
               sideOffset={6}
               className="z-[9999] w-80 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl shadow-black/40 p-2"
             >
-              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed in this view, but not in this graph</p>
+              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed here, but not in this source</p>
               <p className="px-1.5 pt-0.5 pb-2 text-[11px] text-ink-muted leading-relaxed">
-                Usually a view brought in from another environment. They’re kept, and appear as soon as the entity
-                arrives here.{canEdit && ' To remove them, edit the view and see Assignments.'}
+                This source doesn’t hold these entities now — they may have been deleted, given a new URN, or
+                placed in another environment. Until they’re cleaned up they stay placed, and show again if they
+                come back.
               </p>
               <div className="max-h-64 overflow-y-auto custom-scrollbar">
                 {notFoundPlacements.slice(0, UNASSIGNED_LIST_CAP).map(p => (
@@ -395,6 +459,25 @@ export function CanvasStatusChips({
                 <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted">
                   +{(notFoundPlacements.length - UNASSIGNED_LIST_CAP).toLocaleString()} more
                 </p>
+              )}
+              {(onCleanUpNotFound || onOpenDraft) && (
+                <div className="mt-2 pt-2 px-1.5 border-t border-glass-border/60">
+                  {onCleanUpNotFound && (
+                    <p className="pb-2 text-[11px] text-ink-muted leading-relaxed">
+                      {`Removes ${notFoundPlacements.length === 1 ? 'this placement' : `these ${notFoundPlacements.length.toLocaleString()} placements`} from this view, as one change you can undo. The data is unchanged.`}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    className={HEALTH_ACTION_CLASS}
+                    onClick={() => {
+                      setNotFoundOpen(false)
+                      ;(onCleanUpNotFound ?? onOpenDraft)?.()
+                    }}
+                  >
+                    {onCleanUpNotFound ? 'Clean them up' : 'Open a draft to clean them up'}
+                  </button>
+                </div>
               )}
             </PopoverPrimitive.Content>
           </PopoverPrimitive.Portal>

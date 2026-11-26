@@ -55,9 +55,12 @@ export type PersonVia =
 export interface ThreadSummary {
     id: string
     subject: SubjectRef
-    /** The node it is about, when it was asked about one. */
+    /** The node it is about, when it was asked about one: its urn, its name, the containers it
+     *  sat in (top first) and its type when it was asked. A question from before keeps no path. */
     entityId: string | null
     entityLabel: string | null
+    entityPath?: string[] | null
+    entityType?: string | null
     visibility: Visibility
     status: DiscussionStatus
     askedBy: string
@@ -180,6 +183,8 @@ export interface AskInput {
     mentions: string[]
     entityId?: string
     entityLabel?: string
+    entityPath?: string[]
+    entityType?: string
     clientKey: string
 }
 

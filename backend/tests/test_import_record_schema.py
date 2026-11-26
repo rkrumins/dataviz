@@ -102,3 +102,43 @@ def test_a_data_sources_schema_names_its_types_and_types_its_properties():
         and {"const": "\\N"} in rows["anyOf"], "a number, or removed"
     assert "required for a new Table" in node["properties"]["prop.owner"]["description"]
     assert {"type": "boolean"} in node["properties"]["prop.pii"]["anyOf"]
+
+
+def test_a_relationship_types_fields_type_its_edge_rows_properties():
+    """An edge row's ``prop.<field>`` columns are typed by its relationship types' fields, as a
+    node row's are by its entity types': each kind of row by its own types' fields only."""
+    narrowed = contract.json_schema({**ONTOLOGY, "edge_fields": {
+        "FLOWS_TO": [{"id": "weight", "name": "Weight", "type": "number", "required": True}],
+        "CONTAINS": [{"id": "since", "name": "Since", "type": "date"},
+                     {"id": "weight", "name": "Weight", "type": "number"}]}})
+    node, edge = narrowed["$defs"]["ImportNodeRecord"], narrowed["$defs"]["ImportEdgeRecord"]
+    weight = edge["properties"]["prop.weight"]
+    assert len(weight["anyOf"]) == 2 and {"type": "number"} in weight["anyOf"] \
+        and {"const": "\\N"} in weight["anyOf"], "a number, or removed"
+    assert weight["description"] == ("On CONTAINS: Weight (number); on FLOWS_TO: Weight (number), "
+                                     "required for a new FLOWS_TO relationship")
+    assert {"type": "string", "format": "date"} in edge["properties"]["prop.since"]["anyOf"]
+    assert "prop.weight" not in node["properties"] and "prop.rows" not in edge["properties"]
+
+
+def test_the_import_reads_each_relationship_types_fields():
+    """What the template and the record schema type an edge row's properties by: each relationship
+    type's fields — never as a key it is matched by, nor unique: an edge is found by its ends and
+    its type, and no publish holds a relationship's value unique."""
+    from types import SimpleNamespace as NS
+
+    from backend.app.api.v1.endpoints.versioning import import_contract_of
+
+    def field(fid, ftype, **flags):
+        return NS(id=fid, name=fid.title(), type=ftype, **flags)
+
+    got = import_contract_of(NS(
+        entity_type_definitions={"Table": NS(fields=[field("owner", "text", required=True)])},
+        relationship_type_definitions={
+            "FLOWS_TO": NS(fields=[field("weight", "number", required=True, reconciliation_key=True,
+                                         unique=True)], source_types=[], target_types=[]),
+            "CONTAINS": NS(fields=[], source_types=["Table"], target_types=[])},
+        containment_edge_types=["CONTAINS"], lineage_edge_types=[]))
+    assert got["edge_fields"] == {"FLOWS_TO": [{"id": "weight", "name": "Weight", "type": "number",
+                                                "required": True}]}
+    assert list(got["fields"]) == ["Table"], "a relationship type's fields are not an entity type's"

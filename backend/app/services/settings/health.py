@@ -1,6 +1,7 @@
 """A versioned graph's health, the top of its settings drawer (``GET …/graphs/{id}/health``): the
 version it is at and the one its readers get, how they read it while it updates, its copy in
-memory, its last build, and what happened to it in the last day. Composed when someone asks from
+memory, its last build, what happened to it in the last day, and how many of the graph store's
+property names it uses. Composed when someone asks from
 what the platform already keeps — the watermark, the build's state, the settings in force, the
 signals — so no read pays for it.
 
@@ -29,13 +30,14 @@ _STORE_SIGNALS = ("builds.", "reads.", "residency.")
 
 async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any]) -> Dict[str, Any]:
     """``{asOf, head, serving, versionsBehind, readMode, progress, lastUpdate, memory, lastBuild,
-    signals, follows, problems}`` for the graph ``meta`` names (``graph_in_workspace``'s answer).
-    ``svc`` is the versioning service."""
+    signals, propertyNames, follows, problems}`` for the graph ``meta`` names
+    (``graph_in_workspace``'s answer). ``svc`` is the versioning service."""
     gid = meta["graph_id"]
     out: Dict[str, Any] = {
         "asOf": datetime.now(timezone.utc).isoformat(), "head": None, "serving": None,
         "versionsBehind": None, "readMode": None, "progress": None, "lastUpdate": None,
-        "memory": None, "lastBuild": None, "signals": None, "follows": None}
+        "memory": None, "lastBuild": None, "signals": None, "propertyNames": None,
+        "follows": None}
     problems: List[Dict[str, str]] = []
 
     def problem(part: str, message: str) -> None:
@@ -62,9 +64,10 @@ async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any])
         logger.warning("graph health: the watermark of %s could not be read", gid, exc_info=True)
         if wm is None and graph is not None:
             store_id = service.root_of(graph, by_id).graph_id
+    store_ds = meta.get("data_source_id")
     if store_id != gid:
         follows = by_id.get(store_id) if by_id else None
-        ds = follows.data_source_id if follows else None
+        ds = store_ds = follows.data_source_id if follows else None
         out["follows"] = {"graphId": store_id, "dataSourceId": ds,
                           "label": await _label(session, ds) if ds else None}
 
@@ -138,7 +141,74 @@ async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any])
         logger.warning("graph health: the signals of %s could not be read", gid, exc_info=True)
         problem("signals", "What happened in the last day can't be read right now.")
 
+    out["propertyNames"] = await _property_names(session, store, store_ds)
+    if out["propertyNames"] is None:
+        problem("propertyNames", "How many property names it uses can't be read right now.")
+
     out["problems"] = problems
+    return out
+
+
+#: Of the budget, where a graph is told it is close: new names past the budget are kept as values.
+_NEAR_BUDGET = 0.9
+
+
+async def _property_names(session: AsyncSession, store: Optional[Mapping[str, Any]],
+                          data_source_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """How many of the graph store's property names the graph's copy uses — FalkorDB numbers a
+    graph's property names in one map that items and relationships share, at most ``ceiling`` of
+    them, and never frees one — against ``budget``, where the platform's own writes stop adding
+    names: past it, a new key is kept as a value (still shown and exported; searched by presence
+    and equality), never lost. ``storedAsValues`` names those keys, by whether items or
+    relationships carry them.
+
+    Read from what is kept: the reading its last update recorded (``measuredBy`` ``update``), else
+    the count the data source's statistics poll last took (``poll``: no keys named), else none yet
+    (``registered`` null — not zero). ``state``: ``unknown``, ``ok``, ``near_budget`` or
+    ``at_budget``. None, with a problem, when neither could be read."""
+    from backend.app.providers.falkordb_materialize import _ATTRIBUTE_NAME_LIMIT
+    from backend.app.providers.falkordb_provider import (_native_property_budget,
+                                                         platform_property_names)
+
+    reading = (store or {}).get("property_names")
+    out: Dict[str, Any] = {"registered": None, "platform": None,
+                           "budget": _native_property_budget(), "ceiling": _ATTRIBUTE_NAME_LIMIT,
+                           "measuredAt": None, "measuredBy": None, "storedAsValues": None,
+                           "state": "unknown"}
+    if isinstance(reading, Mapping) and isinstance(reading.get("registered"), int):
+        demoted = reading.get("demoted") if isinstance(reading.get("demoted"), Mapping) else {}
+        out.update(registered=reading["registered"], platform=reading.get("platform"),
+                   budget=reading.get("budget") or out["budget"],
+                   ceiling=reading.get("ceiling") or out["ceiling"],
+                   measuredAt=reading.get("at"), measuredBy="update",
+                   storedAsValues={"nodes": list(demoted.get("nodes") or []),
+                                   "edges": list(demoted.get("edges") or []),
+                                   "count": int(demoted.get("count") or 0)})
+    else:
+        polled = None
+        if data_source_id:
+            try:
+                from sqlalchemy import select
+
+                from backend.app.db.models import DataSourceStatsORM
+                polled = (await session.execute(
+                    select(DataSourceStatsORM.property_key_count, DataSourceStatsORM.updated_at)
+                    .where(DataSourceStatsORM.data_source_id == data_source_id))).first()
+            except Exception:  # noqa: BLE001
+                logger.warning("graph health: the property names of %s could not be read",
+                               data_source_id, exc_info=True)
+                if store is None:
+                    return None
+        if polled is not None and polled[0] is not None:
+            platform = len(platform_property_names()) or None
+            out.update(registered=int(polled[0]), platform=platform, measuredAt=polled[1],
+                       measuredBy="poll")
+        elif store is None:
+            return None
+    if out["registered"] is not None:
+        out["state"] = ("at_budget" if out["registered"] >= out["budget"]
+                        else "near_budget" if out["registered"] >= _NEAR_BUDGET * out["budget"]
+                        else "ok")
     return out
 
 

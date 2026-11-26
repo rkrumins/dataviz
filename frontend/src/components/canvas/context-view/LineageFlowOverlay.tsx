@@ -49,6 +49,9 @@ import { unitNoun } from './connections/connectionUnits'
 import { lineStrokeWidth, type LineState } from './lineWeight'
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { usePreferencesStore, type LineagePortSides } from '@/store/preferences'
+import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
+import { RuleChipRow } from '../property-manager/DisplayRuleTagChips'
+import { dashArrayOf, type RuleLineLook } from '../ruleLines'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -143,6 +146,7 @@ export function LineageFlowOverlay({
   highlightedEdges,
   isHighlightActive = false,
   countLabels,
+  ruleLooks,
   resolveEdgeColor,
   resolveEdgeStrokeStyle,
   onEdgeDoubleClick,
@@ -178,6 +182,9 @@ export function LineageFlowOverlay({
   /** Per highlighted line, what its badge says instead of its weight — a
    *  Connections search's matches on it. Shown on each such line. */
   countLabels?: ReadonlyMap<string, string>,
+  /** Per line, the look the view's relationship display rules give it
+   *  (`memberRuleLooks`) — none while a trace is drawn. */
+  ruleLooks?: ReadonlyMap<string, RuleLineLook>,
   resolveEdgeColor?: (edgeType: string) => string,
   /** Sibling of `resolveEdgeColor` — the ontology's stroke style for the
    *  edge's primary type, honoured by `edgeDashArray` when the edge is not
@@ -241,6 +248,8 @@ export function LineageFlowOverlay({
   // Lines that point back, in the reader's alert colour — or null, not marked.
   const backPointerColor = usePreferencesStore((s) => (s.highlightBackPointers ? s.backPointerColor || '#ef4444' : null))
   const lineWeight = usePreferencesStore((s) => s.lineWeight) ?? 'regular'
+  // The view's display rules, in its order: what a hovered line's card names as styling it.
+  const ruleMeta = useDisplayRuleMatchStore((s) => s.ruleMeta)
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
   const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
   // Trailing edge stubs — partial curves from visible nodes toward container boundary
@@ -699,6 +708,18 @@ export function LineageFlowOverlay({
         edgeOpacity = 0.15
         lineState = 'faint'
       }
+      // A display rule styling this line's relationships paints it — its colour, dash and width —
+      // at rest and while the reader looks at it. Dimmed, faint or in a trace, the line keeps the
+      // look that says so.
+      const look = !isTracing && lineState !== 'dimmed' && lineState !== 'faint'
+        ? ruleLooks?.get(edge.id) : undefined
+      if (look) {
+        color = look.color
+        baseStrokeWidth = look.width
+        // A rule's line reads at rest, as it does on the Graph canvas: the faint resting lines are
+        // the ones no rule picked out.
+        edgeOpacity = Math.max(edgeOpacity, lineState === 'highlighted' ? 0.95 : 0.85)
+      }
       const dynamicStrokeWidth = lineStrokeWidth(baseStrokeWidth, lineState, lineWeight)
 
       newComputedEdges.push({
@@ -710,7 +731,7 @@ export function LineageFlowOverlay({
         isBundled: edge.isBundled || false,
         isAggregated: edge.isAggregated || false,
         edgeCount: edge.edgeCount || 0,
-        dashArray,
+        dashArray: look ? dashArrayOf(look.dash, dynamicStrokeWidth) ?? 'none' : dashArray,
         sx, sy, tx, ty,
         types: Array.isArray(edge.types) && edge.types.length > 0
           ? edge.types
@@ -721,6 +742,7 @@ export function LineageFlowOverlay({
         isReverseFlow: !!edge.isReverseFlow,
         isBidirectional: !!(edge as any).isBidirectional,
         pointsBack,
+        ...(look ? { ruleColor: look.color, ruleChipIds: look.chips.map(c => c.id) } : {}),
       })
     }
 
@@ -1207,7 +1229,7 @@ export function LineageFlowOverlay({
       setComputedRibbons(prev => (prev.length === 0 && nextRibbons.length === 0 ? prev : nextRibbons))
     }
 
-  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor, lineWeight, hoverLines])
+  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor, lineWeight, hoverLines, ruleLooks])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1945,6 +1967,7 @@ export function LineageFlowOverlay({
           )
         })}
 
+
         {/* Per-node lineage hairlines now render inside each FlatTreeItem
             (anchored to the row box) — see FlatTreeItem. */}
 
@@ -1972,6 +1995,22 @@ export function LineageFlowOverlay({
         hoveredEdgeId={hoveredEdgeId}
         highlighted={isHighlightActive ? highlightedEdges ?? null : null}
       />
+
+      {/* The rules' chips, above every line and its motion — no line may run through them —
+          and on the lines being looked at only: on every line, a dense view would read
+          as a wall of labels. Hovering any line names them in its card. */}
+      {visibleEdges.map(edge => {
+        if (!edge.ruleChipIds?.length) return null
+        const isConnectedToSelected = !!(isHighlightActive && highlightedEdges?.has(edge.id))
+        if (!isConnectedToSelected && edge.id !== openLineId) return null
+        // Above the line's count badge when it shows one (the line is looked at: see above).
+        const counted = (isConnectedToSelected && countLabels?.get(edge.id) !== undefined)
+          || (!isTracing && edge.isBundled && edge.edgeCount > 1)
+        return (
+          <LineRuleChips key={`rule-chips-${edge.id}`} lineId={edge.id} ids={edge.ruleChipIds}
+                         x={(edge.sx + edge.tx) / 2} y={(edge.sy + edge.ty) / 2 - (counted ? 16 : 0)} />
+        )
+      })}
 
       {/* Edge hover panel rendered via Portal — escapes the canvas's z-[5]
           stacking context so it always sits above the column content (z-10)
@@ -2158,6 +2197,7 @@ export function LineageFlowOverlay({
     {hoveredEdgeId && hoverMousePos && (() => {
       const edge = computedEdges.find(e => e.id === hoveredEdgeId)
       if (!edge) return null
+      const hoveredRuleTags = (edge.ruleChipIds ?? []).flatMap(id => ruleMeta.filter(m => m.id === id))
       // Resolve source/target node display names via DOM — the elementCache
       // already has the rendered node refs. A line into a folded layer ends on
       // a fold anchor, which carries the row's name as `data-label`
@@ -2264,6 +2304,14 @@ export function LineageFlowOverlay({
                 {targetType && <p className="text-[10px] text-white/45 truncate">{targetType}</p>}
               </div>
             </div>
+
+            {hoveredRuleTags.length > 0 && (
+              <div className="flex items-start gap-2 mt-2.5 pt-2 border-t border-white/[0.06]"
+                   data-testid="line-hover-rules">
+                <span className="text-[9px] uppercase tracking-wider text-white/40 mt-0.5 shrink-0">Styled by</span>
+                <RuleChipRow tags={hoveredRuleTags} size="xs" max={4} subject="relationship" />
+              </div>
+            )}
 
             {confPct !== null && (
               <div className="flex items-center gap-1.5 mt-2.5 pt-2 border-t border-white/[0.06]">
@@ -2375,6 +2423,7 @@ const EdgeLine = React.memo(function EdgeLine({
       data-edge-src={edge.source}
       data-edge-tgt={edge.target}
       data-edge-back={edge.pointsBack || undefined}
+      data-edge-rule={edge.ruleColor}
       className={edgeClasses}
       // Opacity inline ONLY when this line is dimmed: an inline `opacity: 1`
       // outranks the stylesheet, and the hover spotlight dims lines from
@@ -2500,6 +2549,20 @@ const EdgeLine = React.memo(function EdgeLine({
   && a.countLabel === b.countLabel
   && sameRow(a.edge, b.edge),
 )
+
+/** The chips of the display rules that style a line, centred on (``x``, ``y``) in the overlay's
+ *  space: at most two, the rest as "+N", on the canvas's own colour so the line stops at them. */
+function LineRuleChips({ lineId, ids, x, y }: { lineId: string; ids: readonly string[]; x: number; y: number }) {
+  const meta = useDisplayRuleMatchStore((s) => s.ruleMeta)
+  const tags = useMemo(() => ids.flatMap((id) => meta.filter((m) => m.id === id)), [ids, meta])
+  if (tags.length === 0) return null
+  return (
+    <div className="absolute -translate-x-1/2 -translate-y-1/2 rounded bg-canvas pointer-events-none whitespace-nowrap"
+         style={{ left: x, top: y }} data-testid="rule-line-chips" data-line-id={lineId}>
+      <RuleChipRow tags={tags} size="xs" max={2} subject="relationship" className="flex-nowrap" />
+    </div>
+  )
+}
 
 /** Half the width of a line badge that holds `text`: 16px for up to two
  *  characters, as it always was, growing ~4.5px a character past that. */

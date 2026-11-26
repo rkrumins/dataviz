@@ -18,9 +18,6 @@ const { service, notify, wsState } = vi.hoisted(() => ({
 
 vi.mock('@/services/layoutTemplateService', () => ({ layoutTemplateService: service }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
-vi.mock('@/hooks/useWorkspaceEntityTypes', () => ({
-    useWorkspaceEntityTypes: () => ({ types: ['Table'], isLoading: false, isError: false }),
-}))
 vi.mock('@/store/workspaces', () => {
     const useWorkspacesStore = Object.assign(
         (selector: (s: typeof wsState) => unknown) => selector(wsState),
@@ -77,7 +74,8 @@ describe('ImportTemplateDialog', () => {
         expect(name).toBeInTheDocument()
         expect(screen.getByText(/already has “Finance flow”/)).toBeInTheDocument()
         expect(screen.getByText('2 layers')).toBeInTheDocument()
-        expect(screen.getByText(/Matches 1 of 2 layers in Finance — not there: Chart/)).toBeInTheDocument()
+        // A template makes no claim about how it fits any data.
+        expect(screen.queryByText(/Matches \d+ of|not there|by hand/)).not.toBeInTheDocument()
 
         fireEvent.click(screen.getByRole('button', { name: /import template/i }))
         await waitFor(() => expect(service.create).toHaveBeenCalledWith(expect.objectContaining({

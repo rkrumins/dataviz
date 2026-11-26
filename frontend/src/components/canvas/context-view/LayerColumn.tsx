@@ -32,6 +32,15 @@ import { useNarrowVisibility } from '@/features/narrow/narrowStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
+import { ChangeKindTag, DropHint } from './DropHint'
+import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
+import { draggedEntity } from './entityDrag'
+import { draggedLayer, setDraggedLayer } from './layerDrag'
+import { useReparentNode } from './useReparentNode'
+import { COLUMN_KIND_ICON, columnKind, columnKindCopy, type ColumnKind, type ColumnKindCopy, type MapOffer } from './columnKind'
+import { ColumnKindMark } from './ColumnKindMark'
+import { nodeIndexOf } from '@/lib/storeIndex'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 import type { PlacedOut, PlacementInfo } from './placement'
 import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
 import { LayerSortMenu, SORT_MODE_ICONS, SORT_MODE_LABELS } from './LayerSortMenu'
@@ -180,6 +189,8 @@ interface LayerColumnProps {
   onMoveGroupContents?: (layerId: string, fromId: string, toId: string) => void
   onUngroup?: (layerId: string, groupId: string, groupName: string) => void
   onDeleteLayer?: (layerId: string) => void
+  /** Delete in one click, with an Undo in its notice (the header's delete asks first instead). */
+  onDeleteWithUndo?: (layerId: string) => void
   onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
   /** Right-click on the header (folded or not): this layer's menu — insert a layer beside it,
    *  rename, colour, move, delete. Reachable from the Layer Strip too, so no scrolling is needed. */
@@ -216,6 +227,11 @@ interface LayerColumnProps {
   /** Keyboard reorder nudge (⌥↑/↓) — resolves the sibling set canvas-side so it
    *  works for roots and children alike. */
   onReorderNudge?: (nodeId: string, dir: 'up' | 'down') => void
+  /** Whether a dragged entity is among a row's siblings — the set custom order arranges. */
+  reorderAccepts?: (draggedId: string, targetId: string) => boolean
+  /** The canvas takes moves (a draft open and writable, editing on): any row can be dropped inside
+   *  another, a data change. */
+  moveEnabled?: boolean
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -284,6 +300,15 @@ interface LayerColumnProps {
   /** Why an anchored column can never fill — see anchorIssueByLayer. Changes
    *  the empty state from "nothing assigned" (untrue here) to the real reason. */
   anchorIssue?: 'missing' | 'duplicate'
+  /** A column of types: how many entities of other types are placed in it by hand. */
+  handPlaced?: number
+  /** Mapping the column to an entity (a view change, columnKind.ts `mapOffer`): what it offers
+   *  here, or why not. Absent: nothing to say (a column of types, or no editing). */
+  mapOffer?: MapOffer
+  /** Open the picker that maps this column to an entity — or, mapped already, to another. */
+  onMapLayer?: (layerId: string) => void
+  /** Show the entity this column is mapped to as a row in it instead. */
+  onUnmapLayer?: (layerId: string) => void
   /** Folded into a spine. The canvas's fold window decides (useLayerFold);
    *  the column only asks, through `onFoldChange`. */
   isFolded?: boolean
@@ -415,6 +440,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onMoveGroupContents,
   onUngroup,
   onDeleteLayer,
+  onDeleteWithUndo,
   onReorderLayer,
   onHeaderContextMenu,
   layerMenuOpen = false,
@@ -432,6 +458,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   reorderEnabled = false,
   onReorderDrop,
   onReorderNudge,
+  reorderAccepts,
+  moveEnabled = false,
   isHydratingInitial = false,
   revealTarget,
   geometryRegistry,
@@ -454,6 +482,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   onResizeLayer,
   anchorMore,
   anchorIssue,
+  handPlaced = 0,
+  mapOffer,
+  onMapLayer,
+  onUnmapLayer,
   subsetFeed,
   emptyText,
   onSearchInLayer,
@@ -545,6 +577,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [draftGroupName, setDraftGroupName] = useState('')
   const headerNameTaken = draftGroupName.trim() !== '' && !!groupNameClash([layer], layer.id, null, [draftGroupName])
   const [draftName, setDraftName] = useState(layer.name)
+  // A name left as the header shows it is no rename — least of all for a column whose name follows
+  // its entity, which a rename would stop following.
+  const commitRename = () => { if (onRenameLayer && draftName.trim() !== layer.name) onRenameLayer(layer.id, draftName) }
   // A rename asked for from outside (the layer menu, or a layer just inserted): open the name the
   // moment the request is new — adjusted during render, so there is no effect and no extra paint.
   const [renameSeen, setRenameSeen] = useState(0)
@@ -561,8 +596,10 @@ export const LayerColumn = React.memo(function LayerColumn({
     setDraftGroupName('')
     setIsNamingGroup(true)
   }
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
+  // A column hovering this header: where it lands — after this one coming from the left, before it
+  // from the right (reorderLayer's rule).
+  const [layerDropTitle, setLayerDropTitle] = useState<string | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
@@ -1763,6 +1800,102 @@ export const LayerColumn = React.memo(function LayerColumn({
     return () => { geometryRegistry.delete(layer.id) }
   }, [geometryRegistry, layer.id, virtualizer])
 
+  // ── A column mapped to an entity takes a drop anywhere in its body ──────────
+  // The column IS that entity, so an entity dropped on its body (not on a row — a row takes its
+  // own drop) goes inside it: a DATA change, said as one while the drag hovers. The header keeps
+  // its view-only meaning (show in this column).
+  const { reparent, verdict } = useReparentNode()
+  const anchorUrn = layer.anchorUrn && !anchorIssue ? layer.anchorUrn : null
+  const anchorNode = useCanvasStore((s) => (anchorUrn ? nodeIndexOf(s.nodes).get(anchorUrn) : undefined))
+  const [bodyHint, setBodyHint] = useState<(DropHintSpec & { top: number }) | null>(null)
+  // The hint rides just above the pointer, so it never sits far from where the drop lands — moved
+  // in place on each dragover rather than re-rendering the column.
+  const bodyChipRef = useRef<HTMLDivElement>(null)
+  const chipTop = (clientY: number, box: DOMRect) => Math.max(10, Math.min(clientY - box.top - 44, box.height - 40))
+  const bodyHintFor = (): DropHintSpec | null => {
+    if (!anchorNode) return null
+    const dragged = draggedEntity()
+    return moveHint(dragged ? verdict(dragged, anchorNode.id) : { kind: 'data', edgeType: null },
+      resolveEntityName(anchorNode.data, personaMode, anchorNode.id))
+  }
+  /** A drag over a row — or over the end zone arranging this column's own rows — which answers
+   *  for itself. */
+  const overRow = (e: React.DragEvent) => {
+    const at = e.target as Element | null
+    return !!at?.closest?.('[id^="layer-node-"]') || (!!at?.closest?.('[data-end-zone]') && !forTheBody())
+  }
+  /** In a mapped column, a row dragged from elsewhere is for the body — not the end zone, which
+   *  arranges this column's own rows. */
+  const forTheBody = () => {
+    const dragged = draggedEntity()
+    return !!anchorNode && !!dragged && !nodes.some((n) => n.id === dragged)
+  }
+  // What kind of column this is — mapped to an entity, by type, or hand-picked — said by a mark
+  // on its tile and in its name's card, in the reader's view.
+  const kind = columnKind(layer, { resolved: !!anchorNode, issue: anchorIssue })
+  const anchorName = anchorNode ? resolveEntityName(anchorNode.data, personaMode, anchorNode.id) : undefined
+  const kindCopy = columnKindCopy(kind, {
+    persona: personaMode,
+    anchorName,
+    anchorUrn: layer.anchorUrn,
+    typeNames: (layer.entityTypes ?? []).map((id) => viewEntityTypes.find((t) => t.id === id)?.name ?? id),
+    typePlurals: (layer.entityTypes ?? []).map((id) => {
+      const t = viewEntityTypes.find((x) => x.id === id)
+      return t?.pluralName ?? `${t?.name ?? id}s`
+    }),
+    typeIds: layer.entityTypes,
+    ruleCount: layer.rules?.length,
+    handPlaced,
+  })
+  // A row that can't hold what is dropped on it passes the drop to the entity the column is.
+  const anchorId = anchorNode?.id
+  const forwardTo = useMemo(() => (anchorId && anchorName ? { id: anchorId, name: anchorName } : undefined), [anchorId, anchorName])
+  const openAnchor = kind === 'mapped' && anchorNode ? () => {
+    const id = anchorNode.id
+    useCanvasStore.getState().requestDrawerMove(() => {
+      const st = useCanvasStore.getState()
+      st.openNodeDrawer(id)
+      st.selectNode(id)
+    })
+  } : undefined
+  // Mapping it to an entity: map it (to another), show its entity as a row — or why not.
+  const layerId = layer.id
+  const mapping = useMemo((): { onMap?: () => void; onUnmap?: () => void; refused?: string } | undefined => {
+    if (!mapOffer) return undefined
+    if (mapOffer.kind === 'refused') return { refused: mapOffer.reason }
+    return {
+      onMap: onMapLayer ? () => onMapLayer(layerId) : undefined,
+      onUnmap: mapOffer.kind === 'mapped' && mapOffer.canUnmap && onUnmapLayer ? () => onUnmapLayer(layerId) : undefined,
+    }
+  }, [mapOffer, onMapLayer, onUnmapLayer, layerId])
+  // What the name's card offers for it.
+  const mapLabel = layer.anchorUrn ? 'Map to another entity…' : 'Map this column to…'
+  const cardMapping = useMemo((): CardMapping | undefined => {
+    if (!mapping) return undefined
+    if (mapping.refused) return { refused: mapping.refused, actions: [] }
+    const actions: CardMapping['actions'] = []
+    if (mapping.onUnmap && anchorName) actions.push({ label: `Show ${anchorName} as a row`, icon: LucideIcons.Rows3, onClick: mapping.onUnmap })
+    if (mapping.onMap) actions.push({ label: mapLabel, icon: LucideIcons.Link2, onClick: mapping.onMap })
+    return actions.length > 0 ? { actions } : undefined
+  }, [mapping, anchorName, mapLabel])
+  // An empty mapped column is its entity with nothing inside — never a column whose entity vanished.
+  const anchorTypeName = useMemo(() => {
+    const id = anchorNode?.data?.type as string | undefined
+    return id ? viewEntityTypes.find((t) => t.id === id)?.name ?? id : undefined
+  }, [anchorNode, viewEntityTypes])
+
+  // dragleave fires on the element left, so a drag cancelled or dropped elsewhere clears it here.
+  useEffect(() => {
+    if (!bodyHint) return
+    const clear = () => setBodyHint(null)
+    window.addEventListener('dragend', clear)
+    window.addEventListener('drop', clear)
+    return () => {
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('drop', clear)
+    }
+  }, [bodyHint])
+
   // ── The header's actions tray ─────────────────────────────────────────────
   // Its controls besides the sort and ⋯, most wanted first. The Business view
   // keeps the header to the layer and its sort: adding, grouping, building and
@@ -1805,31 +1938,23 @@ export const LayerColumn = React.memo(function LayerColumn({
   // A sort menu unmounted open (the column folds, a rename starts) never says it closed.
   if (sortMenuOpen && (isCollapsed || isNamingGroup || isRenaming || !onSetSortMode)) setSortMenuOpen(false)
   // It stays out while something it opened is still open: the layer's menu
-  // (from ⋯, a right-click or the Layer Strip), the sort menu, the delete confirm.
-  const trayPinned = layerMenuOpen || sortMenuOpen || (confirmingDelete && trayHas('delete'))
-  // A confirm nobody answers would hold the tray over the name: a click
-  // anywhere else keeps the layer, as Escape does.
-  const confirmRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!confirmingDelete) return
-    const away = (e: PointerEvent) => {
-      if (!confirmRef.current?.contains(e.target as Node)) setConfirmingDelete(false)
-    }
-    document.addEventListener('pointerdown', away, true)
-    return () => document.removeEventListener('pointerdown', away, true)
-  }, [confirmingDelete])
+  // (from ⋯, a right-click or the Layer Strip), the sort menu.
+  const trayPinned = layerMenuOpen || sortMenuOpen
   const OverrideSortIcon = SORT_MODE_ICONS[sortMode]
   // Display › Header size: an open header's row, padding, icon and name — one
   // height for every column at a size (`layerHeaderTokens`).
-  const header = layerHeaderTokens(usePreferencesStore(s => s.canvasHeaderSize) ?? 'comfortable')
+  const canvasHeaderSize = usePreferencesStore(s => s.canvasHeaderSize) ?? 'comfortable'
+  const header = layerHeaderTokens(canvasHeaderSize)
   // Display › Show off-screen markers: the "↑ N more · M lines" at the column's ends.
   const showOffscreenMarkers = usePreferencesStore(s => s.showOffscreenLineMarkers) ?? true
   // Display › Empty layers. A column whose anchor entity is gone, or held by
   // another column, is a problem with the data to fix, not an empty layer: it
   // says why whatever this is.
   const emptyLayerMessage = usePreferencesStore(s => s.emptyLayerMessage) ?? 'always'
-  const showEmptyMessage = !!anchorIssue
+  const showEmptyMessage = !!anchorIssue || kind === 'mapped'
     || !(emptyLayerMessage === 'never' || (emptyLayerMessage === 'tracing-hidden' && isTracing))
+  // An empty column mapped to an entity: what is inside it — nothing, yet, or ever.
+  const emptyInside = kind === 'mapped' && anchorName && !emptyText ? anchorName : null
 
   return (
     <motion.div
@@ -1990,7 +2115,9 @@ export const LayerColumn = React.memo(function LayerColumn({
           requestFold(false)
         } : undefined}
         className={cn(
-          "group/header sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
+          "group/header sticky top-0 z-10 border-b transition-all duration-200",
+          // Open and reorderable, the header is a handle: grab it to move the column.
+          onReorderLayer && !isCollapsed && !isRenaming ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
           isCollapsed
             ? "flex-1 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/50"
             : cn("flex-shrink-0", header.paddingClass),
@@ -2003,15 +2130,29 @@ export const LayerColumn = React.memo(function LayerColumn({
           // scroll beneath comes from opacity, not a blurred backdrop (a sticky
           // blur surface inside a scroller ghosts as white strips on rows).
           background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%), var(--nx-bg-elevated)`,
-          boxShadow: isDragOver ? `inset 0 0 0 2px ${layer.color}80, 0 0 20px ${layer.color}20` : undefined,
+          // A drop on the header only arranges this view: a dashed outline, as every view change is.
+          outline: isDragOver ? `2px dashed ${layer.color ?? 'currentColor'}` : undefined,
+          outlineOffset: isDragOver ? -3 : undefined,
         }}
         onClick={() => isCollapsed && requestFold(false)}
         onContextMenu={onHeaderContextMenu ? (e) => onHeaderContextMenu(e, layer.id) : undefined}
+        // The whole header is the handle for reordering — not only its icon tile — except while its
+        // name is being edited (a drag there selects text).
+        draggable={!!onReorderLayer && !isRenaming}
+        onDragStart={onReorderLayer && !isRenaming ? (e) => {
+          e.dataTransfer.effectAllowed = 'move'
+          e.dataTransfer.setData('text/x-layer-id', layer.id)
+          setDraggedLayer({ id: layer.id, order: layer.order })
+        } : undefined}
+        onDragEnd={onReorderLayer ? () => setDraggedLayer(null) : undefined}
         onDragOver={(e) => {
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
           const isEntity = types.includes('text/x-entity-id')
           const isGroup = types.includes('text/x-group-id')
+          // A column over its own header: nothing to do there.
+          const from = isLayer ? draggedLayer() : null
+          if (from && from.id === layer.id) return
           // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
           // gate on the presence of the typed key + the matching handler).
           if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer) || (isGroup && groupActions)) {
@@ -2019,15 +2160,20 @@ export const LayerColumn = React.memo(function LayerColumn({
             e.dataTransfer.dropEffect = 'move'
             setIsDragOver(true)
             setDragKind(isLayer ? 'layer' : isGroup ? 'group' : 'entity')
+            if (isLayer) {
+              const title = !from ? 'Drop to reorder here' : from.order < layer.order ? `Move after ${layer.name}` : `Move before ${layer.name}`
+              if (title !== layerDropTitle) setLayerDropTitle(title)
+            }
           }
         }}
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null); setLayerDropTitle(null) }
         }}
         onDrop={(e) => {
           e.preventDefault()
           setIsDragOver(false)
           setDragKind(null)
+          setLayerDropTitle(null)
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
           const groupId = e.dataTransfer.getData('text/x-group-id')
@@ -2068,22 +2214,24 @@ export const LayerColumn = React.memo(function LayerColumn({
         {/* Drop hint overlay */}
         {isDragOver && (
           <div
-            className="absolute inset-0 flex items-center justify-center rounded-sm pointer-events-none"
+            // Over the header's own name and tile, which sit in positioned boxes of their own.
+            className="absolute inset-0 z-[25] flex items-center justify-center rounded-sm pointer-events-none"
             style={{ backgroundColor: `${layer.color}15` }}
           >
-            <div className={cn(
-              "flex items-center gap-2 rounded-xl bg-black/40 border border-white/20",
-              isCollapsed ? "p-1" : "px-3 py-1.5",
-            )}>
-              <LucideIcons.MoveRight className="w-3.5 h-3.5" style={{ color: layer.color }} />
-              {/* A spine has no room for the sentence; the tint and the
-                  arrow carry it. */}
-              {!isCollapsed && (
-                <span className="text-xs font-medium" style={{ color: layer.color }}>
-                  {dragKind === 'layer' ? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : `Move to ${layer.name}`}
-                </span>
-              )}
-            </div>
+            {/* A spine has no room for the sentence; the tint and the
+                dashed outline carry it. */}
+            {isCollapsed ? (
+              <span className="grid place-items-center w-6 h-6 rounded-full bg-canvas-elevated border border-dashed border-ink-muted/60">
+                <LucideIcons.Eye className="w-3.5 h-3.5 text-ink" aria-hidden />
+              </span>
+            ) : (
+              <DropHint
+                kind="view"
+                title={dragKind === 'layer' ? layerDropTitle ?? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : 'Show in this column'}
+                detail="only this view"
+                className="mx-2"
+              />
+            )}
           </div>
         )}
         <div
@@ -2108,15 +2256,9 @@ export const LayerColumn = React.memo(function LayerColumn({
               </button>
             )}
             <div
-              draggable={!!onReorderLayer}
-              onDragStart={onReorderLayer ? (e) => {
-                e.stopPropagation()
-                e.dataTransfer.effectAllowed = 'move'
-                e.dataTransfer.setData('text/x-layer-id', layer.id)
-              } : undefined}
               title={onReorderLayer ? `Drag to reorder ${layer.name}` : undefined}
               className={cn(
-                "flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
+                "relative flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
                 isCollapsed
                   ? (spineWidth < NARROW_SPINE_PX ? "rounded-md" : "rounded-lg")
                   : cn(header.tileClass, "group-hover/column:scale-105 group-hover/column:shadow-md"),
@@ -2138,6 +2280,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                 )}
                 style={{ color: layer.color }}
               />
+              {/* The column's kind, over the tile's corner: no width of its own. A narrow spine
+                  has no corner to spare. */}
+              {!(isCollapsed && spineWidth < NARROW_SPINE_PX) && (
+                <ColumnKindMark kind={kind} copy={kindCopy} small={isCollapsed || canvasHeaderSize === 'compact'} />
+              )}
             </div>
           </div>
 
@@ -2250,10 +2397,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => {
                       e.stopPropagation()
-                      if (e.key === 'Enter') { onRenameLayer(layer.id, draftName); setIsRenaming(false) }
+                      if (e.key === 'Enter') { commitRename(); setIsRenaming(false) }
                       if (e.key === 'Escape') { setDraftName(layer.name); setIsRenaming(false) }
                     }}
-                    onBlur={() => { onRenameLayer(layer.id, draftName); setIsRenaming(false) }}
+                    onBlur={() => { commitRename(); setIsRenaming(false) }}
                     className={cn("flex-1 min-w-0 px-2 rounded-lg bg-canvas-overlay border border-accent-lineage/60 font-semibold text-ink outline-none", header.inputClass)}
                   />
                 ) : (
@@ -2264,6 +2411,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                     properties={layer.properties}
                     coverRight={trayWidth}
                     nameClass={header.nameClass}
+                    kind={kind}
+                    kindCopy={kindCopy}
+                    onOpenAnchor={openAnchor}
+                    anchorName={anchorName}
+                    mapping={cardMapping}
                   />
                 )}
                 <div className="flex-shrink-0 flex items-center gap-1.5">
@@ -2444,49 +2596,17 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
                     </TrayButton>
                   )}
-                  {/* Delete — trash → inline check/✗ confirm (the check's tip warns when the layer
-                      has entities: hand-placed ones fall back to the default layer, rule-placed
-                      ones become unassigned unless another layer claims their type). */}
+                  {/* Delete — the trash opens Delete layer…'s dialog, which says what happens to
+                      what the column shows before anything does: it is the confirm. */}
                   {trayHas('delete') && onDeleteLayer && (
-                    confirmingDelete ? (
-                      <div
-                        ref={confirmRef}
-                        className="flex items-center gap-0.5"
-                        onClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setConfirmingDelete(false) } }}
-                      >
-                        <TrayButton
-                          label={`Yes, delete ${layer.name}`}
-                          detail={loadedCount > 0
-                            ? `${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type`
-                            : undefined}
-                          // The trash it replaces took the focus with it.
-                          autoFocus
-                          onClick={() => { onDeleteLayer(layer.id); setConfirmingDelete(false) }}
-                          menuHasIt={!!onHeaderContextMenu}
-                          className="bg-rose-500/15 text-rose-500 hover:bg-rose-500/25"
-                        >
-                          <LucideIcons.Check className="w-3.5 h-3.5" />
-                        </TrayButton>
-                        <TrayButton
-                          label={`Keep ${layer.name}`}
-                          onClick={() => setConfirmingDelete(false)}
-                          menuHasIt={!!onHeaderContextMenu}
-                          className="text-ink-muted hover:bg-black/[0.06] dark:hover:bg-white/10"
-                        >
-                          <LucideIcons.X className="w-3.5 h-3.5" />
-                        </TrayButton>
-                      </div>
-                    ) : (
-                      <TrayButton
-                        label={`Delete ${layer.name}`}
-                        onClick={() => setConfirmingDelete(true)}
-                        menuHasIt={!!onHeaderContextMenu}
-                        className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-500"
-                      >
-                        <LucideIcons.Trash2 className="w-3.5 h-3.5" />
-                      </TrayButton>
-                    )
+                    <TrayButton
+                      label={`Delete ${layer.name}`}
+                      onClick={() => onDeleteLayer(layer.id)}
+                      menuHasIt={!!onHeaderContextMenu}
+                      className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-500"
+                    >
+                      <LucideIcons.Trash2 className="w-3.5 h-3.5" />
+                    </TrayButton>
                   )}
                   {onHeaderContextMenu && (
                     <HoverTip
@@ -2564,6 +2684,17 @@ export const LayerColumn = React.memo(function LayerColumn({
       {/* Flat Tree Content - Virtualized, hidden when collapsed */}
       {!isCollapsed && (
         <div className="flex-1 relative flex flex-col min-h-0">
+          {/* A drag over a mapped column's body: what dropping it here does, over the whole list. */}
+          {bodyHint && (
+            <div
+              data-body-drop={bodyHint.kind}
+              className={cn('pointer-events-none absolute inset-1 z-30 rounded-xl transition-shadow duration-150', dropSurfaceClass(bodyHint.kind))}
+            >
+              <div ref={bodyChipRef} className="absolute inset-x-0 flex justify-center px-2 transition-[top] duration-75" style={{ top: bodyHint.top }}>
+                <DropHint kind={bodyHint.kind} title={bodyHint.title} detail={bodyHint.detail} />
+              </div>
+            </div>
+          )}
           {/* Display › Show off-screen markers: off, neither scrim is drawn. */}
           {showOffscreenMarkers && <>
           {/* ── Periphery scrims — "content continues" affordances at the
@@ -2990,17 +3121,39 @@ export const LayerColumn = React.memo(function LayerColumn({
               if (dragScrollRafRef.current == null) {
                 dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
               }
+              // A mapped column's body: the drop goes inside the entity the column is.
+              if (!isGroup && anchorNode && !overRow(e)) {
+                const hint = bodyHintFor()
+                if (hint) {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                }
+                const top = chipTop(e.clientY, e.currentTarget.getBoundingClientRect())
+                if (!sameHint(hint, bodyHint)) setBodyHint(hint ? { ...hint, top } : null)
+                else if (bodyChipRef.current) bodyChipRef.current.style.top = `${top}px`
+              }
             }}
+            // A row stops the drag reaching here; seen on the way down, its hint gives way to the row's.
+            onDragOverCapture={(e) => { if (bodyHint && overRow(e)) setBodyHint(null) }}
             onDragLeave={(e) => {
-              if (dragKind === 'group' && !e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+              const left = !e.currentTarget.contains(e.relatedTarget as Node)
+              if (dragKind === 'group' && left) { setIsDragOver(false); setDragKind(null) }
+              if (bodyHint && left) setBodyHint(null)
             }}
             onDrop={(e) => {
               const groupId = e.dataTransfer.getData('text/x-group-id')
-              if (!groupId || !groupActions) return
+              if (groupId && groupActions) {
+                e.preventDefault()
+                setIsDragOver(false)
+                setDragKind(null)
+                groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+                return
+              }
+              setBodyHint(null)
+              const entityId = e.dataTransfer.getData('text/x-entity-id')
+              if (!entityId || !anchorNode || overRow(e)) return
               e.preventDefault()
-              setIsDragOver(false)
-              setDragKind(null)
-              groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+              reparent(entityId, anchorNode.id)
             }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.
@@ -3095,7 +3248,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                       ? 'This column\u2019s entity is gone'
                       : anchorIssue === 'duplicate'
                         ? 'Another column holds this entity'
-                        : emptyText ?? (isBlankModel ? 'No entities yet' : 'No assigned entities yet')}
+                        : emptyInside
+                          ? (addInsideName ? `Nothing inside ${emptyInside} yet` : `Nothing inside ${emptyInside}`)
+                          : emptyText ?? (isBlankModel ? 'No entities yet' : 'No assigned entities yet')}
                   </p>
                   {/* Plain token, not `/40`: an alpha suffix on a CSS-variable
                       token emits no CSS at all, so the neighbouring hint has been
@@ -3104,16 +3259,45 @@ export const LayerColumn = React.memo(function LayerColumn({
                   {anchorIssue && (
                     <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">
                       {anchorIssue === 'missing'
-                        ? 'It was removed from the source, so there is nothing left to show here. Delete the column, or point it at another entity.'
-                        : 'Two columns are built around the same entity; only the first can show it. Delete this one, or anchor it elsewhere.'}
+                        ? 'This source doesn’t hold it now, so there is nothing to show here. Map the column to another entity, keep it as a hand-picked column, or delete it.'
+                        : 'Two columns are built around the same entity; only the first can show it. Delete this one, or map it to another entity.'}
                     </p>
                   )}
+                  {anchorIssue && mapping?.onMap && (
+                    <EmptyAction color={layer.color} icon={LucideIcons.Link2} label="Map to another entity…" onClick={mapping.onMap} />
+                  )}
+                  {/* Its entity gone, the column offers the other two ways on, wherever mapping is
+                      offered (a draft that can change its layers). */}
+                  {anchorIssue === 'missing' && mapping && !mapping.refused && (
+                    <>
+                      {onUnmapLayer && (
+                        <EmptyAction color={layer.color} icon={LucideIcons.Pin} label="Show as a hand-picked column" onClick={() => onUnmapLayer(layer.id)} />
+                      )}
+                      {onDeleteWithUndo && (
+                        <EmptyAction color={layer.color} icon={LucideIcons.Trash2} label="Delete the column" onClick={() => onDeleteWithUndo(layer.id)} />
+                      )}
+                    </>
+                  )}
+                  {emptyInside && (addInsideName ? (
+                    onAddToLayer
+                      ? <EmptyAction color={layer.color} icon={LucideIcons.Plus} label={`Add inside ${emptyInside}`} onClick={() => onAddToLayer(layer.id)} />
+                      : <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">What\u2019s added inside {emptyInside} shows here.</p>
+                  ) : (
+                    <>
+                      <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">
+                        {`${/^[aeiou]/i.test(anchorTypeName ?? '') ? 'An' : 'A'} ${anchorTypeName ?? 'entity of this type'} holds nothing, so this column stays empty.`}
+                      </p>
+                      {mapping?.onUnmap && (
+                        <EmptyAction color={layer.color} icon={LucideIcons.Rows3} label={`Show ${emptyInside} as a row`} onClick={mapping.onUnmap} />
+                      )}
+                    </>
+                  ))}
                   {/* The hint follows the affordance. `onAddToLayer` is what renders the "+"
                       (see the header above), and the caller only passes it inside a draft — so
                       with editing unavailable (read-only, or version control switched off) there
                       is no "+" anywhere on screen, and telling someone to click one is just a
                       small lie in the corner of the page. */}
-                  {onAddToLayer && !anchorIssue && (
+                  {onAddToLayer && !anchorIssue && !emptyInside && (
                     <p className="text-xs text-ink-muted/40 mt-1">
                       {addInsideName ? `Click + to add inside ${addInsideName}` : isBlankModel ? 'Click + to add entities' : 'Click + to assign entities'}
                     </p>
@@ -3380,6 +3564,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
+                        reorderAccepts={reorderAccepts}
+                        forwardTo={forwardTo}
+                        moveEnabled={moveEnabled}
                         ports={showLineageIndicators ? lineagePorts?.get(node.id) : undefined}
                         portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
                         portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
@@ -3401,12 +3588,13 @@ export const LayerColumn = React.memo(function LayerColumn({
               the end of the custom arrangement instead of being dead. */}
           {reorderEnabled && flatTree.length > 0 && (
             <div
+              data-end-zone
               className={cn(
                 "mx-1 my-1 h-12 rounded-xl border border-dashed flex items-center justify-center transition-colors duration-150",
                 endZoneHover ? "border-accent-lineage/60 bg-accent-lineage/5" : "border-transparent",
               )}
               onDragOver={(e) => {
-                if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+                if (!e.dataTransfer.types.includes('text/x-entity-id') || forTheBody()) return
                 e.preventDefault()
                 e.dataTransfer.dropEffect = 'move'
                 if (!endZoneHover) setEndZoneHover(true)
@@ -3415,19 +3603,14 @@ export const LayerColumn = React.memo(function LayerColumn({
               onDrop={(e) => {
                 const draggedId = e.dataTransfer.getData('text/x-entity-id')
                 setEndZoneHover(false)
-                if (!draggedId || !onReorderDrop) return
+                if (!draggedId || !onReorderDrop || forTheBody()) return
                 e.preventDefault()
                 e.stopPropagation()
                 const lastRoot = [...nodes].reverse().find(n => !n.isLogical)
                 if (lastRoot && lastRoot.id !== draggedId) onReorderDrop(draggedId, lastRoot.id, 'after')
               }}
             >
-              {endZoneHover && (
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-accent-lineage">
-                  <LucideIcons.CornerDownRight className="w-3 h-3" />
-                  Move to end
-                </span>
-              )}
+              {endZoneHover && <DropHint kind="view" title="Move to the end" detail="only this view" />}
             </div>
           )}
 
@@ -3497,9 +3680,9 @@ function TrayButton({ label, detail, onClick, menuHasIt, autoFocus, className, c
 //
 // Wraps the title in a 2-line clamp so long names wrap legibly, and a hover
 // popover that materialises when there is more to read: the name cut short
-// (clamped, or under the header's actions tray), the layer's description —
-// which the header never prints, so every header is one height — or its
-// properties. The
+// (clamped, or under the header's actions tray), what KIND of column it is and
+// what adding or dropping there does, the layer's description — which the
+// header never prints, so every header is one height — or its properties. The
 // popover (createPortal + framer-motion) mirrors LineageDisplayPopover's
 // pattern so the two header surfaces feel like a matched set.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3510,6 +3693,33 @@ const TITLE_POPOVER_WIDTH = 320
 /** A layer card lists this many properties; Layer settings has them all. */
 const LAYER_CARD_PROPERTIES = 8
 
+/** What a column's card offers for mapping it to an entity (a view change), or why it can't. */
+interface CardMapping {
+  actions: Array<{ label: string; icon: LucideIcons.LucideIcon; onClick: () => void }>
+  refused?: string
+}
+
+/** One way on from an empty column: a soft pill in the column's colour. */
+function EmptyAction({ color, icon: Icon, label, onClick }: {
+  color?: string
+  icon: LucideIcons.LucideIcon
+  label: string
+  onClick: () => void
+}) {
+  const tint = color ?? '#6366f1'
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+      className="mt-3 inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+      style={{ color: tint, backgroundColor: `${tint}14`, borderColor: `${tint}33` }}
+    >
+      <Icon className="w-3.5 h-3.5" aria-hidden />
+      {label}
+    </button>
+  )
+}
+
 function LayerHeaderTitle({
   name,
   description,
@@ -3517,6 +3727,11 @@ function LayerHeaderTitle({
   properties,
   coverRight = 0,
   nameClass,
+  kind,
+  kindCopy,
+  onOpenAnchor,
+  anchorName,
+  mapping,
 }: {
   name: string
   description?: string
@@ -3529,6 +3744,14 @@ function LayerHeaderTitle({
   coverRight?: number
   /** The name's size and how many lines it may take (Display › Header size). */
   nameClass: string
+  /** What kind of column this is, explained (see columnKind.ts). */
+  kind?: ColumnKind
+  kindCopy?: ColumnKindCopy
+  /** A mapped column: open the details of the entity it is. */
+  onOpenAnchor?: () => void
+  anchorName?: string
+  /** Mapping it to an entity: the ways it offers, or why not. */
+  mapping?: CardMapping
 }) {
   const resolvedColor = color ?? '#6b7280'
   const propertyEntries = Object.entries(properties ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -3600,10 +3823,21 @@ function LayerHeaderTitle({
     clearTimeout(closeTimerRef.current)
   }, [])
 
+  // A drag (the header is the handle for reordering) puts the card away: it would ride over the
+  // columns the reader is dropping onto.
+  useEffect(() => {
+    const putAway = () => {
+      clearTimeout(openTimerRef.current)
+      setOpen(false)
+    }
+    window.addEventListener('dragstart', putAway)
+    return () => window.removeEventListener('dragstart', putAway)
+  }, [])
+
   const scheduleOpen = () => {
-    // The card opens when the header cuts the name short — or the layer has
-    // a description or properties to read.
-    if (!isTruncated && !description && !hasProperties) return
+    // The card opens when the header cuts the name short — or there is more
+    // to read: what kind of column it is, its description, its properties.
+    if (!isTruncated && !kindCopy && !description && !hasProperties) return
     clearTimeout(closeTimerRef.current)
     clearTimeout(openTimerRef.current)
     openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
@@ -3630,7 +3864,7 @@ function LayerHeaderTitle({
         // running out of the box with no ellipsis.
         className={cn("min-w-0 font-semibold tracking-tight break-words", nameClass)}
         style={{ color: resolvedColor }}
-        title={isTruncated || description || hasProperties ? undefined : name}
+        title={isTruncated || kindCopy || description || hasProperties ? undefined : name}
       >
         <span ref={nameTextRef}>{name}</span>
       </h3>
@@ -3690,6 +3924,57 @@ function LayerHeaderTitle({
                   {name}
                 </div>
               </div>
+              {kind && kindCopy && (() => {
+                const KindIcon = COLUMN_KIND_ICON[kind]
+                return (
+                  <div data-column-kind-card={kind} className="px-3 py-2.5 flex items-start gap-2.5 border-b border-black/[0.06] dark:border-white/[0.04]">
+                    <span className="mt-px grid place-items-center w-6 h-6 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary shrink-0">
+                      <KindIcon className="w-3.5 h-3.5" aria-hidden />
+                    </span>
+                    <div className="min-w-0 space-y-1">
+                      <p className="text-[12px] font-semibold text-ink leading-snug">{kindCopy.label}</p>
+                      <p className="text-[12px] text-ink/80 leading-relaxed">{kindCopy.detail}</p>
+                      {kindCopy.technical && (
+                        <p className="font-mono text-[10.5px] text-ink-muted break-all">{kindCopy.technical}</p>
+                      )}
+                      {onOpenAnchor && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenAnchor() }}
+                          className="mt-0.5 inline-flex items-center gap-1 text-[12px] font-semibold text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+                        >
+                          Open {anchorName ? `${anchorName}’s` : 'its'} details
+                          <LucideIcons.ArrowUpRight className="w-3 h-3" aria-hidden />
+                        </button>
+                      )}
+                      {mapping?.refused && (
+                        <div data-column-mapping="refused" className="pt-1">
+                          <DropHint compact kind="blocked" title="Can’t map this column to an entity" detail={mapping.refused} />
+                        </div>
+                      )}
+                      {mapping && mapping.actions.length > 0 && (
+                        <div data-column-mapping="offered" className="pt-1.5 space-y-1.5">
+                          <div className="flex flex-wrap gap-1.5">
+                            {mapping.actions.map(({ label, icon: Icon, onClick }) => (
+                              <button
+                                key={label}
+                                type="button"
+                                // Pressing it focused it, which asks the card to open again: it stays shut.
+                                onClick={(e) => { e.stopPropagation(); clearTimeout(openTimerRef.current); setOpen(false); onClick() }}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.10] dark:border-white/[0.10] bg-black/[0.03] dark:bg-white/[0.04] px-2 py-1 text-[12px] font-semibold text-ink hover:bg-accent-lineage/10 hover:text-accent-lineage hover:border-accent-lineage/30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                              >
+                                <Icon className="w-3.5 h-3.5" aria-hidden />
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          <ChangeKindTag kind="view" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
               {description && (
                 <div className="px-3 py-2.5 text-[12px] text-ink/85 leading-relaxed whitespace-pre-wrap">
                   {description}

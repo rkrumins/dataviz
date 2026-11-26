@@ -142,7 +142,7 @@ class TestCreate:
 
     @pytest.mark.parametrize("over, code, words", [
         ({"predicate": {"kind": "layer", "layerAssignment": "Tables"}}, 422, "filter by layer"),
-        ({"predicate": {"kind": "edges", "sourceWhere": P}}, 422, "edges"),
+        ({"predicate": {"kind": "edges", "sourceWhere": P}}, 422, "apply the rule to relationships"),
         ({"readIn": "nope"}, 404, "not found"),
         ({"layout": "own", "layers": [{"name": f"L{i}", "entityTypes": [f"t{i}"]} for i in range(13)]},
          422, ""),

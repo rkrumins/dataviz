@@ -199,10 +199,17 @@ def _unread(thread: DiscussionORM, mine: Optional[DiscussionParticipantORM], use
     )
 
 
+def _entity_path(body: AskBody) -> Optional[str]:
+    """The containers the entity sits in, top first, as JSON; none when it sits in none."""
+    names = [n.strip() for n in body.entity_path or [] if n.strip()]
+    return json.dumps(names) if names else None
+
+
 def _summary(thread: DiscussionORM, ref: SubjectRef, recent: list[str],
              mine: Optional[DiscussionParticipantORM], user_id: str) -> dict:
     return dict(
         id=thread.id, subject=ref, entity_id=thread.entity_id, entity_label=thread.entity_label,
+        entity_path=repo.names_of(thread.entity_path), entity_type=thread.entity_type,
         visibility=thread.visibility, status=thread.status, asked_by=thread.asked_by, excerpt=thread.excerpt,
         message_count=thread.message_count, participant_ids=recent, participant_count=thread.participant_count,
         answer_message_id=thread.answer_message_id, resolved_by=thread.resolved_by, resolved_at=thread.resolved_at,
@@ -407,7 +414,9 @@ async def ask(session: AsyncSession, caller: Caller, subject_type: str, subject_
     now = repo.now_iso()
     thread = DiscussionORM(
         subject_type=subject.type, subject_id=subject.id, entity_id=body.entity_id or None,
-        entity_label=(body.entity_label or None) if body.entity_id else None, visibility=body.visibility,
+        entity_label=(body.entity_label or None) if body.entity_id else None,
+        entity_path=_entity_path(body) if body.entity_id else None,
+        entity_type=(body.entity_type or None) if body.entity_id else None, visibility=body.visibility,
         status="open", asked_by=caller.id, excerpt=_excerpt(text), message_count=1, participant_count=len(people),
         last_activity_at=now, last_message_by=caller.id, version=1, created_at=now, updated_at=now,
     )

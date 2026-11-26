@@ -54,9 +54,9 @@ export function pickRelationship(edges: GraphEdge[] | undefined, ref: Relationsh
 }
 
 export function useRelationshipRecord(ref: RelationshipRef | null) {
-  // A relationship drawn but not yet saved has no stored record to read.
+  // A relationship drawn, or reversed, but not yet saved has no stored record to read.
   const unsaved = useStagedChangesStore((s) =>
-    !!ref && s.changes.some((c) => c.type === 'create_edge' && c.targetId === ref.id))
+    !!ref && s.changes.some((c) => (c.type === 'create_edge' || c.type === 'reverse_edge') && c.targetId === ref.id))
   const q = useRelationshipsBetween(ref?.source, ref?.target, !!ref && !unsaved)
   const record = useMemo(() => pickRelationship(q.data, ref), [q.data, ref])
   return {

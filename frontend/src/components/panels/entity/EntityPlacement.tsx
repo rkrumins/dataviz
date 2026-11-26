@@ -3,21 +3,25 @@
  *
  * `PlacementSummary` is the calm, read-only view ("Part of Sales · Contains 12 items"), one click
  * from the parent. `PlacementEditor` is Edit mode's: change how it relates to its parent, or move
- * it under another — both staged through `useReparentNode` (ontology-checked, reviewed on save).
- * The move list is a search, not a native select of every loaded entity, and is built only when
- * opened.
+ * it under another (or on its own, at the top) — both staged through `useReparentNode`
+ * (ontology-checked, reviewed on save), for an entity new in this draft as for a saved one. The move
+ * list is a search, not a native select of every loaded entity, and is built only when opened. A
+ * move changes the data, and the section says so: the tag, and who it reaches. The entity menu's
+ * "Move to another parent…" dialog (MoveParentDialog) offers the same search.
  */
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { ArrowUpRight, CornerLeftUp, CornerRightDown, Home, Info, MoveRight, Network, Save, Search } from 'lucide-react'
+import { useId, useMemo, useRef, useState } from 'react'
+import { ArrowUpRight, CornerLeftUp, CornerRightDown, Home, Info, MoveRight, Network } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { useBranchStore } from '@/store/branchStore'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
+import { ChangeKindTag } from '@/components/canvas/context-view/DropHint'
+import { NO_REACH, moveReachLine } from '@/components/canvas/context-view/changeKind'
+import { moveHost } from '@/store/canvasLayoutBridge'
 import { parentPlacementPhrase, relationshipLabel } from '@/lib/relationshipLabel'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Section } from '../DrawerSection'
 import { useContainmentParent, useMoveTargets } from './useContainment'
+import { EntitySearchPicker, type PickerOption } from './EntitySearchPicker'
 
 export function PlacementSummary({ nodeId, childCount, onFocusNode }: {
   nodeId: string
@@ -86,13 +90,16 @@ export function PlacementSummary({ nodeId, childCount, onFocusNode }: {
 }
 
 export function PlacementEditor({ nodeId }: { nodeId: string }) {
-  const { reparent, retypeContainment } = useReparentNode()
+  const { reparent, moveToTopLevel, topLevelVerdict, retypeContainment } = useReparentNode()
   const { node, parentNode, parentName, currentEdgeType, relTypeOptions } = useContainmentParent(nodeId)
   const inDraft = useBranchStore((s) => !!s.currentBranchId)
-  const openReview = useStagedChangesStore((s) => s.openReviewPanel)
   const relId = useId()
   if (!node) return null
-  const unsaved = node.data?.isPending === 'create'
+  // Offered where the ontology lets its type stand alone, and it is not at the top already. Asked
+  // only once the picker is open: the drawer does no move work until then.
+  const canStandAlone = () => !!parentNode && topLevelVerdict(nodeId).kind === 'data'
+  // Who a move reaches: the other views on the canvas's data source.
+  const reach = moveHost()?.reach?.() ?? NO_REACH
 
   return (
     <div className="pt-5 border-t border-glass-border">
@@ -100,19 +107,7 @@ export function PlacementEditor({ nodeId }: { nodeId: string }) {
         <Network className="w-3.5 h-3.5" aria-hidden />
         Relationship
       </h4>
-      {inDraft && unsaved ? (
-        <div className="px-3 py-2.5 rounded-xl bg-accent-lineage/10 border border-accent-lineage/20 text-xs text-ink flex items-start gap-2">
-          <Save className="w-3.5 h-3.5 mt-0.5 shrink-0 text-accent-lineage" aria-hidden />
-          <div className="space-y-2">
-            <p>
-              <span className="font-semibold">Save this new entity before moving it.</span>{' '}
-              {parentNode ? `It will be created inside ${parentName}.` : 'It will be created at the top level.'}{' '}
-              Once saved, you can move it anywhere or change how it relates to its parent.
-            </p>
-            <Button size="sm" variant="subtle" onClick={openReview}>Review &amp; Save</Button>
-          </div>
-        </div>
-      ) : !inDraft ? (
+      {!inDraft ? (
         <div className="px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs flex items-start gap-2">
           <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden />
           <span>Switch to a draft to change where this entity sits or how it relates to its parent.</span>
@@ -142,101 +137,71 @@ export function PlacementEditor({ nodeId }: { nodeId: string }) {
               <p className="text-[11px] text-ink-muted">How this entity belongs to {parentName}.</p>
             </div>
           )}
-          <MoveTargetPicker nodeId={nodeId} onPick={(parentId) => reparent(nodeId, parentId)} />
+          <div className="space-y-1.5">
+            <span className="block text-xs font-semibold text-ink-muted">Move to a different parent</span>
+            <ChangeKindTag kind="data" reach={reach} />
+            <p className="text-[11px] leading-snug text-ink-muted">{moveReachLine(reach)}</p>
+            <MoveTargetPicker nodeId={nodeId} onPick={(parentId) => reparent(nodeId, parentId)}
+              canStandAlone={canStandAlone} onTop={() => moveToTopLevel(nodeId)} />
+          </div>
         </div>
       )}
     </div>
   )
 }
 
-/** Rows a search shows at once; the rest wait for a narrower search. */
-const PICKER_ROWS = 50
+/** The picker's first option: no parent at all. Not an entity id. */
+const TOP = '\u0000top'
+const TOP_LABEL = 'On its own, at the top'
 
-/** "Move to a different parent": a search over the entities that can contain this one. */
-function MoveTargetPicker({ nodeId, onPick }: { nodeId: string; onPick: (parentId: string) => void }) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const [active, setActive] = useState(0)
+/** "Move to a different parent": a search over the entities that can contain this one — and, where
+ *  its type may stand alone (`canStandAlone`), no parent at all (`onTop`). The drawer's opens on a
+ *  click; the move dialog's is open at once (`defaultOpen`), and its Cancel closes the dialog. */
+export function MoveTargetPicker({ nodeId, onPick, canStandAlone, onTop, defaultOpen = false, onCancel }: {
+  nodeId: string
+  onPick: (parentId: string) => void
+  canStandAlone: () => boolean
+  onTop: () => void
+  defaultOpen?: boolean
+  /** Cancel (and Esc) — instead of folding the search away. */
+  onCancel?: () => void
+}) {
+  const [open, setOpen] = useState(defaultOpen)
   const targets = useMoveTargets(nodeId, open)
-  const listId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return q ? targets.filter((t) => t.label.toLowerCase().includes(q) || t.type.toLowerCase().includes(q)) : targets
-  }, [targets, query])
-  const shown = matches.slice(0, PICKER_ROWS)
+  const topOffered = open && canStandAlone()
+  const options = useMemo((): PickerOption[] => [
+    ...(topOffered ? [{ id: TOP, label: TOP_LABEL, badge: 'No parent', icon: Home, keywords: `${TOP_LABEL} top level`, separated: true }] : []),
+    ...targets.map((t) => ({ id: t.id, label: t.label, badge: t.type })),
+  ], [targets, topOffered])
 
-  const close = () => { setOpen(false); setQuery(''); setActive(0) }
-  const pick = (id: string) => { close(); onPick(id) }
-
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(i + 1, shown.length - 1)) }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)) }
-    else if (e.key === 'Enter' && shown[active]) { e.preventDefault(); pick(shown[active].id) }
-    else if (e.key === 'Escape') { e.preventDefault(); close() }
+  const close = () => setOpen(false)
+  const pick = (id: string) => {
+    close()
+    if (id === TOP) onTop()
+    else onPick(id)
   }
 
   if (!open) {
     return (
-      <div className="space-y-1.5">
-        <span className="block text-xs font-semibold text-ink-muted">Move to a different parent</span>
-        <Button variant="secondary" size="sm" leftIcon={MoveRight} onClick={() => { setOpen(true); requestAnimationFrame(() => inputRef.current?.focus()) }}>
-          Choose a new parent…
-        </Button>
-      </div>
+      <Button variant="secondary" size="sm" leftIcon={MoveRight} onClick={() => { setOpen(true); requestAnimationFrame(() => inputRef.current?.focus()) }}>
+        Choose a new parent…
+      </Button>
     )
   }
 
   return (
-    <div className="space-y-1.5">
-      <span className="block text-xs font-semibold text-ink-muted">Move to a different parent</span>
-      <div className="rounded-xl border border-glass-border overflow-hidden">
-        <div className="flex items-center gap-2 px-3 border-b border-glass-border">
-          <Search className="w-3.5 h-3.5 text-ink-muted shrink-0" aria-hidden />
-          <input
-            ref={inputRef}
-            role="combobox"
-            aria-expanded="true"
-            aria-controls={listId}
-            aria-activedescendant={shown[active] ? `${listId}-${active}` : undefined}
-            aria-label="Search for a new parent"
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setActive(0) }}
-            onKeyDown={onKeyDown}
-            placeholder={`Search ${targets.length.toLocaleString()} possible parents…`}
-            className="flex-1 min-w-0 py-2 bg-transparent outline-none text-sm text-ink placeholder:text-ink-muted"
-          />
-          <Button variant="ghost" size="sm" onClick={close}>Cancel</Button>
-        </div>
-        <ul id={listId} role="listbox" aria-label="Possible parents" className="max-h-56 overflow-y-auto custom-scrollbar py-1">
-          {shown.map((t, i) => (
-            <li
-              key={t.id}
-              id={`${listId}-${i}`}
-              role="option"
-              aria-selected={i === active}
-              onMouseEnter={() => setActive(i)}
-              onMouseDown={(e) => { e.preventDefault(); pick(t.id) }}
-              className={cn('flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer text-sm',
-                i === active ? 'bg-accent-lineage/10 text-ink' : 'text-ink')}
-            >
-              <span className="truncate">{t.label}</span>
-              <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted shrink-0">{t.type}</span>
-            </li>
-          ))}
-          {matches.length === 0 && (
-            <li className="px-3 py-3 text-xs text-ink-muted italic">
-              {targets.length === 0 ? 'No other loaded entity can contain this one.' : 'Nothing matches that search.'}
-            </li>
-          )}
-        </ul>
-        {matches.length > shown.length && (
-          <p className="px-3 py-1.5 border-t border-glass-border text-[11px] text-ink-muted">
-            Showing {shown.length} of {matches.length.toLocaleString()} — type to narrow it down.
-          </p>
-        )}
-      </div>
-    </div>
+    <EntitySearchPicker
+      options={options}
+      onPick={pick}
+      onCancel={onCancel ?? close}
+      searchLabel="Search for a new parent"
+      listLabel="Possible parents"
+      placeholder={`Search ${targets.length.toLocaleString()} possible parents…`}
+      emptyText="Nothing in this view can contain this one."
+      autoFocus={defaultOpen}
+      inputRef={inputRef}
+    />
   )
 }
