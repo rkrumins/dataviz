@@ -1158,10 +1158,14 @@ curl -s -b "$JAR" -o pii.csv \
   only the platform keeps or names an entity the draft changes: that rule keeps
   main's answer for what the draft changed, flagged `approximate`. A
   relationship rule is corrected for each relationship the draft changed and
-  each at an entity it changed, the same holding for its From and To; once
-  those and the changed entities pass `GRAPHVER_DRAFT_SEARCH_MAX_DELTA`
-  (200,000), its count is main's, flagged. Not on a fork. Draft *rules* are
-  kept per draft.
+  each at an entity it changed, the same holding for its From and To. Main's
+  relationships are read only at the entities the draft moves into or out of
+  a rule's From or To (a change no rule reads moves no match, so none is read
+  there), and only once they are counted within what is left of
+  `GRAPHVER_DRAFT_SEARCH_MAX_DELTA` (200,000), by a count that stops just
+  past it: what an entity costs is bounded by the cap, however many
+  relationships it holds. Once those and the changed entities pass it, the
+  count is main's, flagged. Not on a fork. Draft *rules* are kept per draft.
 - **No live updates**: other open sessions see a rule change when they next
   load the View.
 - **An import's dry run needs edit permission**: readers can't preview one.

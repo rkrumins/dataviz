@@ -102,7 +102,9 @@ Every new capability ships behind its own switch, off by default.
   for matches; a roll-up never is. Library files carry them, warning of relationship types the
   view's semantic layer doesn't have. Advanced Search's "Make a rule" makes one from a Connections
   search, or a saved one in the library. On a draft, a rule's look and count are the draft's — for
-  the relationships it changed and for those at the items it changed. Existing rules are
+  the relationships it changed and for those at the items it changed. A draft's count reads the
+  published relationships only at items it moves into or out of a rule's From or To, and what an
+  item costs is bounded by the cap however many relationships it holds. Existing rules are
   unchanged.
 
 ### Changed
@@ -236,8 +238,9 @@ Every new capability ships behind its own switch, off by default.
 - Relationship display rules style the Graph canvas's lines only (the Context View draws its own).
   On a draft, a rule whose From or To follows relationships, tests the view's layers or names an
   item the draft changes keeps the published look and count for what the draft changed, and a
-  rule's count is the published graph's once the draft changed more than
-  `GRAPHVER_DRAFT_SEARCH_MAX_DELTA` (200,000) relationships and items at their ends; each says so.
+  rule's count is the published graph's once the relationships and items the draft changed, with
+  the published relationships at items it moves, pass `GRAPHVER_DRAFT_SEARCH_MAX_DELTA` (200,000);
+  each says so.
   A view with more members than can be listed can't evaluate them.
 - One relationship per source, type and target, as before (both directions and several types per
   pair are supported). Several of one type between two items is proposed as an opt-in per type in

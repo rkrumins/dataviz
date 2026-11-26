@@ -22,7 +22,8 @@ FalkorDB compiler's meaning, as the stub provider answers with it).
   of its own that any request continues. A draft's next commit folds in only what that commit
   wrote — the draft's values before and after it — never ``D`` again. A rule that styles
   relationships has a correction of its own: the relationships the patch set names, then main's
-  at the entities of ``D``, ``BATCH`` a step (``_relationship_deltas``).
+  at the entities of ``D`` that enter or leave a rule's From or To, ``BATCH`` a step
+  (``_relationship_deltas``).
 * **catalog**: main's catalog with each entity of ``D`` taken out as main holds it and put back
   as the draft does (``CatalogStats.add_entity`` / ``folded``). A range can't be narrowed without
   reading again: where the draft took out a value at either end, the range is marked not exact.
@@ -621,7 +622,8 @@ class DraftSearch:
         * each relationship the patch set adds, changes or removes (:meth:`_changed_sides`);
         * each one main holds at an entity of ``D`` that the patch set didn't change
           (:meth:`_unchanged_sides`): its values are main's on both sides, only its ends'
-          membership can differ.
+          membership can differ — so only those at an entity that enters or leaves a rule's From
+          or To on the draft (:meth:`_moved`) are read, whatever else the draft changed of it.
 
         A side matches when its type is the rule's, its values meet the edge filter
         (``predicate_eval.edge_matches``) and its ends the rule's From and To in the scope — or,
@@ -629,7 +631,8 @@ class DraftSearch:
         (:meth:`membership`). On the draft, one with an end the draft removed matches nothing.
         Stepped ``BATCH`` items at a time (:meth:`_advance`, :func:`_relationship_items`), the
         patch set's relationships first. Its ``acc`` holds ``over`` once the relationships read
-        would pass ``DRAFT_SEARCH_MAX_DELTA``: then main's counts answer."""
+        would pass ``DRAFT_SEARCH_MAX_DELTA``: then main's counts answer — told before any is
+        read (``relationships_at``), so an entity past it costs no more than the cap."""
         from backend.common.predicate_eval import edge_matches
 
         d = self.d
@@ -639,19 +642,22 @@ class DraftSearch:
         async def step(batch: List[Tuple[str, str]], acc: Dict[str, Any]) -> None:
             if acc.get("over"):
                 return                                  # past the cap: nothing more is read
+            lost = acc.setdefault("approximate", {})
             ids = [x for kind, x in batch if kind == "e"]
             urns = [x for kind, x in batch if kind == "n"]
             budget = vconfig.DRAFT_SEARCH_MAX_DELTA - acc["read"] - len(ids)
-            found: List[Any] = []
-            if urns and budget >= 0:
+            moved = (await self._moved(scope, rules, urns, lost, named)
+                     if urns and budget >= 0 else set())
+            found: Optional[List[Any]] = []
+            if moved:
                 found = await self._admitted(lambda: self.base.relationships_at(
-                    urns, edge_types=types, except_types=except_types, limit=budget + 1))
-            if budget < 0 or len(found) > budget:
+                    sorted(moved), edge_types=types, except_types=except_types, limit=budget))
+            if budget < 0 or found is None:
                 acc["over"] = True
                 return
             acc["read"] += len(ids) + len(found)
-            sides = [*await self._changed_sides(ids), *await self._unchanged_sides(urns, found)]
-            lost = acc.setdefault("approximate", {})
+            sides = [*await self._changed_sides(ids),
+                     *await self._unchanged_sides(scope, rules, urns, moved, found, lost, named)]
             # Of each rule, the sides its type and its filter take.
             taken = {rid: [i for i, (_, e, drafted) in enumerate(sides) if typed[rid](e.edge_type)
                            and not (drafted and (e.source_urn in d.node_remove
@@ -713,24 +719,45 @@ class DraftSearch:
                    if eid in d.edge_upsert and eid not in d.edge_remove]
         return sides + [(1, e, True) for e in await d.edges(drafted)]
 
-    async def _unchanged_sides(self, urns: Sequence[str], found: Sequence[Any]
-                               ) -> List[Tuple[int, Any, bool]]:
-        """Both sides of each of ``found`` — main's relationships at ``urns``, entities of ``D`` —
-        that the patch set didn't change, as :meth:`_changed_sides` gives them: its values main's
-        on both. Each is counted at the least of its ends among the entities a correction steps
-        through (:func:`_relationship_items`), so one between two of them counts once."""
+    async def _unchanged_sides(self, scope, rules: Sequence[Tuple[str, Any]], urns: Sequence[str],
+                               moved: Set[str], found: Sequence[Any], lost: Dict[str, str],
+                               named: Mapping[str, FrozenSet[str]]) -> List[Tuple[int, Any, bool]]:
+        """Both sides of each of ``found`` — main's relationships at ``moved``, the entities of
+        this step's ``urns`` (of ``D``) that :meth:`_moved` — that the patch set didn't change, as
+        :meth:`_changed_sides` gives them: its values main's on both. Each is counted at the least
+        of its ends that moved (each read there), so one between two of them counts once: an end
+        of ``D`` another step takes is asked whether it moved too."""
         d = self.d
-        here = set(urns)
         places = await asyncio.to_thread(_changed_edge_places, d)
+        kept = [e for e in found                        # the patch set's: counted by its id
+                if (e.source_urn, e.target_urn, _label(e.edge_type or "REL").upper()) not in places]
+        stepped = set(urns)
+        far = {u for e in kept for u in (e.source_urn, e.target_urn)
+               if u in self.changed and u not in d.node_new and u not in stepped}
+        moving = moved | (await self._moved(scope, rules, sorted(far), lost, named) if far else set())
         sides: List[Tuple[int, Any, bool]] = []
-        for e in found:
-            if (e.source_urn, e.target_urn, _label(e.edge_type or "REL").upper()) in places:
-                continue                                # the patch set's: counted by its id
-            ends = [u for u in (e.source_urn, e.target_urn)
-                    if u in self.changed and u not in d.node_new]
-            if ends and min(ends) in here:
+        for e in kept:
+            ends = [u for u in (e.source_urn, e.target_urn) if u in moving]
+            if ends and min(ends) in moved:
                 sides += [(-1, e, False), (1, e, True)]
         return sides
+
+    async def _moved(self, scope, rules: Sequence[Tuple[str, Any]], urns: Sequence[str],
+                     lost: Dict[str, str], named: Mapping[str, FrozenSet[str]]) -> Set[str]:
+        """Which of ``urns`` (entities of ``D`` main holds) enter or leave a rule's From or To on
+        the draft: meet one on main and not on the draft, or the other way — one the draft removed
+        meets none. A relationship the patch set didn't change has main's values on both sides, so
+        its type and its filter answer alike on both: its match can move only at such an end."""
+        ends = [(f"{rid}\0{end}", where or MatchAllPredicate())
+                for rid, p in rules if rid not in lost
+                for end, where in (("from", p.source_where), ("to", p.target_where))]
+        if not ends or not urns:
+            return set()
+        asked = set(urns)
+        on_main = await self._meets(scope, ends, asked, lost)
+        on_draft = await self._meets(scope, ends, asked, lost, named)
+        return {u for u in asked if any((u in on_main[k]) != (u in on_draft[k])
+                                        for k, _ in ends if k.split("\0")[0] not in lost)}
 
     async def _meets(self, scope, ends: Sequence[Tuple[str, Any]], urns: Set[str],
                      lost: Dict[str, str], named: Optional[Mapping[str, FrozenSet[str]]] = None
