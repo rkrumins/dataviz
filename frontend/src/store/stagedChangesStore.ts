@@ -166,8 +166,14 @@ interface StagedChangesState {
   patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
   /** Discard these changes (and what each takes with it, as `discard` does) in one write — one
-   *  Redo step brings back those that can come back. For "Discard the N shown". */
-  discardMany: (changeIds: Iterable<string>) => void
+   *  Redo step brings back those that can come back. For "Discard the N shown".
+   *  `undoable`: the discard is part of an action (a new entity's create discarded rather than its
+   *  delete staged) — recorded as an Undo step like any edit, so Undo brings back all of it, a new
+   *  entity included, and Redo discards it again. */
+  discardMany: (changeIds: Iterable<string>, opts?: { undoable?: boolean }) => void
+  /** Run `fn`, and record every Undo step it adds as ONE: one Undo takes the whole action back.
+   *  Returns that step's id (none when it recorded nothing). */
+  asOneStep: (fn: () => void) => string | undefined
   discardAll: () => void
   /** Drop the changes a save carried, by id, without running their discard hooks (the canvas keeps
    *  them as saved). A change staged while the save ran stays. `applyStatus` is left to the save. */
@@ -508,7 +514,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     }))
   },
 
-  discardMany: (changeIds) => {
+  discardMany: (changeIds, opts) => {
     const all = get().changes
     const wanted = new Set(changeIds)
     const roots = all.filter((c) => wanted.has(c.id))
@@ -516,6 +522,16 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const ordered = collectStagedSubtree(all, roots)
     runDiscardHooks(ordered)
     const victimIds = new Set(ordered.map((v) => v.id))
+    if (opts?.undoable) {
+      // Leaf-first, as discarded: Undo walks a step backwards, so each comes back before what
+      // hangs off it, and Redo discards them in this order again.
+      set((s) => ({
+        changes: s.changes.filter((c) => !victimIds.has(c.id)),
+        past: pushStep(s.past, stepOf(ordered.map((c) => ({ before: c, after: null })))),
+        redoStack: [],
+      }))
+      return
+    }
     // As `discard`: an entity create, and everything it took with it, is not redoable; every other
     // change discarded comes back with one Redo.
     const created = new Set(collectStagedSubtree(all, roots.filter((c) => c.type === 'create_entity')).map((c) => c.id))
@@ -527,6 +543,17 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
         ? [...pruneSteps(s.redoStack, created), stepOf([...back].reverse().map((c) => ({ before: null, after: c })))]
         : pruneSteps(s.redoStack, created),
     }))
+  },
+
+  asOneStep: (fn) => {
+    const known = new Set(get().past.map((st) => st.id))
+    fn()
+    const past = get().past
+    const fresh = past.filter((st) => !known.has(st.id))
+    if (fresh.length <= 1) return fresh[0]?.id
+    const step = stepOf(fresh.flatMap((st) => st.entries))
+    set({ past: [...past.filter((st) => known.has(st.id)), step] })
+    return step.id
   },
 
   discardAll: () => {
