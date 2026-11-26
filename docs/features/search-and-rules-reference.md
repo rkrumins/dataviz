@@ -668,7 +668,7 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | `enabled` | boolean (true) | Off: kept, not evaluated |
 | `createdAt` | string ≤ 64, optional | Stamped by the server; kept when a rule is replaced |
 | `style` | object, optional | How the rule paints what it matches, besides its chip — see [A rule's look](#a-rules-look). Absent: the chip alone |
-| `target` | `"entities"` \| `"relationships"` (`"entities"`) | What the rule applies to. `relationships`: its predicate is a Connections search (`kind: edges`), and it styles the Graph canvas's lines of the relationships it matches. Left out of an entity rule as it is stored and exported |
+| `target` | `"entities"` \| `"relationships"` (`"entities"`) | What the rule applies to. `relationships`: its predicate is a Connections search (`kind: edges`), and it styles the lines of the relationships it matches, on the Graph canvas and the Context View. Left out of an entity rule as it is stored and exported |
 | `invalid` | read-only | On read only: why a stored rule can't run as a rule |
 
 Rules have no priority, description, owner or scope field. Narrow a rule with
@@ -740,6 +740,13 @@ sent to be matched.
   containers for several relationships is styled when any of them matches; a
   roll-up never is. The first matching rule in the list gives a line its
   colour, dash and width; every matching rule with its chip on adds its chip.
+  On the Context View the same rules paint its lines: a line is styled when
+  any relationship it stands for matches — several between two rows, or some
+  lifted to an ancestor row — and a roll-up member never makes it so (a line
+  holding real relationships too is styled for theirs). Its chips show on the
+  selected card's lines and on the line the relationship drawer is open on,
+  and a hovered line's card names every rule that styles it. A trace keeps
+  its own colours, and a dimmed or faint line keeps its own look.
   A relationship rule's count is its Connections search's. On a draft, both
   are the draft's: a relationship the draft added, changed or removed, and one
   it didn't change at an entity it changed, is judged on the draft's values

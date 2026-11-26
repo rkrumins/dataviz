@@ -80,9 +80,11 @@ describe('relationship display rules on the Context View', () => {
     expect(document.querySelector('[data-testid="rule-line-chips"]')).toBeNull()
     await h.clickCard('tableau')
     await h.settle()
-    const chips = lineBetween('INTERMEDIATE_T2', 'tableau')!.querySelector('[data-testid="rule-line-chips"]')
-    expect(chips).toHaveTextContent('Feeds reports')
-    expect(lineBetween('tableau', 'REPORTING')!.querySelector('[data-testid="rule-line-chips"]')).toBeNull()
+    const chipsOf = (g: SVGGElement) =>
+      document.querySelector(`[data-testid="rule-line-chips"][data-line-id="${g.getAttribute('data-edge-id')}"]`)
+    expect(chipsOf(lineBetween('INTERMEDIATE_T2', 'tableau')!)).toHaveTextContent('Feeds reports')
+    expect(chipsOf(lineBetween('tableau', 'REPORTING')!)).toBeNull()
+    expect(document.querySelectorAll('[data-testid="rule-line-chips"]')).toHaveLength(1)
   })
 
   it('names the rules that style a hovered line in its card — on that line only', async () => {

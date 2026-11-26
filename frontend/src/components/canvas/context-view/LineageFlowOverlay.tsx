@@ -716,6 +716,9 @@ export function LineageFlowOverlay({
       if (look) {
         color = look.color
         baseStrokeWidth = look.width
+        // A rule's line reads at rest, as it does on the Graph canvas: the faint resting lines are
+        // the ones no rule picked out.
+        edgeOpacity = Math.max(edgeOpacity, lineState === 'highlighted' ? 0.95 : 0.85)
       }
       const dynamicStrokeWidth = lineStrokeWidth(baseStrokeWidth, lineState, lineWeight)
 
@@ -1941,10 +1944,6 @@ export function LineageFlowOverlay({
               : 1
           const detailed = renderTier === 'premium' || isHighlighted
           const countLabel = isConnectedToSelected ? countLabels?.get(edge.id) : undefined
-          // The rules' chips, on the lines being looked at only: on every line, a dense view
-          // would read as a wall of labels. Hovering any line names them in its card.
-          const showRuleChips = !!edge.ruleChipIds?.length
-            && (isConnectedToSelected || edge.id === openLineId)
           return (
             <EdgeLine
               key={edge.id}
@@ -1964,10 +1963,10 @@ export function LineageFlowOverlay({
               showCount={countLabel !== undefined
                 || (!isTracing && isHighlighted && edge.isBundled && edge.edgeCount > 1)}
               countLabel={countLabel}
-              showRuleChips={showRuleChips}
             />
           )
         })}
+
 
         {/* Per-node lineage hairlines now render inside each FlatTreeItem
             (anchored to the row box) — see FlatTreeItem. */}
@@ -1996,6 +1995,22 @@ export function LineageFlowOverlay({
         hoveredEdgeId={hoveredEdgeId}
         highlighted={isHighlightActive ? highlightedEdges ?? null : null}
       />
+
+      {/* The rules' chips, above every line and its motion — no line may run through them —
+          and on the lines being looked at only: on every line, a dense view would read
+          as a wall of labels. Hovering any line names them in its card. */}
+      {visibleEdges.map(edge => {
+        if (!edge.ruleChipIds?.length) return null
+        const isConnectedToSelected = !!(isHighlightActive && highlightedEdges?.has(edge.id))
+        if (!isConnectedToSelected && edge.id !== openLineId) return null
+        // Above the line's count badge when it shows one (the line is looked at: see above).
+        const counted = (isConnectedToSelected && countLabels?.get(edge.id) !== undefined)
+          || (!isTracing && edge.isBundled && edge.edgeCount > 1)
+        return (
+          <LineRuleChips key={`rule-chips-${edge.id}`} lineId={edge.id} ids={edge.ruleChipIds}
+                         x={(edge.sx + edge.tx) / 2} y={(edge.sy + edge.ty) / 2 - (counted ? 16 : 0)} />
+        )
+      })}
 
       {/* Edge hover panel rendered via Portal — escapes the canvas's z-[5]
           stacking context so it always sits above the column content (z-10)
@@ -2382,15 +2397,13 @@ interface EdgeLineProps {
   showCount: boolean
   /** What the badge says, when not the line's weight. */
   countLabel?: string
-  /** Show the chips of the display rules that style it (`edge.ruleChipIds`). */
-  showRuleChips?: boolean
 }
 
 const LINE_TRANSITION = { transition: 'opacity 0.12s ease' }
 
 const EdgeLine = React.memo(function EdgeLine({
   edge, groupOpacity, isHighlighted, isHovered, premiumLook, dash, showDirection,
-  stagedColor, committedColor, isExpanding, showCount, countLabel, showRuleChips = false,
+  stagedColor, committedColor, isExpanding, showCount, countLabel,
 }: EdgeLineProps) {
   const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, sx, sy, tx, ty } = edge
   // Per-edge gradient id — direction is encoded in the stroke itself. Fades
@@ -2507,11 +2520,6 @@ const EdgeLine = React.memo(function EdgeLine({
         </g>
       )}
 
-      {showRuleChips && edge.ruleChipIds && (
-        // Above the count badge when the line carries one.
-        <LineRuleChips ids={edge.ruleChipIds} x={(sx + tx) / 2} y={(sy + ty) / 2 - (showCount ? 16 : 0)} />
-      )}
-
       {/* Source terminal dot */}
       {!isGhost && (
         <circle cx={sx} cy={sy} r={isHighlighted ? 3 : 2.5} fill={color} style={{ opacity: edgeOpacity * 0.8, transition: 'r 0.2s ease' }} />
@@ -2539,25 +2547,20 @@ const EdgeLine = React.memo(function EdgeLine({
   && a.isExpanding === b.isExpanding
   && a.showCount === b.showCount
   && a.countLabel === b.countLabel
-  && a.showRuleChips === b.showRuleChips
   && sameRow(a.edge, b.edge),
 )
 
-/** The chips of the display rules that style a line, centred on (``x``, ``y``): at most two, the
- *  rest as "+N", on the canvas's own colour so the line stops at them. */
-function LineRuleChips({ ids, x, y }: { ids: readonly string[]; x: number; y: number }) {
+/** The chips of the display rules that style a line, centred on (``x``, ``y``) in the overlay's
+ *  space: at most two, the rest as "+N", on the canvas's own colour so the line stops at them. */
+function LineRuleChips({ lineId, ids, x, y }: { lineId: string; ids: readonly string[]; x: number; y: number }) {
   const meta = useDisplayRuleMatchStore((s) => s.ruleMeta)
   const tags = useMemo(() => ids.flatMap((id) => meta.filter((m) => m.id === id)), [ids, meta])
   if (tags.length === 0) return null
   return (
-    <foreignObject x={x - 120} y={y - 10} width={240} height={20} style={{ overflow: 'visible' }}
-                   className="pointer-events-none" data-testid="rule-line-chips">
-      <div className="flex h-full items-center justify-center">
-        <div className="rounded bg-canvas">
-          <RuleChipRow tags={tags} size="xs" max={2} subject="relationship" />
-        </div>
-      </div>
-    </foreignObject>
+    <div className="absolute -translate-x-1/2 -translate-y-1/2 rounded bg-canvas pointer-events-none whitespace-nowrap"
+         style={{ left: x, top: y }} data-testid="rule-line-chips" data-line-id={lineId}>
+      <RuleChipRow tags={tags} size="xs" max={2} subject="relationship" className="flex-nowrap" />
+    </div>
   )
 }
 

@@ -19,6 +19,11 @@
  *             `create` a draft whose columns each add differently: Finance (a
  *                      column mapped to the Finance domain), Domains (several
  *                      top-level domains) and Apps (a type that needs a domain)
+ *             `rules`  the view's relationship display rules painting its
+ *                      lines: Critical feed (rose, dashed) on the Data Lake's
+ *                      flows, Finance owned (emerald) on one of the
+ *                      Warehouse's; `select=d0` selects a dashboard, so its
+ *                      lines carry the rules' chips
  *   views     with `create`: the view's data source has this many views the reader can see
  *             (so a data move names the others it reaches)
  *   theme     `dark` for the dark palette
@@ -272,6 +277,49 @@ if (params.has('typed')) {
   })
 }
 
+// `rules`: lineage from the Sources into the Reports, and two rules that style relationships. The
+// engine asks the server which of them each matches, and how many; here the provider answers.
+const RULES = fixture === 'rules'
+const RULE_LINES: LineageEdge[] = RULES ? [
+  ['lake', 'd0'], ['lake', 'd1'], ['wh', 'd2'], ['wh', 'd3'], ['wh', 'd0'],
+].map(([source, target]) => ({ id: `r:${source}>${target}`, source, target, data: { edgeType: 'TRANSFORMS' } }) as LineageEdge) : []
+const DISPLAY_RULES = RULES ? [
+  {
+    id: 'critical', name: 'Critical feed', color: '#e11d48', enabled: true, target: 'relationships',
+    predicate: { kind: 'edges', edgeTypes: ['TRANSFORMS'], sourceWhere: { kind: 'text', value: 'Lake', target: 'name' } },
+    style: { dash: 'dashed', width: 3 }, createdAt: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 'finance', name: 'Finance owned', color: '#059669', enabled: true, target: 'relationships',
+    predicate: { kind: 'edges', edgeTypes: ['TRANSFORMS'], targetWhere: { kind: 'text', value: 'Pipeline', target: 'name' } },
+    createdAt: '2026-01-02T00:00:00Z',
+  },
+] : []
+const RULE_MATCHES: Record<string, string[]> = { critical: ['r:lake>d0', 'r:lake>d1'], finance: ['r:wh>d2'] }
+if (RULES) {
+  Object.assign(provider, {
+    searchMembership: async (body: { items: Array<{ id: string }>; edges?: Array<{ id: string }> }) => {
+      const asked = new Set((body.edges ?? []).map((e) => e.id))
+      return {
+        matches: {}, errors: {}, notes: [],
+        edgeMatches: Object.fromEntries(body.items.map((i) => [i.id, (RULE_MATCHES[i.id] ?? []).filter((e) => asked.has(e))])),
+      }
+    },
+    searchCounts: async (body: { items: Array<{ id: string }> }) => ({
+      counts: Object.fromEntries(body.items.map((i) => [i.id, {
+        count: RULE_MATCHES[i.id]?.length ?? 0, status: 'complete', sessionId: null, progress: null,
+      }])),
+      dataVersion: 'harness', elapsedMs: 1,
+    }),
+  })
+  if (!params.has('typed')) {   // `typed` has made the provider pass for the live API already
+    const plain = Function.prototype[Symbol.hasInstance]
+    Object.defineProperty(RemoteGraphProvider, Symbol.hasInstance, {
+      value: (o: unknown) => o === provider || plain.call(RemoteGraphProvider, o),
+    })
+  }
+}
+
 const realFetch = globalThis.fetch
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -284,7 +332,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const body = url.includes('/api/v1/views/counts')
     ? counts
     : url.includes('/api/v1/views/')
-      ? (url.includes('/library') ? { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true } : view)
+      ? (url.includes('/library') ? { viewId: view.id, displayRules: DISPLAY_RULES, savedQueries: [], canEdit: true } : view)
       : {}
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 }) as typeof globalThis.fetch
@@ -316,7 +364,9 @@ if (SOURCE) {
   useWorkspacesStore.setState({ workspaces: [{ id: 'harness-ws', name: 'Harness', dataSources: [{ id: SOURCE, label: 'Retail data pipeline' }] }] } as never)
 }
 const store = useCanvasStore.getState()
-store.setGraph(ROOTS.map((n) => toCanvasNode(n)), [] as LineageEdge[])
+store.setGraph(ROOTS.map((n) => toCanvasNode(n)), RULE_LINES)
+// `rules`: every line drawn at rest, so the rules' looks read without a hover.
+if (RULES) usePreferencesStore.setState({ lineageRenderMode: 'raw' } as never)
 store.setHydrationPhase('complete')
 store.setHydrationStatus('ready')
 
@@ -362,6 +412,10 @@ createRoot(document.getElementById('root')!).render(
     </QueryClientProvider>
   </MemoryRouter>,
 )
+
+if (RULES && params.get('select')) {
+  setTimeout(() => useCanvasStore.getState().selectNode(params.get('select')!), 600)
+}
 
 if (fixture === 'trace' || fixture === 'tracelong') {
   // Select an entity and press the header's Trace, as a reader does.
