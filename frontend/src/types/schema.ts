@@ -206,6 +206,13 @@ export interface ViewConfiguration {
    *  its base are what it shows. Written only by the server; absent on every other view. */
   search?: import('./searchView').SearchViewDefinition;
 
+  /** Whether a Context View is meant to show everything in its source (`config.coverage`):
+   *  'complete' — new top-level entities of its types are offered on the canvas as they
+   *  arrive; 'specialised' — a lens on part of the source, never offered them. Absent on
+   *  views made before views said: read as specialised. Changed on its own
+   *  (`PUT /views/{id}` `coverage`), never by a layout write. */
+  coverage?: 'complete' | 'specialised';
+
   // Permissions
   isDefault: boolean;
   /** The full visibility tier ('private' | 'workspace' | 'enterprise').

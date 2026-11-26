@@ -721,3 +721,85 @@ describe('LayoutStep — what fills each layer', () => {
     expect(within(layerRow('Money')).queryByRole('status')).not.toBeInTheDocument()
   })
 })
+
+// A view is COMPLETE when it is meant to show everything in its source: it then offers each new
+// top-level entity on the canvas as it arrives. Only a suggestion that leaves nothing out says so.
+describe('LayoutStep — whether the view is meant to show everything', () => {
+  const lastCall = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls.at(-1)![0]
+
+  it('one layer per top-level type is complete with every type, specialised with one left out', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', named(5))], ['Team', ofType('Team', named(3))]])
+    const spy = vi.fn()
+    const { unmount } = render(<Harness spy={spy} dataSourceId="ds1" />)
+    const card = () => screen.getByRole('group', { name: PER_TYPE })
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 2 layers' }))
+    expect(lastCall(spy).coverage).toBe('complete')
+    unmount()
+
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(within(card()).getByRole('button', { name: 'Team · 3' }))
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 1 layer' }))
+    expect(lastCall(spy).coverage).toBe('specialised')
+  })
+
+  it('a column per top-level entity is complete with every one, specialised with one left out', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance', 'Marketing', 'Ops'])]])
+    const spy = vi.fn()
+    const { unmount } = render(<Harness spy={spy} dataSourceId="ds1" />)
+    const card = () => screen.getByRole('group', { name: PER_ENTITY })
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 3 columns' }))
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 3 columns' }))
+    expect(lastCall(spy).coverage).toBe('complete')
+    unmount()
+
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 3 columns' }))
+    fireEvent.click(within(card()).getByRole('checkbox', { name: 'Ops' }))
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 2 columns' }))
+    expect(lastCall(spy).coverage).toBe('specialised')
+  })
+
+  it('a column for the one top-level entity there is, is a view of it: specialised', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(within(screen.getByRole('group', { name: PER_ENTITY })).getByRole('button', { name: 'Create 1 column' }))
+    expect(lastCall(spy).coverage).toBe('specialised')
+  })
+
+  it('with several root types, a column each is complete only when every type is chosen', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', named(4, 'Domain'))], ['Team', ofType('Team', named(2, 'Team'))]])
+    const spy = vi.fn()
+    const { unmount } = render(<Harness spy={spy} dataSourceId="ds1" />)
+    const card = () => screen.getByRole('group', { name: PER_ENTITY })
+    // The largest type alone, to begin with: a selection.
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 4 columns' }))
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 4 columns' }))
+    expect(lastCall(spy).coverage).toBe('specialised')
+    unmount()
+
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(within(card()).getByRole('button', { name: 'Team · 2' }))
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 6 columns' }))
+    fireEvent.click(within(card()).getByRole('button', { name: 'Create 6 columns' }))
+    expect(lastCall(spy).coverage).toBe('complete')
+  })
+
+  it('a template, as authored, is specialised', () => {
+    ds.entityTypes = DSD
+    lib.templates = [MEDALLION]
+    const spy = vi.fn()
+    const { unmount } = render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('Medallion'))
+    expect(lastCall(spy).coverage).toBe('specialised')
+    unmount()
+
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('From your schema'))
+    expect(lastCall(spy).coverage).toBe('specialised')
+  })
+})

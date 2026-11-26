@@ -110,6 +110,10 @@ interface GalleryTemplate {
      *  `deriveEntityScope` would otherwise flip the view to 'curated' the moment
      *  the user drags a single entity, emptying every other column. */
     entityScope?: 'all' | 'curated'
+    /** Whether the view it makes is meant to show everything in its source (see
+     *  `WizardFormData.coverage`). Only a suggestion that leaves nothing out says 'complete';
+     *  absent, as for every template as authored, it is 'specialised'. */
+    coverage?: 'complete' | 'specialised'
 }
 
 /** "2 layers: Domains, Teams." — a long list trimmed so the card stays a card. */
@@ -905,6 +909,7 @@ export function LayoutStep({
             suggestedFills: undefined,
             newRoots: undefined,
             entityScope: template.entityScope,
+            coverage: template.coverage ?? 'specialised',
         })
         setGalleryOpen(false)
     }, [updateFormData, schemaEntityTypes])
@@ -926,6 +931,8 @@ export function LayoutStep({
             newRoots: undefined,
             // Layers that place by rule resolve only in open scope (see GalleryTemplate.entityScope).
             entityScope: layers.some(l => l.entityTypes.length > 0 || (l.rules?.length ?? 0) > 0) ? 'all' : undefined,
+            // A template as authored is a view of what it was written for, not of everything here.
+            coverage: 'specialised',
         }
     }, [fitTarget])
 
@@ -1074,9 +1081,17 @@ export function LayoutStep({
             onCreate={chosen => handleApplyGalleryTemplate({
                 id: 'per-root-type', name: 'One layer per top-level type', description: '',
                 layers: layersForRootTypes(chosen), entityScope: 'all',
+                // A layer for every root type holds everything in the source; one left out is a selection.
+                coverage: chosen.length === rootTypeCandidates.length ? 'complete' : 'specialised',
             })}
         />
     )
+    // Every top-level entity the source has, when each root type's are all known (none past the
+    // ceiling, none unread): what a column each must leave nothing out of to show everything.
+    const everyRootEntity = entityTypesTop.length === rootTypeCandidates.length
+        && entityTypesTop.every(t => !t.over && t.count === t.entities.length)
+        ? new Set(entityTypesTop.flatMap(t => t.entities.map(e => e.urn)))
+        : null
     const perEntityCard = firstEntityType && (
         <PerEntityCard
             key={`entity:${withEntities.map(t => t.id).join('|')}`}
@@ -1088,9 +1103,13 @@ export function LayoutStep({
                 // Each column IS its entity, placed by its own assignment: a closed
                 // (curated) view of those entities and what they hold.
                 const made = layersForTopLevelEntities(entities)
+                // Complete only as a column for every one of them, and more than one: a column
+                // for the one there is is a view of it.
+                const all = !!everyRootEntity && entities.length > 1
+                    && entities.length === everyRootEntity.size && entities.every(e => everyRootEntity.has(e.urn))
                 handleApplyGalleryTemplate({
                     id: 'per-entity', name: 'One column per top-level entity', description: '',
-                    layers: made.layers, entityScope: 'curated',
+                    layers: made.layers, entityScope: 'curated', coverage: all ? 'complete' : 'specialised',
                 }, made.assignments)
             }}
         />

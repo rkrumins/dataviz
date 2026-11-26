@@ -162,7 +162,23 @@ vi.mock('../steps/LayoutStep', async () => {
   }
 })
 vi.mock('../steps/EntitiesStep', () => ({ EntitiesStep: () => <div data-testid="entities-step" /> }))
-vi.mock('../steps/PreviewStep', () => ({ PreviewStep: () => <div data-testid="preview-step" /> }))
+// The real step shows whether the view is meant to show everything as a switch; the stub shows
+// the form's value and flips it.
+vi.mock('../steps/PreviewStep', () => ({
+  PreviewStep: ({ formData, updateFormData }: {
+    formData: { coverage?: string }
+    updateFormData?: (u: Record<string, unknown>) => void
+  }) => (
+    <div data-testid="preview-step">
+      <span data-testid="preview-coverage">{formData.coverage ?? ''}</span>
+      {updateFormData && (
+        <button onClick={() => updateFormData({ coverage: formData.coverage === 'complete' ? 'specialised' : 'complete' })}>
+          stub-flip-coverage
+        </button>
+      )}
+    </div>
+  ),
+}))
 vi.mock('../steps/AssignmentStep', () => ({ AssignmentStep: () => <div data-testid="assignment-step" /> }))
 vi.mock('../steps/ScopeStep', () => ({
   ScopeStep: ({ onSelectOntology }: { onSelectOntology?: (id: string) => void }) => (
@@ -1029,5 +1045,57 @@ describe('ViewWizard — a pinned entityScope reaches the layout write', () => {
     await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
     const [, body] = updateViewLayoutMock.mock.calls[0]
     expect(body.entityScope).toBe('curated')
+  })
+})
+
+describe('ViewWizard — whether a Context View is meant to show everything', () => {
+  it('an edit opens on the view’s own, and saves a change through `coverage`', async () => {
+    renderWizard(makeView({ ...baseConfig({ layers: [], assignments: {} }), coverage: 'complete' }))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    expect(screen.getByTestId('preview-coverage')).toHaveTextContent('complete')
+    fireEvent.click(screen.getByRole('button', { name: 'stub-flip-coverage' }))
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    expect(updateViewMock.mock.calls[0][1].coverage).toBe('specialised')
+  })
+
+  it('an edit of a view that never said sends none unless one is chosen', async () => {
+    renderWizard(makeView(baseConfig({ layers: [], assignments: {} })))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    expect(screen.getByTestId('preview-coverage')).toHaveTextContent('')
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    expect(updateViewMock.mock.calls[0][1].coverage).toBeUndefined()
+  })
+
+  it('a new Context View says it in its config: specialised unless chosen otherwise', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    const create = async (flip: boolean) => {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const view = render(
+        <QueryClientProvider client={qc}>
+          <MemoryRouter>
+            <ViewWizard mode="create" isOpen onClose={vi.fn()} onComplete={vi.fn()} initialWorkspaceId="ws1" initialDataSourceId="ds1" />
+          </MemoryRouter>
+        </QueryClientProvider>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId('basics-step')
+      await goToPreview()
+      if (flip) fireEvent.click(screen.getByRole('button', { name: 'stub-flip-coverage' }))
+      fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+      await waitFor(() => expect(createViewMock).toHaveBeenCalled())
+      const sent = createViewMock.mock.calls.at(-1)![0].config.coverage
+      view.unmount()
+      return sent
+    }
+    expect(await create(false)).toBe('specialised')
+    expect(await create(true)).toBe('complete')
   })
 })

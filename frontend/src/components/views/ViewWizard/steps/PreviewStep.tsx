@@ -5,6 +5,7 @@
  */
 
 
+import { useId } from 'react'
 import { motion } from 'framer-motion'
 import {
     Layout,
@@ -32,6 +33,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { slugifyGraphName } from '../blankModel'
 import { resolveWizardEntityScope } from '../effectivePlacement'
 import { cn } from '@/lib/utils'
+import { Switch } from '@/components/ui/Switch'
 import type { ViewContentConfig } from '@/types/schema'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
@@ -46,6 +48,9 @@ interface PreviewStepProps {
     /** The scope the view being EDITED already stores. Ranks below a choice made
      *  in this session and above the derivation — the order the save applies. */
     viewEntityScope?: 'all' | 'curated'
+    /** Change the form: here, only whether a Context View is meant to show everything in its
+     *  source. Absent (an import, which saves the file's view as it is) that is not offered. */
+    updateFormData?: (updates: Partial<WizardFormData>) => void
 }
 
 // ============================================
@@ -56,7 +61,8 @@ interface PreviewStepProps {
 // a tenth private copy, which is how the review step ended up announcing
 // "Enterprise" with a green tick and no word about what that does.
 
-export function PreviewStep({ formData, scopeContext, viewEntityScope }: PreviewStepProps) {
+export function PreviewStep({ formData, scopeContext, viewEntityScope, updateFormData }: PreviewStepProps) {
+    const coverageId = useId()
     const schema = useSchemaStore(s => s.schema)
     const { appName } = useBrand()
     const activeWorkspace = useWorkspacesStore(s => s.getActiveWorkspace())
@@ -268,6 +274,35 @@ export function PreviewStep({ formData, scopeContext, viewEntityScope }: Preview
                                             : 'Everything else stays out, including entities added to the source later. Their children come along with them.'}
                                     </p>
                                 </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Whether it is meant to show everything in its source. A complete view is
+                        offered each new top-level entity on the canvas as it arrives; a lens on
+                        part of the source never is. Inferred from the suggestion the layers were
+                        made with, said once here, and the person's to change either way. */}
+                    {formData.layoutType === 'reference' && updateFormData && (
+                        <div className="p-5">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 shrink-0 rounded-lg bg-sky-100 dark:bg-sky-900/30 flex items-center justify-center text-sky-600 dark:text-sky-400">
+                                    <Sparkles className="w-5 h-5" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <label htmlFor={coverageId} className="font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
+                                        Keep it complete — offer new top-level entities as they arrive
+                                    </label>
+                                    <p id={`${coverageId}-help`} className="text-xs text-slate-500 mt-1 leading-relaxed">
+                                        Each new one is offered on the canvas, never added for you. Leave it off for a view of part of the source.
+                                    </p>
+                                </div>
+                                <Switch
+                                    id={coverageId}
+                                    size="sm"
+                                    checked={formData.coverage === 'complete'}
+                                    onChange={(on) => updateFormData({ coverage: on ? 'complete' : 'specialised' })}
+                                    aria-describedby={`${coverageId}-help`}
+                                />
                             </div>
                         </div>
                     )}

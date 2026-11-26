@@ -258,6 +258,12 @@ export interface WizardFormData {
      *  exist (`makeNewRoots`). Wizard-only: the view is saved with those columns hand-picked, and
      *  the draft maps each to the entity made for it. */
     newRoots?: Record<string, NewRoot>
+    /** Context Views only: whether the view is meant to show everything in its source
+     *  (`config.coverage`). The Layout step infers it from the suggestion the layers were made
+     *  with — 'complete' only when it left nothing out — and the Preview step shows it as a
+     *  switch the person can turn either way. An edit opens on the view's own; undefined there
+     *  is a view that never said, and is saved without one unless the person chooses. */
+    coverage?: 'complete' | 'specialised'
 }
 
 export type WizardStep =
@@ -1298,6 +1304,7 @@ function ViewWizardBody({
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
                 advancedFilters: fieldFiltersToActiveFilters(editingView.filters.fieldFilters),
                 scopeEdges: layers[0]?.scopeEdges,
+                coverage: editingView.coverage,
                 isValid: true,
             })
         }
@@ -1781,6 +1788,8 @@ function ViewWizardBody({
                         // creator can use that template.
                         contextModelId: formData.layoutType === 'reference' ? formData.contextModelId : undefined,
                         contextModelVersion: formData.layoutType === 'reference' ? formData.contextModelVersion : undefined,
+                        // A new Context View always says: one never offered a choice is specialised.
+                        coverage: formData.layoutType === 'reference' ? formData.coverage ?? 'specialised' : undefined,
                     })
                     if (!result.success || !result.data) {
                         setStageStates(s => ({ ...s, create: 'failed' }))
@@ -1885,6 +1894,9 @@ function ViewWizardBody({
                         contextModelId: formData.contextModelId,
                         contextModelVersion: formData.contextModelVersion,
                     }),
+                    // The view's own, or the one chosen here. A view that never said and was
+                    // not given one here keeps saying nothing.
+                    ...(formData.layoutType === 'reference' && formData.coverage && { coverage: formData.coverage }),
                 }, fullViewQuery.data?.config)
                 if (wantsPublication) {
                     try {
@@ -2400,6 +2412,8 @@ function ViewWizardBody({
                         formData={formData}
                         scopeContext={scopeContext}
                         viewEntityScope={editingView?.content?.entityScope}
+                        // An import saves the file's view as it is: nothing to change here.
+                        updateFormData={isImport ? undefined : updateFormData}
                     />
                 </>
             )}

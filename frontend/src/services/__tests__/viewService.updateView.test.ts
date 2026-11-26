@@ -9,6 +9,7 @@ import type { WorkspaceSchema, ViewConfiguration } from '@/types/schema'
 
 const updateViewMock = vi.fn()
 const updateViewVisibilityMock = vi.fn()
+const createViewMock = vi.fn()
 
 vi.mock('../viewApiService', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../viewApiService')>()
@@ -16,6 +17,7 @@ vi.mock('../viewApiService', async (importOriginal) => {
         ...actual,
         updateView: (...a: unknown[]) => updateViewMock(...a),
         updateViewVisibility: (...a: unknown[]) => updateViewVisibilityMock(...a),
+        createView: (...a: unknown[]) => createViewMock(...a),
     }
 })
 
@@ -81,5 +83,32 @@ describe('a settings save keeps what it does not own', () => {
         const sent = updateViewMock.mock.calls[0][1] as { config: Record<string, unknown> }
         expect(sent.config.membership).toEqual(membership)
         expect((sent.config.layout as { referenceLayout: unknown }).referenceLayout).toEqual(BASE_LAYOUT)
+    })
+})
+
+describe('whether a view is meant to show everything in its source', () => {
+    it('a new view carries it in its config', async () => {
+        createViewMock.mockResolvedValue({ ...baseResponse, config: { ...baseResponse.config, coverage: 'complete' } })
+        const result = await viewService.createView({
+            name: 'Finance', layoutType: 'reference', workspaceId: 'ws_1', coverage: 'complete',
+        })
+        const sent = createViewMock.mock.calls[0][0] as { config: Record<string, unknown> }
+        expect(sent.config.coverage).toBe('complete')
+        expect(result.data?.coverage).toBe('complete')
+    })
+
+    it('an edit sends it on its own, beside the config, and the store reads what was saved', async () => {
+        updateViewMock.mockResolvedValue({ ...baseResponse, config: { ...baseResponse.config, coverage: 'specialised' } })
+        await viewService.updateView('v1', { name: 'Renamed', coverage: 'specialised' })
+        const sent = updateViewMock.mock.calls[0][1] as { coverage?: string; config: Record<string, unknown> }
+        expect(sent.coverage).toBe('specialised')
+        expect(stored().coverage).toBe('specialised')
+    })
+
+    it('sends none when none was chosen, so the view keeps its own', async () => {
+        await viewService.updateView('v1', { name: 'Renamed' })
+        const sent = updateViewMock.mock.calls[0][1] as Record<string, unknown>
+        expect(sent.coverage).toBeUndefined()
+        expect(stored().coverage).toBeUndefined()
     })
 })
