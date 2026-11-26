@@ -27,11 +27,17 @@ export interface PulseMatrixRow {
 /** Past this many periods only every other column is labelled. */
 const DENSE = 16
 
-export function PulseMatrix({ buckets, rows, unit = 'events', className }: {
+export function PulseMatrix({
+    buckets, rows, unit = 'events', rowHeader = 'Workspace', onSelectBucket, className,
+}: {
     buckets: string[]
     rows: PulseMatrixRow[]
     /** Names the count, e.g. "events". */
     unit?: string
+    /** What the rows are. */
+    rowHeader?: string
+    /** Makes each period's column a button — to open that period, say. */
+    onSelectBucket?: (index: number) => void
     className?: string
 }) {
     const theme = useChartTheme()
@@ -43,12 +49,24 @@ export function PulseMatrix({ buckets, rows, unit = 'events', className }: {
             <table className="w-full border-separate border-spacing-[2px] text-[10px]">
                 <thead>
                     <tr>
-                        <th scope="col" className="text-left font-semibold text-ink-muted pr-2 pb-1">Workspace</th>
-                        {buckets.map((b, i) => (
-                            <th key={b} scope="col" className="font-semibold text-ink-muted pb-1 whitespace-nowrap">
-                                {i % every === 0 ? shortDate(b) : <span className="sr-only">{shortDate(b)}</span>}
-                            </th>
-                        ))}
+                        <th scope="col" className="text-left font-semibold text-ink-muted pr-2 pb-1">{rowHeader}</th>
+                        {buckets.map((b, i) => {
+                            const label = i % every === 0 ? shortDate(b) : <span className="sr-only">{shortDate(b)}</span>
+                            return (
+                                <th key={b} scope="col" className="font-semibold text-ink-muted pb-1 whitespace-nowrap">
+                                    {onSelectBucket ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => onSelectBucket(i)}
+                                            aria-label={`Open ${shortDate(b, true)}`}
+                                            className="min-w-[12px] rounded px-0.5 hover:text-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500"
+                                        >
+                                            {i % every === 0 ? shortDate(b) : '·'}
+                                        </button>
+                                    ) : label}
+                                </th>
+                            )
+                        })}
                         <th scope="col" className="text-right font-semibold text-ink-muted pl-2 pb-1">Total</th>
                     </tr>
                 </thead>
@@ -68,9 +86,11 @@ export function PulseMatrix({ buckets, rows, unit = 'events', className }: {
                                     <td
                                         key={b}
                                         title={`${row.title}, ${shortDate(b, true)}: ${exact(count)} ${unit}`}
+                                        onClick={onSelectBucket ? () => onSelectBucket(i) : undefined}
                                         className={cn(
                                             'h-5 min-w-[12px] rounded-[3px]',
                                             count === 0 && 'bg-black/[0.035] dark:bg-white/[0.04]',
+                                            onSelectBucket && 'cursor-pointer hover:outline hover:outline-1 hover:outline-indigo-400',
                                         )}
                                         style={count > 0 ? { backgroundColor: theme.ramp[step] } : undefined}
                                     />

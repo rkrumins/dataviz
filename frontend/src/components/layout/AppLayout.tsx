@@ -31,6 +31,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
+import { useSectionTelemetry } from '@/hooks/useSectionTelemetry'
 import { ViewEditorContext, useViewEditorModal, type ViewEditorOpenOptions } from './viewEditorContext'
 import { NotificationStack } from '@/components/ui/notifications'
 import { ExportTray } from '@/features/import-export/ExportTray'
@@ -121,6 +122,10 @@ export function AppLayout() {
   // The reader's lineage direction colours onto <html> — every surface that
   // colours incoming / outgoing lineage reads them from there.
   useApplyLineageDirectionColors()
+
+  // Where in the app people go, for People analytics: one signal per section
+  // change. Signed-in only — the endpoint records who did it.
+  useSectionTelemetry(isAuthenticated && !passwordChangeRequired)
 
   // Global "?" shortcut toggles the Help drawer — ignored while typing in a
   // field so it never steals a literal question mark.

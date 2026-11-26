@@ -19,9 +19,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import get_current_user, requires
+from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import product_event_repo
+from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,27 @@ ALLOWED_EVENT_TYPES = frozenset(
         "view.import",
         "version.published",
         "ontology.published",
+        # Where in the app? One row each time someone moves to another part
+        # of it — not per page, per SECTION — so People analytics can say
+        # where a person spends their time, not only which views they open.
+        "app.section",
     }
 )
+
+#: The sections ``app.section`` may name. Mirrors what the client's
+#: ``tabForPath`` (``frontend/src/store/navigation.ts``) can return. A valid
+#: section is copied into ``subject_id``, so "where do people go" is a GROUP BY
+#: on ``idx_product_events_subject`` rather than a payload scan; anything else
+#: is recorded with no subject, which no breakdown reads.
+APP_SECTIONS = frozenset(
+    {
+        "dashboard", "explore", "templates", "ingestion", "reviews",
+        "playground", "workspaces", "schema", "analytics", "admin",
+    }
+)
+
+#: Hold the whole tenancy readable, so any workspace id is theirs to name.
+_READS_EVERY_WORKSPACE = ("system:admin", "system:org-admin", "system:org-viewer")
 
 # Guard against oversized payloads (this is a lightweight signal, not a document).
 _MAX_PAYLOAD_CHARS = 2000
@@ -80,12 +100,40 @@ _MAX_PAYLOAD_CHARS = 2000
 class TelemetryEventIn(BaseModel):
     type: str = Field(..., description="One of the allowed telemetry event types.")
     payload: dict[str, Any] | None = None
+    workspaceId: str | None = Field(
+        None, description="The workspace the signal happened in, if any.",
+    )
+
+
+def _attributable_workspace(claims: PermissionClaims, workspace_id: str | None) -> str | None:
+    """The workspace to record, or ``None``.
+
+    Kept only when the caller can read it, so a client cannot attribute its
+    activity to a workspace it is not in and skew that workspace's figures.
+    Decided from the claims this request already resolved — no query on a
+    path that runs on every trace and search. An unrecognised id is dropped
+    rather than refused: telemetry is best-effort, and a 422 here would only
+    lose the signal.
+    """
+    if not workspace_id:
+        return None
+    if any(p in claims.global_perms for p in _READS_EVERY_WORKSPACE):
+        return workspace_id
+    return workspace_id if workspace_id in claims.ws_perms else None
+
+
+def _subject(body: TelemetryEventIn) -> str | None:
+    if body.type != "app.section" or not body.payload:
+        return None
+    section = body.payload.get("section")
+    return section if section in APP_SECTIONS else None
 
 
 @router.post("/events", status_code=204)
 async def record_event(
     body: TelemetryEventIn,
     user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> Response:
     if body.type not in ALLOWED_EVENT_TYPES:
@@ -98,6 +146,8 @@ async def record_event(
         event_type=body.type,
         actor_id=getattr(user, "id", None),
         payload=body.payload,
+        subject_id=_subject(body),
+        workspace_id=_attributable_workspace(claims, body.workspaceId),
     )
     await session.commit()
     return Response(status_code=204)

@@ -236,6 +236,7 @@ async def lifespan(app: FastAPI):
         run_idp_reachability_loop,
     )
     from backend.app.services.outbox_relay import run_relay
+    from backend.app.services.people_activity_indexer import run_indexer
     from backend.app.services.product_event_gc import (
         run_sweeper as run_product_event_gc,
     )
@@ -273,6 +274,11 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             run_warmer(get_readonly_session, housekeeping_shutdown),
             name="analytics-warmer",
+        ),
+        # People analytics' index: backfill, then keep up.
+        asyncio.create_task(
+            run_indexer(get_jobs_session, housekeeping_shutdown),
+            name="people-indexer",
         ),
         asyncio.create_task(
             run_api_key_housekeeping(get_jobs_session, housekeeping_shutdown),

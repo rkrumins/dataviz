@@ -14,7 +14,7 @@ import { Navigate, useParams, useNavigate, useSearchParams } from 'react-router-
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Settings2, GitBranch, Eye, RefreshCw, Sparkles, Shapes, Activity,
-    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2, Layers,
+    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2, Layers, UsersRound,
 } from 'lucide-react'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
@@ -67,6 +67,7 @@ import { AskForDataButton } from '@/components/data-requests/AskForData'
 import { WorkspaceDataRequestsPanel } from '@/components/data-requests/WorkspaceDataRequestsPanel'
 import { DATA_REQUESTS_FEATURE, useAskForData } from '@/hooks/useDataRequests'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
+import { WorkspaceUsageTab } from '@/components/analytics/people/WorkspaceUsageTab'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features/data-source-transfer/MoveDataSourceWizard'
@@ -593,6 +594,8 @@ export function WorkspaceDetailPage() {
         ] : []),
         ...(canAddMembers ? [{ id: 'members' as const, label: 'People', icon: Users }] : []),
         ...(activityScope ? [{ id: 'activity' as const, label: 'Activity', icon: History }] : []),
+        // Who uses it: each member's activity here, for the same readers as Activity.
+        ...(activityScope ? [{ id: 'usage' as const, label: 'Usage', icon: UsersRound }] : []),
         // The Playground's settings are its administrator's: a member manages only their own graphs.
         ...(canManageMembers || (canManageDataSources && workspace.kind !== 'playground')
             ? [{ id: 'settings' as const, label: 'Settings', icon: Settings2 }] : []),
@@ -911,6 +914,13 @@ export function WorkspaceDetailPage() {
             {activeTab === 'activity' && activityScope && (
                 <div className="py-4">
                     <ActivityExplorer scope={activityScope} />
+                </div>
+            )}
+
+            {/* ── Usage — who uses the workspace, and when ─────── */}
+            {activeTab === 'usage' && activityScope && wsId && (
+                <div className="py-4">
+                    <WorkspaceUsageTab workspaceId={wsId} />
                 </div>
             )}
 

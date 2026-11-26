@@ -48,6 +48,7 @@ from backend.app.db.repositories import (
     analytics_data_repo,
     analytics_repo,
     analytics_usage_repo,
+    people_activity_repo,
 )
 from backend.app.services import analytics_cache
 from backend.app.services.activity import summaries
@@ -70,6 +71,11 @@ _SURFACES = {
     "data": (analytics_data_repo, "platform_data"),
     "usage": (analytics_usage_repo, "platform_usage"),
     "collaboration": (analytics_collaboration_repo, "collaboration_doc"),
+    # The People tab's platform-wide roster, for analytics administrators — the one
+    # people document every one of them opens. Per-workspace rosters and per-person
+    # documents are read through: unbounded keys, one reader at a time. The key must be
+    # the endpoint's ``roster_key`` (``people:{scope}:{lens}``).
+    "people:all:full": (people_activity_repo, "people_doc"),
 }
 
 #: How often to recompute. Long enough that the aggregation cost is negligible

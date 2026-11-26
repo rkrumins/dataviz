@@ -1870,6 +1870,9 @@ class ViewActivityLogORM(Base):
         Index("idx_val_view", "view_id"),
         Index("idx_val_view_created", "view_id", "created_at"),
         Index("idx_val_created", "created_at"),
+        # One person's edits, as a range scan: People analytics.
+        # Alembic 20261202_1000_pev_actor_ws.
+        Index("idx_val_actor_created", "actor", "created_at"),
         CheckConstraint(
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
@@ -1907,6 +1910,10 @@ class ProductEventORM(Base):
     # docs vote, a finished tour), which is why it is nullable rather than a
     # second required field on every signal.
     subject_id = Column(Text, nullable=True)
+    # Where a usage signal happened — a trace, a search, an export. NULL when
+    # the client sent none, for rows from before it was recorded, and for
+    # ``view.opened``, whose workspace is its view's (``subject_id``).
+    workspace_id = Column(Text, nullable=True)
     payload = Column(Text, nullable=True)        # JSON string
     created_at = Column(Text, nullable=False, default=_now)
 
@@ -1917,10 +1924,145 @@ class ProductEventORM(Base):
         # window" (equality on type, group on subject) and "this one view's
         # opens" (equality on both, range on created_at).
         Index("idx_product_events_subject", "event_type", "subject_id", "created_at"),
+        # One person's activity, as a range scan: People analytics.
+        # Alembic 20261202_1000_pev_actor_ws.
+        Index("idx_product_events_actor", "actor_id", "created_at"),
     )
 
     def __repr__(self) -> str:
         return f"<ProductEvent id={self.id!r} type={self.event_type!r}>"
+
+
+class PersonWorkspaceActivityORM(Base):
+    """When one person joined one workspace, and was first and last active in it.
+
+    One row per (person, workspace), and one per person with ``workspace_id = ''`` for the
+    platform as a whole. Maintained by ``services/people_activity_indexer`` from the stores
+    that record what people do — never written on a request path — and backfilled from all
+    of their history, so it outlives ``product_events`` retention.
+
+    Every column only ever moves one way: ``joined_at`` and ``first_active_at`` earlier,
+    ``last_active_at`` later. That makes each indexer pass an idempotent min/max upsert, and
+    a pass that runs twice, or overlaps another, harmless.
+    """
+    __tablename__ = "person_workspace_activity"
+
+    user_id = Column(Text, primary_key=True)
+    workspace_id = Column(Text, primary_key=True)        # '' = the platform as a whole
+    joined_at = Column(Text, nullable=True)              # first known access, NULL if never bound
+    first_active_at = Column(Text, nullable=True)
+    last_active_at = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # A workspace's people, most recently active first: the roster's read.
+        Index("idx_pwa_workspace_last", "workspace_id", "last_active_at"),
+    )
+
+
+class PersonActivityDailyORM(Base):
+    """What one person did on one UTC day, in one workspace, of one kind.
+
+    The People roster's only source: a roster costs people × days, never events. Written by
+    ``services/people_activity_indexer``, which recomputes a whole day at a time, so a row is
+    always the exact fold of that day's raw events — never an increment that could drift.
+
+    ``workspace_id`` is ``''`` for events that happened in no workspace (a sign-in, a docs
+    vote). ``kind`` is one of the activity kinds, or ``section.<name>`` for moves around the
+    app. ``n``/``first_at``/``last_at`` count every event; the ``_ws`` columns only those a
+    workspace admin may see (no auditor-only ledger rows, no admin opening a private view).
+    """
+    __tablename__ = "person_activity_daily"
+
+    day = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    workspace_id = Column(Text, primary_key=True)
+    kind = Column(Text, primary_key=True)
+    n = Column(Integer, nullable=False, default=0, server_default="0")
+    n_ws = Column(Integer, nullable=False, default=0, server_default="0")
+    first_at = Column(Text, nullable=True)
+    last_at = Column(Text, nullable=True)
+    first_ws_at = Column(Text, nullable=True)
+    last_ws_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # One workspace's days: a workspace roster.
+        Index("idx_pad_workspace_day", "workspace_id", "day"),
+        # One person's days: their activity line, calendar and page.
+        Index("idx_pad_user_day", "user_id", "day"),
+    )
+
+
+class PersonDailyTotalORM(Base):
+    """What one person did on one UTC day in one scope, with no kind: what a roster reads.
+
+    ``workspace_id`` is a workspace the person did something in that day, or ``'*'`` for
+    everywhere (every workspace, none, and sign-ins). So a roster is a scan of one row per
+    person-day, however many workspaces and kinds their day spread over — the
+    ``person_activity_daily`` rows it is folded from can be ten times as many.
+
+    ``actions``/``last_action_at`` count every action; the ``_ws`` columns only what a
+    workspace admin may see. Sign-ins happen in no workspace, so only ``'*'`` rows hold them.
+    ``sections`` has bit ``i`` set when the person moved to ``people_kinds.SECTIONS[i]``.
+    """
+    __tablename__ = "person_daily_totals"
+
+    workspace_id = Column(Text, primary_key=True)
+    day = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    actions = Column(Integer, nullable=False, default=0, server_default="0")
+    actions_ws = Column(Integer, nullable=False, default=0, server_default="0")
+    signins = Column(Integer, nullable=False, default=0, server_default="0")
+    sections = Column(Integer, nullable=False, default=0, server_default="0")
+    last_action_at = Column(Text, nullable=True)
+    last_action_ws_at = Column(Text, nullable=True)
+    last_signin_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # Some people's days in a scope: the sign-ins of a workspace's people.
+        Index("idx_pdt_user", "user_id", "workspace_id", "day"),
+        # A day across every scope: the indexer replacing it, the purge dropping it.
+        Index("idx_pdt_day", "day"),
+    )
+
+
+class PeopleDailyFacetORM(Base):
+    """The same days without the person: events by hour of day (``facet='hour'``) and by
+    event type (``facet='type'``) — the punchcard and "what people do", which name no one."""
+    __tablename__ = "people_daily_facets"
+
+    day = Column(Text, primary_key=True)
+    workspace_id = Column(Text, primary_key=True)
+    facet = Column(Text, primary_key=True)
+    value = Column(Text, primary_key=True)
+    n = Column(Integer, nullable=False, default=0, server_default="0")
+    n_ws = Column(Integer, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (
+        Index("idx_pdf_workspace_day", "workspace_id", "day"),
+    )
+
+
+class PeopleIndexDayORM(Base):
+    """One UTC day the people indexer has computed, and whether something about it arrived
+    late (a ledger row the relay recorded after the fact) so it must be computed again."""
+    __tablename__ = "people_index_days"
+
+    day = Column(Text, primary_key=True)
+    computed_at = Column(Text, nullable=True)
+    dirty = Column(Boolean, nullable=False, default=False, server_default="false")
+
+
+class PeopleIndexCursorORM(Base):
+    """How far the people indexer has got through one source: a restart resumes from here,
+    and the page reports how much of history is indexed while a backfill runs."""
+    __tablename__ = "people_index_cursors"
+
+    name = Column(Text, primary_key=True)
+    through = Column(Text, nullable=True)        # ISO instant processed up to, inclusive
+    through_id = Column(Text, nullable=True)     # tie-break for row-keyed cursors
+    started_at = Column(Text, nullable=True)     # the first row this cursor ever processed
+    updated_at = Column(Text, nullable=False, default=_now)
 
 
 # ------------------------------------------------------------------ #

@@ -15,7 +15,7 @@ import { useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
     AlertCircle, Activity, BarChart3, Boxes, Database, LayoutGrid, MessagesSquare, Sparkles,
-    TrendingUp, Users,
+    TrendingUp, Users, UsersRound,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -42,10 +42,12 @@ import { CollaborationTab } from '@/components/analytics/CollaborationTab'
 import { RedactionNotice } from '@/components/analytics/Redacted'
 import { PublicPosture } from '@/components/analytics/PublicPosture'
 import { WorkspaceInsightsPanel } from '@/components/analytics/WorkspaceInsightsPanel'
+import { PeopleTab } from '@/components/analytics/people/PeopleTab'
+import { usePeopleScopes } from '@/components/analytics/people/usePeopleScopes'
 
 type AnalyticsTab =
     | 'overview' | 'growth' | 'data' | 'engagement' | 'content' | 'collaboration' | 'health'
-    | 'workspaces'
+    | 'workspaces' | 'people'
 
 interface TabDef {
     id: AnalyticsTab
@@ -66,6 +68,7 @@ const TABS: TabDef[] = [
     { id: 'collaboration', label: 'Collaboration', icon: MessagesSquare, desc: 'Questions asked and answered, and what about' },
     { id: 'health', label: 'Health', icon: Activity, desc: 'Freshness, access friction, semantic coverage' },
     { id: 'workspaces', label: 'Workspaces', icon: Boxes, desc: 'Per-workspace insights and drill-down' },
+    { id: 'people', label: 'People', icon: UsersRound, desc: 'Who did what and when — per person, per workspace, per day' },
 ]
 
 export function AnalyticsPage() {
@@ -94,6 +97,10 @@ export function AnalyticsPage() {
             }
 
     const selectedWorkspace = searchParams.get('workspace')
+    // The People tab's scope. Its own name: `workspace` already opens the
+    // drill-in panel, and the two are different questions.
+    const peopleScopes = usePeopleScopes()
+    const peopleWorkspace = searchParams.get('pws') ?? peopleScopes.fallback
 
     const patchParams = (patch: Record<string, string | null>) => {
         const next = new URLSearchParams(searchParams)
@@ -234,7 +241,21 @@ export function AnalyticsPage() {
                     {/* The Data and Collaboration tabs read their own
                         documents, so they do not wait on — or fail with —
                         the summary. */}
-                    {activeTab === 'collaboration' ? (
+                    {activeTab === 'people' ? (
+                        // Its own documents, like Data and Collaboration: it
+                        // neither waits on nor fails with the summary.
+                        <PeopleTab
+                            range={range}
+                            onRangeChange={(next) => patchParams(
+                                next.kind === 'custom'
+                                    ? { from: next.from, to: next.to, range: null }
+                                    : { range: String(next.days), from: null, to: null },
+                            )}
+                            workspaceId={peopleWorkspace}
+                            scopes={peopleScopes.scopes}
+                            onScopeChange={(ws) => patchParams({ pws: ws })}
+                        />
+                    ) : activeTab === 'collaboration' ? (
                         collaboration.error ? (
                             <ErrorPanel message={collaboration.error.message} />
                         ) : collaboration.isLoading || !collaboration.data ? (

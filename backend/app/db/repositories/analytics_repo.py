@@ -2680,8 +2680,16 @@ async def workspace_rows(
 async def _member_counts(
     session: AsyncSession, *, now: datetime,
 ) -> Counter:
+    """Distinct workspace members per workspace — see ``members_by_workspace``."""
+    per_ws = await members_by_workspace(session, now=now)
+    return Counter({ws_id: len(users) for ws_id, users in per_ws.items()})
+
+
+async def members_by_workspace(
+    session: AsyncSession, *, now: datetime, workspace_id: Optional[str] = None,
+) -> dict[str, set[str]]:
     """Distinct workspace members — people, not service accounts — counting
-    through groups and honouring expiry.
+    through groups and honouring expiry. ``workspace_id`` narrows it to one.
 
     ``role_bindings.expires_at`` is never enforced in SQL — the binding repo
     filters it in Python after fetching — so an expired grant would otherwise be
@@ -2689,19 +2697,25 @@ async def _member_counts(
     that group, so those expand through ``group_members``.
     """
     now_iso = now.isoformat()
+    scoped = [RoleBindingORM.scope_id == workspace_id] if workspace_id else []
     bindings = (await session.execute(
         select(
             RoleBindingORM.scope_id,
             RoleBindingORM.subject_type,
             RoleBindingORM.subject_id,
             RoleBindingORM.expires_at,
-        ).where(RoleBindingORM.scope_type == "workspace")
+        ).where(RoleBindingORM.scope_type == "workspace", *scoped)
     )).all()
 
     group_members: dict[str, set[str]] = defaultdict(set)
-    if any(subject_type == "group" for _, subject_type, _, _ in bindings):
+    group_ids = {subject_id for _, subject_type, subject_id, _ in bindings
+                 if subject_type == "group" and subject_id}
+    if group_ids:
+        # Only the groups bound here — one workspace's drill-in must not read
+        # every membership in the tenancy to expand two of them.
+        narrowed = [GroupMemberORM.group_id.in_(group_ids)] if workspace_id else []
         for group_id, user_id in (await session.execute(
-            select(GroupMemberORM.group_id, GroupMemberORM.user_id)
+            select(GroupMemberORM.group_id, GroupMemberORM.user_id).where(*narrowed)
         )).all():
             group_members[group_id].add(user_id)
 
@@ -2713,7 +2727,7 @@ async def _member_counts(
             per_ws[scope_id].update(group_members.get(subject_id, ()))
         elif subject_id and not is_service_account(subject_id):
             per_ws[scope_id].add(subject_id)
-    return Counter({ws_id: len(users) for ws_id, users in per_ws.items()})
+    return per_ws
 
 
 async def _actors_by_workspace(

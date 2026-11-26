@@ -1067,6 +1067,9 @@ _EVENT_META.update({
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
         else "Exported platform activity as CSV"
     )),
+    # Someone opened another person's activity in People analytics. Looking at a colleague's
+    # day is activity too, and the person looked at may one day ask who did.
+    "platform.people_activity.viewed": ("info", _envelope_summary("Looked at the activity of {}")),
 })
 
 #: The verb phrase each known event type is filed under in pickers and
@@ -1171,6 +1174,7 @@ LABELS: dict[str, str] = {
     "platform.versioning.graph_evicted": "Evicted a versioned graph from memory",
     "platform.versioning.graph_loaded": "Loaded a versioned graph into memory",
     "platform.activity.exported": "Exported activity",
+    "platform.people_activity.viewed": "Looked at a person's activity",
     "rbac.group.member_added": "Added to a group",
     "rbac.group.member_removed": "Removed from a group",
     "rbac.group.created": "Created a group",

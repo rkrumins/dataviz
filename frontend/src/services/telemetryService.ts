@@ -8,6 +8,7 @@
  * calling this never affects the user's flow.
  */
 import { authFetch } from './apiClient'
+import { useWorkspacesStore } from '@/store/workspaces'
 
 /**
  * Mirrors ``ALLOWED_EVENT_TYPES`` in
@@ -34,14 +35,28 @@ export type TelemetryType =
   | 'view.import'
   | 'version.published'
   | 'ontology.published'
+  | 'app.section'
 
 const ENDPOINT = '/api/v1/telemetry/events'
 
-export function recordEvent(type: TelemetryType, payload?: Record<string, unknown>): void {
+/**
+ * `workspaceId` says where the signal happened, so People analytics can report a
+ * workspace's traces and searches, not only its view opens. Defaults to the
+ * active workspace; callers that know better (a trace on a view of another
+ * workspace) pass it. The server keeps it only if the caller can read it.
+ */
+export function recordEvent(
+  type: TelemetryType,
+  payload?: Record<string, unknown>,
+  opts: { workspaceId?: string | null } = {},
+): void {
+  const workspaceId = opts.workspaceId !== undefined
+    ? opts.workspaceId
+    : useWorkspacesStore.getState().activeWorkspaceId
   void authFetch(ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, payload }),
+    body: JSON.stringify({ type, payload, ...(workspaceId ? { workspaceId } : {}) }),
     silent403: true,
   }).catch(() => {
     /* best-effort telemetry — never surface to the user */

@@ -353,6 +353,15 @@ export const PAGE_INDEX: PageEntry[] = [
         feature: 'conversationsEnabled',
     },
     {
+        id: 'my-activity',
+        category: 'Setting',
+        title: 'Your activity',
+        description: 'Everything you did, day by day — sign-ins, views you opened, traces and changes',
+        keywords: ['activity', 'me', 'my activity', 'history', 'sign-ins', 'timeline', 'calendar'],
+        path: '/me/activity',
+        gate: { kind: 'always' },
+    },
+    {
         id: 'conversations',
         category: 'Page',
         title: 'Conversations',

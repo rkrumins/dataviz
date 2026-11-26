@@ -62,6 +62,7 @@ const ViewPage = lazyWithRetry(() => import('@/pages/ViewPage').then(m => ({ def
 const ViewsGallery = lazyWithRetry(() => import('@/pages/ViewsGallery').then(m => ({ default: m.ViewsGallery })))
 const ExplorerPage = lazyWithRetry(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const AnalyticsPage = lazyWithRetry(() => import('@/pages/AnalyticsPage').then(m => ({ default: m.AnalyticsPage })))
+const PersonActivityPage = lazyWithRetry(() => import('@/pages/PersonActivityPage').then(m => ({ default: m.PersonActivityPage })))
 const AdminPage = lazyWithRetry(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazyWithRetry(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
 const AdminInfrastructure = lazyWithRetry(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
@@ -227,6 +228,12 @@ export const router = createBrowserRouter([
           </RequireAnalytics>
         ),
       },
+      // One person's activity. NOT behind `RequireAnalytics`: a workspace admin
+      // reads their own workspace's people here without the Analytics section,
+      // and everyone reads themselves at /me/activity. The server decides who
+      // may see whom, and a refusal renders as a sentence on the page.
+      { path: 'analytics/people/:userId', element: <Lazy><PersonActivityPage /></Lazy> },
+      { path: 'me/activity', element: <Lazy><PersonActivityPage /></Lazy> },
       // Per-data-source overview (owner's home for one catalog item).
       // Reached from the Ingestion → Data Sources list; content self-gates
       // via permission-scoped catalog reads.
