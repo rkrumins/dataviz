@@ -1215,9 +1215,20 @@ class ViewUpdateRequest(BaseModel):
     visibility: Optional[str] = None
     tags: Optional[List[str]] = None
     is_pinned: Optional[bool] = Field(None, alias="isPinned")
+    #: Whether the view is meant to show everything in its source ('complete': new top-level
+    #: entities are offered as they arrive) or only what it was made to show ('specialised'),
+    #: stored as ``config.coverage``. Sent on its own, so a caller never sends the whole config
+    #: to change it. Absent from a view's config, the view is specialised.
+    coverage: Optional[str] = Field(None, alias="coverage")
 
     class Config:
         populate_by_name = True
+
+    @model_validator(mode="after")
+    def _validate_coverage(self) -> "ViewUpdateRequest":
+        if self.coverage is not None and self.coverage not in ("complete", "specialised"):
+            raise ValueError("coverage must be 'complete' or 'specialised'")
+        return self
 
 
 class ViewCheckpointRequest(BaseModel):
