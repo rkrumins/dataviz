@@ -1475,6 +1475,9 @@ class DiscussionORM(Base):
     subject_id = Column(Text, nullable=False)
     entity_id = Column(Text, nullable=True)
     entity_label = Column(Text, nullable=True)
+    #: The containers it sits in, top first, as a JSON list of names; and its type.
+    entity_path = Column(Text, nullable=True)
+    entity_type = Column(Text, nullable=True)
     visibility = Column(Text, nullable=False, default="open")
     status = Column(Text, nullable=False, default="open")
     asked_by = Column(Text, nullable=False)

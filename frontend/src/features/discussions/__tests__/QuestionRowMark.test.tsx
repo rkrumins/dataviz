@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaStore } from '@/store/persona'
+import { useSchemaStore } from '@/store/schema'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { QuestionRowMark } from '../QuestionRowMark'
 import { useAnchorStore } from '../anchorStore'
@@ -60,6 +61,21 @@ describe('QuestionRowMark', () => {
             subject: { type: 'view', id: 'v1' }, entity: { id: 'urn:a', label: 'Orders' }, threadId: null, compose: false,
         })
     })
+
+    it('names the row as the canvas holds it: where it sits, and what it is', () => {
+        useSchemaStore.setState({ schema: { containmentEdgeTypes: ['CONTAINS'], views: [] } } as never)
+        useCanvasStore.setState({
+            nodes: [
+                { id: 'urn:db', position: { x: 0, y: 0 }, data: { label: 'Finance', urn: 'urn:db', type: 'database' } },
+                { id: 'urn:a', position: { x: 0, y: 0 }, data: { label: 'Orders', urn: 'urn:a', type: 'table' } },
+            ],
+            edges: [{ id: 'e', source: 'urn:db', target: 'urn:a', data: { edgeType: 'CONTAINS' } }],
+        } as never)
+        useAnchorStore.getState().set('v1', { 'urn:a': { open: 1, total: 1 } })
+        render(<QuestionRowMark urn="urn:a" label="orders" />)
+        fireEvent.click(screen.getByRole('button', { name: '1 open question about this' }))
+        expect(useDiscussionsDrawer.getState().target?.entity).toEqual({ id: 'urn:a', label: 'Orders', path: ['Finance'], type: 'table' })
+    })
 })
 
 describe('useAskAboutNode', () => {
@@ -71,6 +87,14 @@ describe('useAskAboutNode', () => {
         expect(useDiscussionsDrawer.getState().target).toMatchObject({
             subject: { type: 'view', id: 'v1' }, entity: { id: 'urn:a', label: 'Orders' }, compose: true,
         })
+    })
+
+    it('asks about a card the store does not hold — a trace card — by its name, not its id', () => {
+        useCanvasStore.setState({ nodes: [], edges: [] } as never)
+        const card = { id: 'trace:1', position: { x: 0, y: 0 }, data: { label: 'Orders', urn: 'urn:a', type: 'table' } }
+        const { result } = renderHook(() => useAskAboutNode((id) => (id === 'trace:1' ? card as never : null)))
+        act(() => result.current!('trace:1'))
+        expect(useDiscussionsDrawer.getState().target?.entity).toEqual({ id: 'urn:a', label: 'Orders', path: [], type: 'table' })
     })
 
     it('offers nothing while questions are off, or outside a saved view', () => {

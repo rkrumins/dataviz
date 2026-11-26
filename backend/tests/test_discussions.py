@@ -97,6 +97,36 @@ async def test_asking_reaches_the_owners_and_says_who_it_could_not(world, db_ses
 
 
 @pytest.mark.asyncio
+async def test_a_question_keeps_where_its_entity_sits_and_what_it_is(world, db_session, test_client):
+    out = await ask(test_client, db_session, clientKey="placed", entityId="urn:li:dataset:gl", entityLabel="amount",
+                    entityPath=["Finance", " ", "Ledger"], entityType="column")
+    thread = out["thread"]
+    assert (thread["entityLabel"], thread["entityPath"], thread["entityType"]) == (
+        "amount", ["Finance", "Ledger"], "column")                  # a blank name is dropped
+    r = await call(test_client, db_session, w.ADA, "GET", f"{BASE}/subjects/view/{w.V_WS}")
+    [listed] = r.json()["threads"]
+    assert (listed["entityPath"], listed["entityType"]) == (["Finance", "Ledger"], "column")
+
+    top = (await ask(test_client, db_session, clientKey="top", entityId="urn:li:dataset:top",
+                     entityLabel="top"))["thread"]
+    assert top["entityPath"] is None and top["entityType"] is None   # sits in nothing
+    loose = (await ask(test_client, db_session, clientKey="loose", entityPath=["Finance"],
+                       entityType="column"))["thread"]
+    assert loose["entityPath"] is None and loose["entityType"] is None  # about no entity
+
+    for refused in ({"entityPath": [f"level {i}" for i in range(33)]}, {"entityPath": ["x" * 201]},
+                    {"entityType": "t" * 201}):
+        await ask(test_client, db_session, clientKey=f"r-{len(str(refused))}", entityId="urn:li:dataset:gl",
+                  status=422, **refused)
+
+    row = await thread_row(db_session, thread["id"])
+    row.entity_path = "not json"                                   # unreadable: read as none, never an error
+    await db_session.commit()
+    r = await call(test_client, db_session, w.ADA, "GET", f"{BASE}/{thread['id']}")
+    assert r.status_code == 200 and r.json()["entityPath"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_retried_ask_is_answered_with_the_original(world, db_session, test_client):
     first = await ask(test_client, db_session, clientKey="same")
     again = await ask(test_client, db_session, clientKey="same", status=200)

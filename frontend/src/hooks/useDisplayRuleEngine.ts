@@ -146,6 +146,7 @@ export function useDisplayRuleEngine(
         if (!viewId || !(provider instanceof RemoteGraphProvider) || lineRules.length === 0) return
         if (answeredEdges.current.signature !== signature) {
             answeredEdges.current = { signature, ids: new Set() }
+            setMembershipNote(null)
         }
         const done = answeredEdges.current.ids
         const pending = [...new Map(edges

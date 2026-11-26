@@ -827,7 +827,8 @@ function DirectionColors({ disabled }: { disabled: boolean }) {
       <p className="pt-1 pb-2 text-[11px] text-ink-muted leading-snug">
         Incoming and outgoing lineage, the same everywhere — the ports on each
         card, the entity panel, the Focus Lens and traces. Lines outside a
-        trace keep the colour of their flow type.
+        trace keep the colour of their flow type, or of a display rule that
+        styles them.
       </p>
       <div role="radiogroup" aria-label="Lineage colours" className="grid grid-cols-2 gap-1">
         {LINEAGE_DIRECTION_PRESETS.map(preset => {
