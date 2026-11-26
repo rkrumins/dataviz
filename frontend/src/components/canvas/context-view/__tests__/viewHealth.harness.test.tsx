@@ -11,11 +11,15 @@
  *   • top-level entities of the types the view is about that it doesn't place are counted by one
  *     read per load, and offered: a column each, all into one column, or not now — remembered
  *     until the number changes. Never in an open view whose type layers load them anyway.
+ *     Only a view meant to show everything (complete) is offered them; a specialised one is
+ *     never asked about. One that says neither is asked once, by someone who can edit it, when
+ *     it holds every one of them today: keep it complete, or only what's here.
  */
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
 import { useCanvasStore } from '@/store/canvas'
+import { useAuthStore } from '@/store/auth'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
@@ -90,16 +94,34 @@ const answeringUnplaced = (p: GraphDataProvider): GraphDataProvider => ({
   },
 }) as GraphDataProvider
 
-const open = async (opts: { draft?: boolean; entityScope?: 'all' | 'curated' } = {}) => {
+// What the view's settings saves sent (PUT /views/{id}), answered as the server stores them.
+let viewSaves: Array<Record<string, unknown>> = []
+const answeringSaves = (url: string, init?: RequestInit) => {
+  if (init?.method !== 'PUT' || !/\/api\/v1\/views\/harness-view(\?|$)/.test(url)) return undefined
+  const body = JSON.parse(String(init.body)) as Record<string, unknown>
+  viewSaves.push(body)
+  return { id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws', viewType: 'reference', visibility: 'private',
+           config: { coverage: body.coverage } }
+}
+
+const openView = async (opts: { draft?: boolean; entityScope?: 'all' | 'curated'; coverage?: 'complete' | 'specialised' } = {}) => {
   const h = await renderCanvasWithTrace(healthEstate(), {
     focus: 'Ops', draft: opts.draft ?? true, deferTrace: true, entityTypes: ONTOLOGY,
-    entityScope: opts.entityScope, wrapProvider: answeringUnplaced,
+    entityScope: opts.entityScope, wrapProvider: answeringUnplaced, answer: answeringSaves,
   })
-  // The ontology's root type.
-  act(() => { useSchemaStore.setState((s) => ({ schema: { ...s.schema!, rootEntityTypes: ['domain'] } }) as never) })
+  // The ontology's root type, and whether the view is meant to show everything.
+  act(() => {
+    useSchemaStore.setState((s) => ({ schema: { ...s.schema!, rootEntityTypes: ['domain'] } }) as never)
+    if (opts.coverage) useSchemaStore.getState().updateView('harness-view', { coverage: opts.coverage })
+  })
   await h.settle()
   return h
 }
+const open = openView
+/** The reader may edit the view (its settings, not only its draft). */
+const asEditor = () => act(() => {
+  useAuthStore.setState({ permissions: { sid: 's', global: [], ws: { 'harness-ws': ['workspace:view:edit'] } } } as never)
+})
 
 /** A load of the view has finished: what it found missing is what it asked for and didn't get. */
 const loaded = async (h: TraceCanvasHarness, notFound: string[] = ['Gone1', 'Gone2', 'Vanished']) => {
@@ -140,7 +162,9 @@ const pick = async (h: TraceCanvasHarness, name: string) => {
 beforeEach(() => {
   sourceRoots = ['Finance', 'Sales', 'Marketing', 'Ops', 'Treasury', 'Legal', 'Research'].map(gn)
   asks = []
-  usePreferencesStore.setState({ unplacedRootsDismissed: {} } as never)
+  viewSaves = []
+  usePreferencesStore.setState({ unplacedRootsDismissed: {}, viewCoverageAsked: {} } as never)
+  useAuthStore.setState({ permissions: { sid: '', global: [], ws: {} } } as never)
   // Each test mounts before its view's load has run.
   useCanvasStore.setState({ placementsNotFound: null, hydrationStatus: 'loading' })
   useStagedChangesStore.setState({ changes: [], redoStack: [], past: [], isReviewPanelOpen: false })
@@ -292,6 +316,8 @@ describe('a column whose entity is no longer in this source', () => {
 
 describe('top-level entities this view doesn’t place', () => {
   const chip = (n = 3) => screen.queryByRole('button', { name: `${n} Domains aren’t in this view` })
+  // A view meant to show everything: the one that is offered them.
+  const open = (opts: Parameters<typeof openView>[0] = {}) => openView({ coverage: 'complete', ...opts })
 
   it('a curated view: ONE read per load, of the root types it is about and the entities it places of them', async () => {
     const h = await open()
@@ -387,5 +413,113 @@ describe('top-level entities this view doesn’t place', () => {
     const h = await open({ draft: false })
     await loaded(h)
     expect(chip()).toBeNull()
+  }, 30000)
+})
+
+describe('whether the view is offered new top-level entities', () => {
+  const offer = () => screen.queryByRole('button', { name: /Domains? (aren’t|isn’t) in this view/ })
+  const question = () => screen.queryByRole('button', { name: 'Keep this view complete?' })
+  const SHOWS_EVERYTHING = 'This view shows everything in this source.'
+  /** The source holds only the Domains the view places: it shows every one of them today. */
+  const holdsEveryRoot = () => { sourceRoots = ['Finance', 'Sales', 'Marketing', 'Ops'].map(gn) }
+
+  it('a specialised view: no read, and nothing said', async () => {
+    asEditor()
+    const h = await open({ coverage: 'specialised' })
+    await loaded(h)
+    expect(asks).toHaveLength(0)
+    expect(offer()).toBeNull()
+    expect(question()).toBeNull()
+  }, 30000)
+
+  it('a view that never said, to a reader who cannot edit it: no read, and nothing said', async () => {
+    const h = await open()
+    await loaded(h)
+    expect(asks).toHaveLength(0)
+    expect(offer()).toBeNull()
+    expect(question()).toBeNull()
+  }, 30000)
+
+  it('a view that never said, to an editor, leaving some out: one read, and nothing said — it is specialised', async () => {
+    asEditor()
+    const h = await open()
+    await loaded(h)
+    expect(asks).toHaveLength(1)
+    expect(offer()).toBeNull()
+    expect(question()).toBeNull()
+    expect(viewSaves).toEqual([])
+  }, 30000)
+
+  it('a view that never said, to an editor, holding every one: asked once — “Keep it complete” says so on the view', async () => {
+    holdsEveryRoot()
+    asEditor()
+    const h = await open()
+    await loaded(h)
+    expect(asks).toHaveLength(1)
+    expect(offer()).toBeNull()
+    await click(h, question()!)
+    expect(screen.getByText(SHOWS_EVERYTHING)).toBeInTheDocument()
+    expect(screen.getByText('Keep it complete as new top-level entities arrive?')).toBeInTheDocument()
+    // Nothing is written until a choice is made.
+    expect(viewSaves).toEqual([])
+
+    await click(h, screen.getByRole('button', { name: 'Keep it complete' }))
+    expect(viewSaves).toEqual([{ coverage: 'complete' }])
+    expect(useSchemaStore.getState().getActiveView()?.coverage).toBe('complete')
+    expect(question()).toBeNull()
+    expect(staged()).toEqual([])
+
+    // The next load: a complete view, holding every one — nothing to offer, and nothing to ask.
+    await loaded(h)
+    expect(asks).toHaveLength(2)
+    expect(question()).toBeNull()
+    expect(offer()).toBeNull()
+  }, 30000)
+
+  it('“No, only what’s here” makes it specialised: never read for again', async () => {
+    holdsEveryRoot()
+    asEditor()
+    const h = await open()
+    await loaded(h)
+    await click(h, question()!)
+    await click(h, screen.getByRole('button', { name: 'No, only what’s here' }))
+    expect(viewSaves).toEqual([{ coverage: 'specialised' }])
+    expect(useSchemaStore.getState().getActiveView()?.coverage).toBe('specialised')
+    expect(question()).toBeNull()
+
+    sourceRoots.push(gn('Treasury'))
+    await loaded(h)
+    expect(asks).toHaveLength(1)
+    expect(offer()).toBeNull()
+  }, 30000)
+
+  it('is asked once in this browser: opened again, answered or not, it is not asked again', async () => {
+    holdsEveryRoot()
+    asEditor()
+    let h = await open()
+    await loaded(h)
+    expect(question()).toBeInTheDocument()
+    expect(usePreferencesStore.getState().viewCoverageAsked).toEqual({ 'harness-view': true })
+
+    // The page is opened again, onto the view still saying nothing: the question was asked.
+    cleanup()
+    h = await open()
+    await loaded(h)
+    expect(question()).toBeNull()
+    expect(offer()).toBeNull()
+
+    // Answered before the page is opened again — onto a view that, read from anywhere that
+    // dropped it, still says nothing: not asked either.
+    cleanup()
+    usePreferencesStore.setState({ viewCoverageAsked: {} } as never)
+    h = await open()
+    await loaded(h)
+    await click(h, question()!)
+    await click(h, screen.getByRole('button', { name: 'Keep it complete' }))
+    cleanup()
+    h = await open()
+    await loaded(h)
+    expect(question()).toBeNull()
+    expect(viewSaves).toEqual([{ coverage: 'complete' }])
   }, 30000)
 })

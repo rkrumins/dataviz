@@ -322,6 +322,15 @@ interface PreferencesState {
   unplacedRootsDismissed: Record<string, number>
   dismissUnplacedRoots: (viewId: string, count: number) => void
 
+  /**
+   * The VIEWS whose editor this browser has asked whether to keep the view complete (a view
+   * that never said, holding every top-level entity of its types): marked when the question is
+   * shown, so it is asked once — answered or not — and never again here. The answer itself is
+   * the view's (`config.coverage`). Device-local, and pruned to the most recent ~200 views.
+   */
+  viewCoverageAsked: Record<string, true>
+  markViewCoverageAsked: (viewId: string) => void
+
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
@@ -638,6 +647,16 @@ export const usePreferencesStore = create<PreferencesState>()(
         const keys = Object.keys(others)
         for (const stale of keys.slice(0, Math.max(0, keys.length - 49))) delete others[stale]
         return { unplacedRootsDismissed: { ...others, [viewId]: count } }
+      }),
+
+      viewCoverageAsked: {},
+      markViewCoverageAsked: (viewId) => set((state) => {
+        // As above: insertion order is recency, and the oldest views beyond 200 go.
+        const others = { ...state.viewCoverageAsked }
+        delete others[viewId]
+        const keys = Object.keys(others)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - 199))) delete others[stale]
+        return { viewCoverageAsked: { ...others, [viewId]: true } }
       }),
 
       // Onboarding

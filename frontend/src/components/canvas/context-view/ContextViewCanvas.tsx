@@ -393,7 +393,7 @@ import { zoomScalesPercentages } from '@/lib/cssZoom'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
-import { deleteView, getView, updateViewLayout, viewToViewConfig } from '@/services/viewApiService'
+import { deleteView, getView, updateView, updateViewLayout, viewToViewConfig } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { useFailoverRetry } from '@/hooks/useFailoverRetry'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
@@ -7692,8 +7692,14 @@ export function ContextViewCanvas({
   // poll asks again — of the root types the view is about, sending what it places of them. An open
   // view's type layers load their types anyway: those are never asked about. A view placed by the
   // server (a subset, one that follows another) has nothing of its own to add them to.
+  // Only a view meant to show everything (coverage 'complete') is offered them. A specialised one —
+  // some domains, one domain, part of one — never is, so nothing is asked. A view that says neither
+  // (every view made before views said) is read for only by someone who can edit it, and only to
+  // ask, once, whether to keep it complete (below); a reader is never asked or offered anything.
+  const coverage = activeView?.coverage
+  const rootsRead = coverage === 'complete' || (coverage === undefined && viewCaps.canEdit)
   const rootsAsk = useMemo(() => {
-    if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || serverPlaced) return null
+    if (!rootsRead || !placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || serverPlaced) return null
     const assignments = activeReferenceLayout.assignments
     const typeOf = (urn: string) => nodeMap.get(urn)?.data?.type as string | undefined
     const entityTypes = rootTypesToCheck({
@@ -7704,7 +7710,7 @@ export function ContextViewCanvas({
     })
     if (entityTypes.length === 0) return null
     return { token: placementsCheck, entityTypes, placedUrns: placedOfTypes(assignments, typeOf, entityTypes) }
-  }, [placementsCheck, activeViewId, hydrationStatus, serverPlaced, activeReferenceLayout, nodeMap, creationRootTypes, sortedLayers, activeEntityScope, schemaEntityTypes])
+  }, [rootsRead, placementsCheck, activeViewId, hydrationStatus, serverPlaced, activeReferenceLayout, nodeMap, creationRootTypes, sortedLayers, activeEntityScope, schemaEntityTypes])
   const rootsAskRef = useRef(rootsAsk)
   useEffect(() => { rootsAskRef.current = rootsAsk })
   const [unplaced, setUnplaced] = useState<{ token: object; result: UnplacedTopLevelResult } | null>(null)
@@ -7726,8 +7732,9 @@ export function ContextViewCanvas({
   }, [rootsToken, provider])
   const dismissedRoots = usePreferencesStore((s) => (activeViewId ? s.unplacedRootsDismissed[activeViewId] : undefined))
   // What it found, less what has been placed since — said once the load is complete, outside a trace.
+  // Offered to a complete view only: a view that never said is not offered what it leaves out.
   const rootsFound = useMemo(() => {
-    if (!unplaced || unplaced.token !== placementsCheck || hydrationStatus !== 'ready' || traceActive || serverPlaced) return null
+    if (coverage !== 'complete' || !unplaced || unplaced.token !== placementsCheck || hydrationStatus !== 'ready' || traceActive || serverPlaced) return null
     if (dismissedRoots === unplaced.result.totalCount) return null
     const assignments = activeReferenceLayout.assignments
     const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
@@ -7741,7 +7748,7 @@ export function ContextViewCanvas({
     if (byType.length === 0) return null
     const nodes = unplaced.result.nodes.filter((n) => !placedNow(n.urn))
     return { byType, atLeast: !unplaced.result.complete, nodes, total: unplaced.result.totalCount }
-  }, [unplaced, placementsCheck, hydrationStatus, traceActive, serverPlaced, dismissedRoots, activeReferenceLayout, sortedLayers, schemaEntityTypes])
+  }, [coverage, unplaced, placementsCheck, hydrationStatus, traceActive, serverPlaced, dismissedRoots, activeReferenceLayout, sortedLayers, schemaEntityTypes])
   // The columns they can be placed in: any that isn't an entity's own, those for their types first.
   const rootsColumns = useMemo(() => {
     if (!rootsFound) return []
@@ -7822,6 +7829,40 @@ export function ContextViewCanvas({
       onNotNow: notNowRoots,
     }
   }, [rootsFound, layerEditsAllowed, subsetFollows, openDraftOffer, rootsColumns, addRootsAsColumns, addRootsToColumn, notNowRoots])
+  // ── Keep this view complete? (KeepCompleteChip) ──
+  // A view that never said, whose read found none it doesn't place: it holds every top-level entity
+  // of its types today. Whether on purpose can't be told from that, so its editor is asked, in the
+  // offer's place — once in this browser: marked when it is shown, answered or not, and never asked
+  // here again. It stays for as long as the page is open, so what was asked when it opened decides.
+  // Nothing is written to the view until an answer is chosen. A read that found some it doesn't
+  // place says nothing: such a view is a lens, specialised.
+  const [askedBefore] = useState(() => usePreferencesStore.getState().viewCoverageAsked)
+  const [answering, setAnswering] = useState<string | null>(null)
+  const askCoverage = coverage === undefined && viewCaps.canEdit && !!activeViewId && !askedBefore[activeViewId]
+    && answering !== activeViewId && !!unplaced && unplaced.token === placementsCheck && unplaced.result.totalCount === 0
+    && hydrationStatus === 'ready' && !traceActive && !serverPlaced
+  useEffect(() => {
+    if (askCoverage && activeViewId && !usePreferencesStore.getState().viewCoverageAsked[activeViewId]) {
+      usePreferencesStore.getState().markViewCoverageAsked(activeViewId)
+    }
+  }, [askCoverage, activeViewId])
+  // Saved on the view on its own (its settings, not its layout: never a draft's change).
+  const answerCoverage = useCallback((next: 'complete' | 'specialised') => {
+    if (!activeViewId) return
+    setAnswering(activeViewId)
+    updateView(activeViewId, { coverage: next })
+      .then(() => useSchemaStore.getState().updateView(activeViewId, { coverage: next }))
+      .catch((err) => {
+        notify('error', `Couldn’t save that: ${err instanceof Error ? err.message : 'the view could not be saved'}`)
+      })
+      // Saved, the view says; not saved, the question is back, to answer again.
+      .finally(() => setAnswering(null))
+  }, [activeViewId, notify])
+  const keepComplete = useMemo(() => (askCoverage ? {
+    sourceName: exportDataSourceName,
+    onKeep: () => answerCoverage('complete'),
+    onOnlyHere: () => answerCoverage('specialised'),
+  } : null), [askCoverage, exportDataSourceName, answerCoverage])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -9124,6 +9165,7 @@ export function ContextViewCanvas({
           goneColumns={goneColumns}
           onShowColumn={showColumn}
           unplacedRoots={unplacedRoots}
+          keepComplete={keepComplete}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}

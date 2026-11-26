@@ -14,7 +14,9 @@
  *    underlying detail is truncated; button pages more in.
  *  - "N Domains aren't in this view" — top-level entities of the types the
  *    view is about that it doesn't place (UnplacedRootsChip): a column each,
- *    all into one column, or not now.
+ *    all into one column, or not now. Only for a view meant to show everything.
+ *  - "Keep this view complete?" — in the same place, the one question a view
+ *    that never said is asked when it holds every one of them (KeepCompleteChip).
  *  - "The X column's entity is gone" — a column whose entity this source
  *    doesn't hold, while it is folded or scrolled out of sight; Show.
  *  - "N placements point at entities no longer in this source" — entities
@@ -47,6 +49,7 @@ import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { UnplacedRootsChip, type UnplacedRootsChipProps } from './UnplacedRootsChip'
+import { KeepCompleteChip, type KeepCompleteChipProps } from './KeepCompleteChip'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
@@ -97,6 +100,7 @@ export function CanvasStatusChips({
   goneColumns = [],
   onShowColumn,
   unplacedRoots,
+  keepComplete,
   canEdit = false,
 }: {
   /** Flows from a drawn row whose other end is outside the view: none in a
@@ -146,6 +150,9 @@ export function CanvasStatusChips({
   onShowColumn?: (layerId: string) => void
   /** Top-level entities of the types the view is about that it doesn't place, and what to do. */
   unplacedRoots?: UnplacedRootsChipProps | null
+  /** A view that never said whether it is meant to show everything, holding every one of them:
+   *  keep it complete, or only what's here. Asked in the unplaced roots' place. */
+  keepComplete?: KeepCompleteChipProps | null
   /** The viewer can edit the view. Without it the chips state the facts, and
    *  leave out what editing the view would do about them. */
   canEdit?: boolean
@@ -163,7 +170,7 @@ export function CanvasStatusChips({
   const showNotFound = notFoundPlacements.length > 0
   const showGone = goneColumns.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound && !showGone && !unplacedRoots) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound && !showGone && !unplacedRoots && !keepComplete) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -390,7 +397,7 @@ export function CanvasStatusChips({
         </PopoverPrimitive.Root>
       )}
 
-      {unplacedRoots && <UnplacedRootsChip {...unplacedRoots} />}
+      {unplacedRoots ? <UnplacedRootsChip {...unplacedRoots} /> : keepComplete && <KeepCompleteChip {...keepComplete} />}
 
       {showGone && (
         <div className={CHIP_CLASS}>
