@@ -54,8 +54,7 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
     const source = primarySource(workspace)
     const settled = useDebouncedValue(layers, 400)
     const schema = useWorkspaceEntityTypes(workspace.id, source?.id)
-    // Fitted once the source's schema is read, as a view built from it would be.
-    const fit = useMemo(() => (schema.types ? fitTemplate(settled, schema.target) : null), [settled, schema.types, schema.target])
+    const fit = useMemo(() => (schema.types ? fitTemplate(settled, schema.types) : null), [settled, schema.types])
     const sampled = useMemo(() => (fit ? sampleTypes(fit.layers) : []), [fit])
     const contract = useFeature('placementContractEnabled')
     const pages = useQueries({

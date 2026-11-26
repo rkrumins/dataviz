@@ -1,9 +1,8 @@
 /**
  * "Preview with real data": nothing is read until it is opened; then a few
  * real entities land in the layers a view built from the template would put
- * them in, with how many there are in all. The template is fitted the way the
- * wizard fits it — by name, else by the data's hierarchy — and nothing says it
- * "doesn't match".
+ * them in, with how many there are in all. The template is applied as a view
+ * applies it, and nothing says it "doesn't match".
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -11,9 +10,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NodeQuery } from '@/providers/GraphDataProvider'
 import type { ViewLayerConfig } from '@/types/schema'
 
-const { getNodesPage, wsState, schema } = vi.hoisted(() => ({
+const { getNodesPage, wsState } = vi.hoisted(() => ({
     getNodesPage: vi.fn(),
-    schema: { types: ['Table', 'Dashboard'] as string[] | null, target: null as unknown },
     wsState: {
         activeWorkspaceId: 'ws_fin',
         workspaces: [{ id: 'ws_fin', name: 'Finance', dataSources: [{ id: 'ds_fin', isPrimary: true }] }] as unknown[],
@@ -22,7 +20,7 @@ const { getNodesPage, wsState, schema } = vi.hoisted(() => ({
 
 vi.mock('@/providers/providerPool', () => ({ getOrCreateProvider: () => ({ getNodesPage }) }))
 vi.mock('@/hooks/useWorkspaceEntityTypes', () => ({
-    useWorkspaceEntityTypes: () => ({ types: schema.types, target: schema.target, isLoading: false, isError: false }),
+    useWorkspaceEntityTypes: () => ({ types: ['Table', 'Dashboard'], isLoading: false, isError: false }),
 }))
 vi.mock('@/store/workspaces', () => {
     const useWorkspacesStore = Object.assign(
@@ -41,19 +39,17 @@ const LAYERS: ViewLayerConfig[] = [
     { id: 'man', name: 'Curated', entityTypes: [], order: 2 },
 ]
 
-function renderPreview(layers: ViewLayerConfig[] = LAYERS) {
+function renderPreview() {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
         <QueryClientProvider client={client}>
-            <TemplateLivePreview layers={layers} />
+            <TemplateLivePreview layers={LAYERS} />
         </QueryClientProvider>,
     )
 }
 
 beforeEach(() => {
     vi.clearAllMocks()
-    schema.types = ['Table', 'Dashboard']
-    schema.target = { types: [{ id: 'Table' }, { id: 'Dashboard' }] }
     useAuthStore.setState({ permissions: { global: [], ws: { ws_fin: ['workspace:datasource:read'] } } } as never)
     getNodesPage.mockImplementation(async ({ entityTypes }: NodeQuery) => {
         const type = entityTypes![0]
@@ -89,24 +85,6 @@ describe('TemplateLivePreview', () => {
         expect(getNodesPage).not.toHaveBeenCalledWith(expect.objectContaining({ entityTypes: ['Chart'] }))
         expect(screen.queryByText(/matches \d+ of \d+ layers/)).not.toBeInTheDocument()
         expect(screen.queryByText(/Not in Finance's semantic layer/)).not.toBeInTheDocument()
-    })
-
-    it("fills a stage template's layers from the data's hierarchy, as the wizard would", async () => {
-        schema.types = ['Domain', 'Table']
-        schema.target = {
-            types: [{ id: 'Domain', pluralName: 'Domains' }, { id: 'Table', pluralName: 'Tables' }],
-            levels: [['Domain'], ['Table']],
-        }
-        renderPreview([
-            { id: 'raw', name: 'Raw', entityTypes: ['raw'], order: 0 },
-            { id: 'cur', name: 'Curated', entityTypes: ['curated'], order: 1 },
-        ])
-        fireEvent.click(screen.getByRole('button', { name: /preview with real data/i }))
-
-        const raw = await screen.findByRole('group', { name: 'Raw' })
-        await waitFor(() => expect(getNodesPage).toHaveBeenCalledWith({ entityTypes: ['Domain'], limit: 6 }))
-        expect(getNodesPage).toHaveBeenCalledWith({ entityTypes: ['Table'], limit: 6 })
-        expect(within(raw).getByText(/Domain:/)).toBeInTheDocument()
     })
 
     it('says so when the data cannot be read, and keeps the template', async () => {

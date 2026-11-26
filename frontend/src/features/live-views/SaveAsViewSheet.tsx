@@ -14,7 +14,7 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 
-import { fitOutcome, fitTargetOf, fitTemplate } from '@/components/templates/templateFit'
+import { fitTemplate } from '@/components/templates/templateFit'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Kbd } from '@/components/ui/Kbd'
 import { Segmented } from '@/components/ui/Segmented'
@@ -27,7 +27,7 @@ import { cn } from '@/lib/utils'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { createFromMembers } from '@/services/liveViewsApi'
 import type { View } from '@/services/viewApiService'
-import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
+import { useSchemaEntityTypes } from '@/store/schema'
 import type { MembershipPlan, MembershipResolving } from '@/types/membership'
 
 import {
@@ -113,17 +113,10 @@ export function SaveAsViewSheet({
   const [idempotencyKey] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`))
 
   const { templates, isLoading: templatesLoading } = useLayoutTemplates({ enabled: choices.choice === 'template' })
-  // A template is fitted to this data the way the view wizard fits it.
   const declared = useSchemaEntityTypes()
-  const relationshipTypes = useSchemaStore((s) => s.schema?.relationshipTypes)
-  const rootEntityTypes = useSchemaStore((s) => s.schema?.rootEntityTypes)
-  const containmentEdgeTypes = useSchemaStore((s) => s.schema?.containmentEdgeTypes)
-  const target = useMemo(
-    () => fitTargetOf({ entityTypes: declared, relationshipTypes, rootEntityTypes, containmentEdgeTypes }),
-    [declared, relationshipTypes, rootEntityTypes, containmentEdgeTypes],
-  )
+  const declaredIds = useMemo(() => declared.map((t) => t.id), [declared])
   const template = templates.find((t) => t.id === choices.templateId) ?? null
-  const fit = useMemo(() => (template ? fitTemplate(template.layers, target) : null), [template, target])
+  const fit = useMemo(() => (template ? fitTemplate(template.layers, declaredIds.length ? declaredIds : null) : null), [template, declaredIds])
 
   const withTemplate: SaveChoices = {
     ...choices,
@@ -280,7 +273,7 @@ export function SaveAsViewSheet({
               {choices.choice === 'template' && (
                 <TemplateList
                   loading={templatesLoading}
-                  templates={templates.map((t) => ({ id: t.id, name: t.name, layers: t.layers.length, outcome: fitOutcome(fitTemplate(t.layers, target), target) }))}
+                  templates={templates.map((t) => ({ id: t.id, name: t.name, layers: t.layers.length }))}
                   value={choices.templateId}
                   onChange={(templateId) => setChoices((c) => ({ ...c, templateId }))}
                 />
@@ -421,7 +414,7 @@ function Switch({ checked, onChange, label, labelledBy }: {
 
 function TemplateList({ loading, templates, value, onChange }: {
   loading: boolean
-  templates: Array<{ id: string; name: string; layers: number; outcome: ReturnType<typeof fitOutcome> }>
+  templates: Array<{ id: string; name: string; layers: number }>
   value?: string
   onChange: (id: string) => void
 }) {
@@ -439,10 +432,6 @@ function TemplateList({ loading, templates, value, onChange }: {
     <ul role="radiogroup" aria-label="Template" className="max-h-48 overflow-y-auto custom-scrollbar rounded-xl border border-glass-border/70 divide-y divide-glass-border/50">
       {templates.map((t) => {
         const on = t.id === value
-        // What its layers will hold here, else how many it has.
-        const holds = t.outcome?.filled.length
-          ? [t.outcome.filled.join(' · '), ...(t.outcome.byHand ? [`${t.outcome.byHand} by hand`] : [])].join(' · ')
-          : `${t.layers} ${t.layers === 1 ? 'layer' : 'layers'}`
         return (
           <li key={t.id}>
             <button
@@ -458,8 +447,8 @@ function TemplateList({ loading, templates, value, onChange }: {
                 </span>
                 <span className="truncate text-[13px] text-ink">{t.name}</span>
               </span>
-              <span className="min-w-0 max-w-[60%] truncate text-[11.5px] text-ink-muted" title={holds}>
-                {holds}
+              <span className="flex-none text-[11.5px] tabular-nums text-ink-muted">
+                {`${t.layers} ${t.layers === 1 ? 'layer' : 'layers'}`}
               </span>
             </button>
           </li>

@@ -20,13 +20,7 @@ vi.mock('@/hooks/useLayoutTemplates', () => ({
     error: null,
   }),
 }))
-vi.mock('@/store/schema', () => {
-  const schema = { entityTypes: [{ id: 'table', name: 'Table', pluralName: 'Tables' }], rootEntityTypes: [], relationshipTypes: [], containmentEdgeTypes: [] }
-  return {
-    useSchemaEntityTypes: () => schema.entityTypes,
-    useSchemaStore: (selector: (s: { schema: typeof schema }) => unknown) => selector({ schema }),
-  }
-})
+vi.mock('@/store/schema', () => ({ useSchemaEntityTypes: () => [{ id: 'table' }] }))
 
 import { specFor } from '@/features/narrow/model'
 
@@ -82,8 +76,8 @@ describe('SaveAsViewSheet', () => {
     await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout.kind).toBe('auto'))
     fireEvent.click(screen.getByRole('radio', { name: /From a template/ }))
     expect(await screen.findByText(/Choose a template/)).toBeInTheDocument()
-    // Each template says what its layers will hold here, never how far it falls short.
-    expect(screen.getByRole('radio', { name: /Medallion/ })).toHaveTextContent('Tables')
+    // Each template is offered as it is: no claim about how it fits this data.
+    expect(screen.getByRole('radio', { name: /Medallion/ })).toHaveTextContent('1 layer')
     expect(screen.queryByText(/Fits \d+ of/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('radio', { name: /Medallion/ }))
     await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout).toMatchObject({ kind: 'template', templateId: 'tpl' }))

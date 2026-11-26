@@ -10,9 +10,8 @@
  */
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { fitTargetOf, type FitTarget } from '@/components/templates/templateFit'
 import { getOrCreateProvider } from '@/providers/providerPool'
-import { convertBackendEntityType, convertBackendRelationshipType } from '@/store/schema'
+import { convertBackendEntityType } from '@/store/schema'
 
 export function useWorkspaceEntityTypes(workspaceId?: string | null, dataSourceId?: string | null) {
     const enabled = !!workspaceId && !!dataSourceId
@@ -29,12 +28,5 @@ export function useWorkspaceEntityTypes(workspaceId?: string | null, dataSourceI
         () => (query.data ? (query.data.entityTypes ?? []).map(t => convertBackendEntityType(t).id) : null),
         [query.data],
     )
-    /** What a template is fitted to on this source, the way the view wizard fits it. */
-    const target = useMemo((): FitTarget | null => (query.data ? fitTargetOf({
-        entityTypes: (query.data.entityTypes ?? []).map(convertBackendEntityType),
-        relationshipTypes: (query.data.relationshipTypes ?? []).map(convertBackendRelationshipType),
-        rootEntityTypes: query.data.rootEntityTypes ?? [],
-        containmentEdgeTypes: query.data.containmentEdgeTypes ?? [],
-    }) : null), [query.data])
-    return { types, target, isLoading: enabled && query.isLoading, isError: query.isError }
+    return { types, isLoading: enabled && query.isLoading, isError: query.isError }
 }

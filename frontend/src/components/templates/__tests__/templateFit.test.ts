@@ -1,14 +1,13 @@
 /**
- * Fitting a layout template to a view's data: each layer is filled with the
- * data's own types — by a hint's name, else by its place in the hierarchy —
- * or left for the person to fill. No layer is dropped, nothing is claimed
- * when the data's types are not known, rules that could never match are
- * dropped rather than left to match everything, and the new view owns fresh
- * layer ids.
+ * Layout templates and the data a view reads. Applied, a template comes in as
+ * authored: the hints the data declares in its spelling, the rest dropped — or
+ * all kept when the data's types are not known — and rules that could never
+ * match dropped rather than left to match everything. Asked for, suggestions
+ * fill the layers nothing fills yet: by name, else by the hierarchy's levels.
  */
 import { describe, expect, it } from 'vitest'
 import type { ViewLayerConfig } from '@/types/schema'
-import { fitOutcome, fitTargetOf, fitTemplate, normaliseTypeName, type TemplateFit } from '../templateFit'
+import { fitTargetOf, fitTemplate, normaliseTypeName, suggestFills } from '../templateFit'
 
 const LAYERS: ViewLayerConfig[] = [
     { id: 'a', name: 'Domains', entityTypes: ['domain', 'bounded-context'], order: 0, color: '#123456' },
@@ -43,126 +42,32 @@ const DSD = [
 ]
 const DSD_TARGET = fitTargetOf({ entityTypes: DSD, rootEntityTypes: ['Domain'] })
 
-const typesOf = (fit: TemplateFit) => fit.layers.map(l => l.entityTypes)
-const howOf = (fit: TemplateFit) => fit.layers.map(l => fit.fills[l.id].by)
+const layer = (id: string, name: string, entityTypes: string[] = [], over: Partial<ViewLayerConfig> = {}): ViewLayerConfig =>
+    ({ id, name, entityTypes, order: 0, ...over })
 
-describe('fitTemplate — by name', () => {
-    it("resolves hints to the data's own spelling, ignoring case, separators and plurals", () => {
-        const fit = fitTemplate([
-            { id: 'a', name: 'A', entityTypes: ['DATA_PRODUCTS'], order: 0 },
-            { id: 'b', name: 'B', entityTypes: ['dashboards'], order: 1 },
-            { id: 'c', name: 'C', entityTypes: ['data-base'], order: 2 },
-            { id: 'd', name: 'D', entityTypes: ['business categories'], order: 3 },
-        ], { types: [{ id: 'dataProduct' }, { id: 'Dashboard' }, { id: 'Databases' }, { id: 'BusinessCategory' }] })
-        expect(typesOf(fit)).toEqual([['dataProduct'], ['Dashboard'], ['Databases'], ['BusinessCategory']])
-        expect(howOf(fit)).toEqual(['name', 'name', 'name', 'name'])
-    })
-
-    it("matches a hint to a type's name or plural name when its id says nothing", () => {
-        const fit = fitTemplate(
-            [{ id: 'a', name: 'Reports', entityTypes: ['report'], order: 0 }],
-            { types: [{ id: 'rpt_v2', name: 'Report', pluralName: 'Reports' }] },
-        )
-        expect(typesOf(fit)).toEqual([['rpt_v2']])
-    })
-
-    it('fits a template written in the data\'s own vocabulary exactly, by name alone', () => {
-        const fit = fitTemplate([
-            { id: 'd', name: 'Domains', entityTypes: ['domain'], order: 0 },
-            { id: 's', name: 'Systems', entityTypes: ['system'], order: 1 },
-            { id: 't', name: 'Datasets', entityTypes: ['dataset'], order: 2 },
-        ], DSD_TARGET)
-        expect(typesOf(fit)).toEqual([['Domain'], ['System'], ['Dataset']])
-        expect(howOf(fit)).toEqual(['name', 'name', 'name'])
-        expect(fit.matchedLayers).toBe(3)
-        expect(fit.unmatchedTypes).toEqual([])
-    })
-
-    it("keeps the hints that name the data's types and reports the rest", () => {
+describe('fitTemplate — a template applied as authored', () => {
+    it("keeps the hints the data declares, in its spelling, once, and drops the rest", () => {
         const fit = fitTemplate(LAYERS, ['Dataset', 'System'])
-        expect(typesOf(fit)).toEqual([[], ['Dataset'], []])
-        expect(fit.typedLayers).toBe(2)
-        expect(fit.matchedLayers).toBe(1)
-        expect(fit.unmatchedTypes).toEqual(['bounded-context', 'domain', 'table'])
+        expect(fit.layers.map(l => l.entityTypes)).toEqual([[], ['Dataset'], []])
     })
-})
 
-describe('fitTemplate — by level', () => {
-    it('fills the built-in Analytics Pipeline from a Domain / System / Dataset hierarchy, in order', () => {
+    it('never fills a layer by name or by level', () => {
         const fit = fitTemplate(ANALYTICS_PIPELINE, DSD_TARGET)
-        // Nothing matches by name; the stages take the levels coarsest first,
-        // and the one stage past the last level stays — empty, for the person.
         expect(fit.layers.map(l => l.name)).toEqual(['Raw', 'Curated', 'Aggregated', 'Dashboard'])
-        expect(typesOf(fit)).toEqual([['Domain'], ['System'], ['Dataset'], []])
-        expect(howOf(fit)).toEqual(['level', 'level', 'level', 'none'])
-        expect(fit.matchedLayers).toBe(3)
+        expect(fit.layers.map(l => l.entityTypes)).toEqual([[], [], [], []])
+        // A plural is not the type: matching by name is a suggestion, not the template.
+        expect(fitTemplate([layer('d', 'D', ['dashboards'])], ['Dashboard']).layers[0].entityTypes).toEqual([])
     })
 
-    it('fills only the levels between the layers matched by name around it', () => {
-        const fit = fitTemplate([
-            { id: 'top', name: 'Top', entityTypes: ['domains'], order: 0 },
-            { id: 'mid', name: 'Middle', entityTypes: ['platform'], order: 1 },
-            { id: 'leaf', name: 'Leaves', entityTypes: ['dataset'], order: 2 },
-            { id: 'after', name: 'After', entityTypes: ['consumer'], order: 3 },
-        ], DSD_TARGET)
-        expect(typesOf(fit)).toEqual([['Domain'], ['System'], ['Dataset'], []])
-        expect(howOf(fit)).toEqual(['name', 'level', 'name', 'none'])
-    })
-
-    it('never fills a layer with a type another layer already holds', () => {
-        const fit = fitTemplate([
-            { id: 'x', name: 'X', entityTypes: ['foo'], order: 0 },
-            { id: 'd', name: 'Domains', entityTypes: ['domain'], order: 1 },
-        ], DSD_TARGET)
-        // Domain is level 0 and already taken; nothing lies above it.
-        expect(typesOf(fit)).toEqual([[], ['Domain']])
-    })
-
-    it('leaves a layer without hints to be filled by hand', () => {
-        const fit = fitTemplate([
-            { id: 'a', name: 'Stage', entityTypes: ['stage'], order: 0 },
-            { id: 'b', name: 'Watchlist', entityTypes: [], order: 1 },
-            { id: 'c', name: 'Stage 2', entityTypes: ['stage2'], order: 2 },
-        ], DSD_TARGET)
-        expect(typesOf(fit)).toEqual([['Domain'], [], ['System']])
-        expect(howOf(fit)).toEqual(['level', 'none', 'level'])
-    })
-
-    it('leaves a layer its rules still place alone', () => {
-        const fit = fitTemplate([
-            { id: 'a', name: 'Tagged', entityTypes: ['stage'], order: 0, rules: [{ id: 'r', tags: ['pii'], priority: 1 }] },
-            { id: 'b', name: 'Next', entityTypes: ['stage'], order: 1 },
-        ], DSD_TARGET)
-        expect(typesOf(fit)).toEqual([[], ['Domain']])
-    })
-
-    it('does not fill by level from a flat ontology, which has no order to follow', () => {
-        const flat = fitTargetOf({
-            entityTypes: DSD.map(t => ({ ...t, hierarchy: { level: 0, canContain: [] } })),
-        })
-        const fit = fitTemplate(ANALYTICS_PIPELINE, flat)
-        expect(typesOf(fit)).toEqual([[], [], [], []])
-        expect(howOf(fit)).toEqual(['none', 'none', 'none', 'none'])
-    })
-})
-
-describe('fitTemplate — when the data has no types to fit to', () => {
     it.each([['not known', null], ['an empty ontology', []], ['no entity types', { types: [] }]] as const)(
-        'keeps every hint as written and claims nothing (%s)',
+        'keeps every hint as written when the data declares no types (%s)',
         (_, target) => {
             const fit = fitTemplate(LAYERS, target)
-            expect(typesOf(fit)).toEqual([['domain', 'bounded-context'], ['DATASET', 'dataset', 'table'], []])
-            expect(howOf(fit)).toEqual(['template', 'template', 'none'])
+            expect(fit.layers.map(l => l.entityTypes)).toEqual([['domain', 'bounded-context'], ['DATASET', 'dataset', 'table'], []])
             expect(fit.layers[1].rules).toEqual(LAYERS[1].rules)
-            expect(fit.typedLayers).toBe(0)
-            expect(fit.matchedLayers).toBe(0)
-            expect(fit.unmatchedTypes).toEqual([])
-            expect(fitOutcome(fit, null)).toBeNull()
         },
     )
-})
 
-describe('fitTemplate — structure', () => {
     it('drops a rule that could only ever match unknown types, at any depth', () => {
         const [, products] = fitTemplate(LAYERS, ['Dataset']).layers
         expect(products.rules).toEqual([
@@ -179,7 +84,6 @@ describe('fitTemplate — structure', () => {
         expect(fit.layers.map(l => l.order)).toEqual([0, 1, 2])
         expect(fit.layers.map(l => l.id)).not.toContain('a')
         expect(new Set(fit.layers.map(l => l.id)).size).toBe(3)
-        expect(Object.keys(fit.fills).sort()).toEqual(fit.layers.map(l => l.id).sort())
     })
 
     it('remembers the template layer each column came from, for its later versions', () => {
@@ -188,15 +92,65 @@ describe('fitTemplate — structure', () => {
     })
 })
 
-describe('fitOutcome', () => {
-    it("says what the columns will hold, in the data's own words", () => {
-        const fit = fitTemplate(ANALYTICS_PIPELINE, DSD_TARGET)
-        expect(fitOutcome(fit, DSD_TARGET)).toEqual({ filled: ['Domains', 'Systems', 'Datasets'], byHand: 1 })
+describe('suggestFills — by name', () => {
+    it("matches a hint to the data's types, ignoring case, separators and plurals", () => {
+        const layers = [layer('a', 'A'), layer('b', 'B'), layer('c', 'C'), layer('d', 'D')]
+        const hints: Record<string, string[]> = { a: ['DATA_PRODUCTS'], b: ['dashboards'], c: ['data-base'], d: ['business categories'] }
+        const suggested = suggestFills(layers, { types: [{ id: 'dataProduct' }, { id: 'Dashboard' }, { id: 'Databases' }, { id: 'BusinessCategory' }] },
+            l => hints[l.id])
+        expect(suggested).toEqual({
+            a: { types: ['dataProduct'], by: 'name' }, b: { types: ['Dashboard'], by: 'name' },
+            c: { types: ['Databases'], by: 'name' }, d: { types: ['BusinessCategory'], by: 'name' },
+        })
     })
 
-    it('counts the layers a person fills when nothing fills them', () => {
-        const fit = fitTemplate([{ id: 'a', name: 'Bronze', entityTypes: [], order: 0 }], DSD_TARGET)
-        expect(fitOutcome(fit, DSD_TARGET)).toEqual({ filled: [], byHand: 1 })
+    it("reads the layer's own name, and a type's name or plural name", () => {
+        const suggested = suggestFills([layer('r', 'Reports')], { types: [{ id: 'rpt_v2', name: 'Report', pluralName: 'Reports' }] })
+        expect(suggested).toEqual({ r: { types: ['rpt_v2'], by: 'name' } })
+    })
+})
+
+describe('suggestFills — by level', () => {
+    it('fills the built-in Analytics Pipeline from a Domain / System / Dataset hierarchy, in order', () => {
+        const applied = fitTemplate(ANALYTICS_PIPELINE, DSD_TARGET).layers
+        const hints = new Map(ANALYTICS_PIPELINE.map(l => [l.id, l.entityTypes]))
+        const suggested = suggestFills(applied, DSD_TARGET, l => hints.get(l.templateLayerId!) ?? [])
+        // The stages take the levels coarsest first; the one past the last level gets nothing.
+        expect(applied.map(l => suggested[l.id] ?? null)).toEqual([
+            { types: ['Domain'], by: 'level' }, { types: ['System'], by: 'level' }, { types: ['Dataset'], by: 'level' }, null,
+        ])
+    })
+
+    it('fills only the levels between the layers already filled around it', () => {
+        const suggested = suggestFills([
+            layer('top', 'Top', ['Domain']), layer('mid', 'Middle'), layer('leaf', 'Leaves', ['Dataset']), layer('after', 'After'),
+        ], DSD_TARGET)
+        expect(suggested).toEqual({ mid: { types: ['System'], by: 'level' } })
+    })
+
+    it('never suggests a type another layer holds', () => {
+        expect(suggestFills([layer('x', 'X'), layer('d', 'Domains', ['Domain'])], DSD_TARGET)).toEqual({})
+        expect(suggestFills([layer('d', 'Domain', ['Domain']), layer('y', 'Domains')], DSD_TARGET))
+            .toEqual({ y: { types: ['System'], by: 'level' } })
+    })
+
+    it('leaves alone a layer its rules or its entity fill', () => {
+        const suggested = suggestFills([
+            layer('a', 'Tagged', [], { rules: [{ id: 'r', tags: ['pii'], priority: 1 }] }),
+            layer('b', 'Finance', [], { anchorUrn: 'urn:finance' }),
+            layer('c', 'Next'),
+        ], DSD_TARGET)
+        expect(suggested).toEqual({ c: { types: ['Domain'], by: 'level' } })
+    })
+
+    it('does not suggest by level from a flat ontology, which has no order to follow', () => {
+        const flat = fitTargetOf({ entityTypes: DSD.map(t => ({ ...t, hierarchy: { level: 0, canContain: [] } })) })
+        expect(suggestFills([layer('a', 'Raw'), layer('b', 'Curated')], flat)).toEqual({})
+    })
+
+    it('suggests nothing when the data declares no types', () => {
+        expect(suggestFills([layer('a', 'Domains')], null)).toEqual({})
+        expect(suggestFills([layer('a', 'Domains')], { types: [] })).toEqual({})
     })
 })
 
