@@ -19,12 +19,19 @@ import type { LayoutTemplate } from '@/services/layoutTemplateService'
 // case can give the source an ontology, or hold it loading.
 const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], rootEntityTypes: [] as string[], isLoading: false }))
 const lib = vi.hoisted(() => ({ templates: [] as unknown[], isLoading: false, enabled: true }))
+// The source's top-level entities per root type, as the Layout step reads them.
+const top = vi.hoisted(() => ({ byType: new Map<string, unknown>(), isLoading: false }))
 
 vi.mock('@/hooks/useDataSourceSchema', () => ({
   useDataSourceSchema: () => ({
     entityTypes: ds.entityTypes, relationshipTypes: [], rootEntityTypes: ds.rootEntityTypes, containmentEdgeTypes: [],
     isLoading: ds.isLoading, isError: false,
   }),
+}))
+
+vi.mock('../../useTopLevelEntities', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../useTopLevelEntities')>()),
+  useTopLevelEntities: () => top,
 }))
 
 vi.mock('@/hooks/useLayoutTemplates', () => ({
@@ -101,6 +108,19 @@ const DSD = [
   { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 2, canContain: [] }, visual: { color: '#059669' } },
 ]
 
+const TEAM = { id: 'Team', name: 'Team', pluralName: 'Teams', hierarchy: { level: 0, canContain: [] }, visual: { color: '#ea580c' } }
+
+/** A root type's top-level entities: these names, and how many there are in all. */
+function ofType(type: string, names: string[], count = names.length) {
+  return {
+    entities: names.slice(0, 201).map(name => ({ urn: `urn:${type}:${name}`, name, type, childCount: 2 })),
+    count, over: count > 200,
+  }
+}
+const named = (n: number, prefix = 'Unit') => Array.from({ length: n }, (_, i) => `${prefix} ${String(i + 1).padStart(3, '0')}`)
+const PER_TYPE = 'One layer per top-level type'
+const PER_ENTITY = 'One column per top-level entity'
+
 /** The layer editor's row for a layer. */
 const layerRow = (name: string) => screen.getByText(name, { selector: 'span' }).closest('li') as HTMLElement
 const SUGGESTED = 'Suggested from your data'
@@ -143,6 +163,8 @@ function Harness({ spy, ...props }: { spy: (u: Partial<WizardFormData>) => void 
 afterEach(() => {
   ds.entityTypes = []
   ds.rootEntityTypes = []
+  top.byType = new Map()
+  top.isLoading = false
   useSchemaStore.setState({ schema: null })
   ds.isLoading = false
   lib.templates = []
@@ -371,7 +393,11 @@ describe('LayoutStep — a brand-new model', () => {
 
     expect(screen.getByText('From your ontology')).toBeInTheDocument()
     expect(screen.getByText('Start empty')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('One layer per top-level type'))
+    // Root types come from the ontology alone: chips, with no counts to show.
+    const card = screen.getByRole('group', { name: PER_TYPE })
+    expect(within(card).getByRole('button', { name: 'Domain' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('group', { name: PER_ENTITY })).not.toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 1 layer' }))
 
     const call = spy.mock.calls[0][0]
     expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domains'])
@@ -379,5 +405,115 @@ describe('LayoutStep — a brand-new model', () => {
     expect(call.layoutTemplateId).toBe('per-root-type')
     // Its layers place by rule, which resolves only in open scope.
     expect(call.entityScope).toBe('all')
+  })
+})
+
+describe('LayoutStep — layers from the top of the data', () => {
+  it('one layer per top-level type uses every root type, and makes only the ones chosen', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', named(5))], ['Team', ofType('Team', named(3))]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_TYPE })
+    expect(within(card).getByText('Recommended')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Domain · 5' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(card).getByRole('button', { name: 'Team · 3' })).toHaveAttribute('aria-pressed', 'true')
+    expect(card).toHaveTextContent('2 layers: Domains, Teams')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Team · 3' }))
+    expect(card).toHaveTextContent('1 layer: Domains')
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 1 layer' }))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domains'])
+    expect(call.layers[0].entityTypes).toEqual(['Domain'])
+    expect(call.entityScope).toBe('all')
+  })
+
+  it('a single root type with a few entities recommends a column each, and lets some be left out', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance', 'Marketing', 'Ops', 'Sales', 'Support'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    expect(within(card).getByText('Recommended')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: PER_TYPE })).queryByText('Recommended')).not.toBeInTheDocument()
+    expect(within(card).getByText('One column per Domain')).toBeInTheDocument()
+    expect(card).toHaveTextContent('5 columns: Finance, Marketing, Ops, …')
+    expect(within(card).getByRole('button', { name: 'Domain · 5' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 5 columns' }))
+    expect(within(card).getByRole('checkbox', { name: 'Finance' })).toBeChecked()
+    fireEvent.click(within(card).getByRole('checkbox', { name: 'Ops' }))
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 4 columns' }))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Finance', 'Marketing', 'Sales', 'Support'])
+    expect(call.layers.map((l: { anchorUrn: string }) => l.anchorUrn)).toEqual(
+      ['urn:Domain:Finance', 'urn:Domain:Marketing', 'urn:Domain:Sales', 'urn:Domain:Support'])
+    expect(Object.keys(call.assignments).sort()).toEqual(call.layers.map((l: { anchorUrn: string }) => l.anchorUrn).sort())
+    expect(call.entityScope).toBe('curated')
+    expect(call.layoutTemplateId).toBe('per-entity')
+  })
+
+  it('a single entity makes one column for it, at once', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    expect(within(card).getByText('One column for Finance')).toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 1 column' }))
+    expect(spy.mock.calls.at(-1)![0].layers.map((l: { name: string }) => l.name)).toEqual(['Finance'])
+  })
+
+  it('more than 24 columns asks first, with no list to pick from', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', named(30))]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 30 columns' }))
+    expect(spy).not.toHaveBeenCalled()
+    expect(card).toHaveTextContent('30 columns make a wide view')
+    expect(within(card).queryByRole('checkbox')).not.toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 30 columns' }))
+    expect(spy.mock.calls.at(-1)![0].layers).toHaveLength(30)
+  })
+
+  it('more than 200 is not offered, and says why', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', named(201), 1204)]])
+    render(<Harness spy={vi.fn()} dataSourceId="ds1" />)
+
+    expect(screen.queryByRole('group', { name: PER_ENTITY })).not.toBeInTheDocument()
+    expect(screen.getByText(/1,204 Domains are too many to read side by side/)).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: PER_TYPE })).getByText('Recommended')).toBeInTheDocument()
+  })
+
+  it('with several root types, a column per entity is offered too, counted on the types chosen', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', named(20, 'Domain'))], ['Team', ofType('Team', named(10, 'Team'))]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    expect(within(card).queryByText('Recommended')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: PER_TYPE })).getByText('Recommended')).toBeInTheDocument()
+    // The largest type to begin with, alone.
+    expect(within(card).getByRole('button', { name: 'Domain · 20' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(card).getByRole('button', { name: 'Team · 10' })).toHaveAttribute('aria-pressed', 'false')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Team · 10' }))
+    expect(within(card).getByText('One column per top-level entity (30)')).toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 30 columns' }))
+    // Thirty in all is over the line, whichever types they come from.
+    expect(card).toHaveTextContent('30 columns make a wide view')
+    expect(within(card).queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(spy).not.toHaveBeenCalled()
   })
 })

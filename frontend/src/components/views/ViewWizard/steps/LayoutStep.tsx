@@ -39,7 +39,10 @@ import { LAYER_COLORS } from '../layerColors'
 import { AUDIENCE, LIBRARY_TABS, audienceOf, type LibraryTab, type TemplateAudience } from '@/components/templates/templateAudience'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
-import { deriveRootTypeCandidates, layersForRootTypes } from '../autoLayers'
+import {
+    deriveRootTypeCandidates, layersForRootTypes, layersForTopLevelEntities, type RootTypeCandidate, type TopLevelEntity,
+} from '../autoLayers'
+import { ENTITY_COLUMNS_MAX, ENTITY_COLUMNS_WARN, useTopLevelEntities, type TopLevelOfType } from '../useTopLevelEntities'
 
 // ============================================
 // Types
@@ -101,29 +104,30 @@ interface GalleryTemplate {
     entityScope?: 'all' | 'curated'
 }
 
-/** "3 columns — Domains, Roots, Platforms — each carrying everything it contains."
- *  Long type lists are trimmed so the card stays a card. */
-function describeColumns(labels: string[]): string {
-    const shown = labels.slice(0, 4).join(', ')
-    const rest = labels.length - 4
-    const named = rest > 0 ? `${shown} and ${rest} more` : shown
-    return labels.length === 1
-        ? `One ${named} column, carrying everything those entities contain.`
-        : `${labels.length} columns — ${named} — each carrying everything it contains.`
+/** "2 layers: Domains, Teams" — a long list trimmed so the card stays a card. */
+function describeList(count: number, noun: string, names: string[], shown = 4): string {
+    const listed = names.slice(0, shown).join(', ')
+    return `${count} ${noun}${count === 1 ? '' : 's'}: ${listed}${count > shown ? ', …' : ''}`
 }
 
 /** Gallery of Quick Start templates — one card per template with a mini preview,
- *  description, category chip, and selected state. Shared by BOTH creation flows. */
+ *  description, category chip, and selected state. Shared by BOTH creation flows.
+ *  `before`/`after`: cards of their own (the ones with choices on them) in the
+ *  same grid. */
 function TemplateGallery({
     templates,
     activeId,
     loading,
     onApply,
+    before,
+    after,
 }: {
     templates: GalleryTemplate[]
     activeId?: string
     loading?: boolean
     onApply: (template: GalleryTemplate) => void
+    before?: React.ReactNode
+    after?: React.ReactNode
 }) {
     if (loading) {
         return (
@@ -144,6 +148,7 @@ function TemplateGallery({
     }
     return (
         <div className="grid gap-3 sm:grid-cols-2">
+            {before}
             {templates.map(template => {
                 const active = template.id === activeId
                 return (
@@ -192,7 +197,248 @@ function TemplateGallery({
                     </button>
                 )
             })}
+            {after}
         </div>
+    )
+}
+
+// ============================================
+// Layers from the top of the data
+// ============================================
+
+/** One root type offered as a chip: its name, and how many entities it has when known. */
+interface RootTypeOption {
+    id: string
+    name: string
+    count?: number | null
+    over?: boolean
+}
+
+function TypeChips({ label, options, selected, onToggle }: {
+    label: string
+    options: RootTypeOption[]
+    selected: ReadonlySet<string>
+    onToggle: (id: string) => void
+}) {
+    return (
+        <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+            {options.map(o => {
+                const on = selected.has(o.id)
+                const empty = o.count === 0
+                const count = o.over ? `${ENTITY_COLUMNS_MAX}+` : o.count != null ? o.count.toLocaleString() : null
+                return (
+                    <button
+                        key={o.id}
+                        type="button"
+                        aria-label={count ? `${o.name} · ${count}` : o.name}
+                        aria-pressed={on}
+                        disabled={empty}
+                        onClick={() => onToggle(o.id)}
+                        className={cn(
+                            'inline-flex items-center h-6 px-2.5 rounded-full border text-[11px] font-medium transition-colors',
+                            on
+                                ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-200'
+                                : 'border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700/50',
+                            empty && 'opacity-50 cursor-not-allowed',
+                        )}
+                    >
+                        {on && <Check className="w-3 h-3 mr-1" aria-hidden />}
+                        {o.name}
+                        {count && <span className="ml-1 tabular-nums opacity-70" aria-hidden>· {count}</span>}
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+/** The frame the cards with choices on them share with the gallery's. */
+function ChoiceCard({ label, title, count, recommended, active, children }: {
+    /** Stable name for the card, whatever its title says just now. */
+    label: string
+    title: string
+    count: string
+    recommended?: boolean
+    active?: boolean
+    children: React.ReactNode
+}) {
+    return (
+        <div
+            role="group"
+            aria-label={label}
+            className={cn(
+                'relative rounded-xl border-2 p-4 transition-colors duration-150',
+                active
+                    ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
+                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60',
+            )}
+        >
+            {recommended && (
+                <span className="absolute -top-2 -right-2 inline-flex items-center gap-0.5 px-2 py-0.5 text-[10px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-full shadow">
+                    <Sparkles className="w-3 h-3" /> Recommended
+                </span>
+            )}
+            <div className="flex items-center justify-between gap-2 mb-1">
+                <h5 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{title}</h5>
+                <span className="text-[10px] text-slate-400 shrink-0">{count}</span>
+            </div>
+            {children}
+        </div>
+    )
+}
+
+const CREATE = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+const QUIET = 'px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors'
+
+/** One layer per root type, for the types chosen — all of them to begin with. */
+function PerTypeCard({ candidates, options, recommended, active, onCreate }: {
+    candidates: RootTypeCandidate[]
+    options: RootTypeOption[]
+    recommended: boolean
+    active: boolean
+    onCreate: (chosen: RootTypeCandidate[]) => void
+}) {
+    const [selected, setSelected] = useState<Set<string>>(() => new Set(candidates.map(c => c.typeId)))
+    const chosen = candidates.filter(c => selected.has(c.typeId))
+    const layers = layersForRootTypes(chosen)
+    const toggle = (id: string) => setSelected(prev => {
+        const next = new Set(prev)
+        if (!next.delete(id)) next.add(id)
+        return next
+    })
+    return (
+        <ChoiceCard
+            label="One layer per top-level type"
+            title="One layer per top-level type"
+            count={`${chosen.length} layer${chosen.length === 1 ? '' : 's'}`}
+            recommended={recommended}
+            active={active}
+        >
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-snug mb-2.5">
+                {chosen.length > 0
+                    ? `${describeList(chosen.length, 'layer', chosen.map(c => c.label))}. Each holds everything its entities contain.`
+                    : 'Choose the top-level types to make layers for.'}
+            </p>
+            <TypeChips label="Top-level types" options={options} selected={selected} onToggle={toggle} />
+            <div className="mt-3">
+                <TemplatePreview layers={layers} active={active} />
+            </div>
+            <div className="flex justify-end mt-3">
+                <button type="button" className={CREATE} disabled={chosen.length === 0} onClick={() => onCreate(chosen)}>
+                    Create {chosen.length} layer{chosen.length === 1 ? '' : 's'}
+                </button>
+            </div>
+        </ChoiceCard>
+    )
+}
+
+/** A root type and the top-level entities it has. */
+type EntityTypeTop = TopLevelOfType & { id: string; name: string; plural: string }
+
+/**
+ * One column per top-level entity of the types chosen — the largest such type
+ * to begin with. Up to `ENTITY_COLUMNS_WARN` columns, the person can leave
+ * some out before they are made; more asks first; past `ENTITY_COLUMNS_MAX`
+ * nothing is made, with the reason.
+ */
+function PerEntityCard({ types, initialType, recommended, active, onCreate }: {
+    types: EntityTypeTop[]
+    initialType: string
+    recommended: boolean
+    active: boolean
+    onCreate: (entities: TopLevelEntity[]) => void
+}) {
+    const [selected, setSelected] = useState<Set<string>>(() => new Set([initialType]))
+    const [step, setStep] = useState<'choose' | 'confirm'>('choose')
+    const [left, setLeft] = useState<Set<string>>(() => new Set())
+    const chosenTypes = types.filter(t => selected.has(t.id))
+    const over = chosenTypes.some(t => t.over)
+    const total = chosenTypes.reduce((n, t) => n + (t.count ?? t.entities.length), 0)
+    const entities = chosenTypes.flatMap(t => t.entities).sort((a, b) => a.name.localeCompare(b.name))
+    const kept = entities.filter(e => !left.has(e.urn))
+    const toggle = (id: string) => {
+        setStep('choose')
+        setSelected(prev => {
+            const next = new Set(prev)
+            if (!next.delete(id)) next.add(id)
+            return next
+        })
+    }
+    const title = chosenTypes.length === 1
+        ? total === 1 ? `One column for ${entities[0]?.name ?? chosenTypes[0].name}` : `One column per ${chosenTypes[0].name}`
+        : chosenTypes.length > 1 ? `One column per top-level entity (${over ? `${ENTITY_COLUMNS_MAX}+` : total})` : 'One column per top-level entity'
+    const create = () => {
+        if (total === 1) onCreate(entities)
+        else setStep('confirm')
+    }
+    const columns = (n: number) => `${n} column${n === 1 ? '' : 's'}`
+    return (
+        <ChoiceCard
+            label="One column per top-level entity"
+            title={title}
+            count={over ? `${ENTITY_COLUMNS_MAX}+ columns` : columns(total)}
+            recommended={recommended}
+            active={active}
+        >
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-snug mb-2.5">
+                {chosenTypes.length === 0 ? 'Choose the top-level types whose entities become columns.'
+                    : over ? `More than ${ENTITY_COLUMNS_MAX} columns are too many to read side by side. Choose fewer types, or use one layer per top-level type.`
+                        : total === 1 ? `One column, holding everything ${entities[0]?.name} contains.`
+                            : `${describeList(total, 'column', entities.map(e => e.name), 3)}. Each holds everything its entity contains.`}
+            </p>
+            <TypeChips label="Top-level types" options={types} selected={selected} onToggle={toggle} />
+            {step === 'choose' ? (
+                <>
+                    <div className="mt-3">
+                        <TemplatePreview layers={entities.slice(0, 6).map(e => ({ id: e.urn, name: e.name }))} active={active} />
+                    </div>
+                    {!over && total > 0 && (
+                        <div className="flex justify-end mt-3">
+                            <button type="button" className={CREATE} onClick={create}>Create {columns(total)}</button>
+                        </div>
+                    )}
+                </>
+            ) : total > ENTITY_COLUMNS_WARN ? (
+                <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 p-3">
+                    <p className="text-xs text-slate-600 dark:text-slate-300">
+                        {total} columns make a wide view: it scrolls sideways. Create them anyway?
+                    </p>
+                    <div className="flex justify-end gap-2 mt-2.5">
+                        <button type="button" className={QUIET} onClick={() => setStep('choose')}>Back</button>
+                        <button type="button" className={CREATE} onClick={() => onCreate(entities)}>Create {columns(total)}</button>
+                    </div>
+                </div>
+            ) : (
+                <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 p-3">
+                    <p className="text-xs text-slate-600 dark:text-slate-300 mb-2">Leave out any you don't want.</p>
+                    <ul className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        {entities.map(e => (
+                            <li key={e.urn}>
+                                <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer min-w-0">
+                                    <input
+                                        type="checkbox"
+                                        checked={!left.has(e.urn)}
+                                        onChange={() => setLeft(prev => {
+                                            const next = new Set(prev)
+                                            if (!next.delete(e.urn)) next.add(e.urn)
+                                            return next
+                                        })}
+                                        className="rounded border-slate-300 dark:border-slate-600 text-blue-600"
+                                    />
+                                    <span className="truncate">{e.name}</span>
+                                </label>
+                            </li>
+                        ))}
+                    </ul>
+                    <div className="flex justify-end gap-2 mt-2.5">
+                        <button type="button" className={QUIET} onClick={() => setStep('choose')}>Back</button>
+                        <button type="button" className={CREATE} disabled={kept.length === 0} onClick={() => onCreate(kept)}>
+                            Create {columns(kept.length)}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </ChoiceCard>
     )
 }
 
@@ -499,34 +745,39 @@ export function LayoutStep({
     }, [library, libraryTab, libraryQuery])
 
     // What the data itself suggests, per flow; the library follows it.
-    const suggestedTemplates: GalleryTemplate[] = useMemo(() => {
-        // One column per TOP-LEVEL type, so Domain and Root each get their own
-        // rather than sharing a single level-0 column. Each layer carries its one
-        // entityType, which IS the placement rule: every root of that type lands
-        // there and its containment children inherit, with no per-entity
-        // assignment written and no column to fill in by hand. Both flows: a
-        // brand-new model knows its roots from its ontology alone.
-        const rootTypeCandidates = deriveRootTypeCandidates({
-            entityTypes: schemaEntityTypes,
-            relationshipTypes,
-            rootEntityTypes,
-            containmentEdgeTypes,
-        })
-        const perRootType: GalleryTemplate | null = rootTypeCandidates.length > 0 ? {
-            id: 'per-root-type',
-            name: 'One layer per top-level type',
-            description: describeColumns(rootTypeCandidates.map(c => c.label)),
-            category: 'schema',
-            // On a blank model "From your ontology" stays the recommended start.
-            recommended: !blank,
-            layers: layersForRootTypes(rootTypeCandidates),
-            entityScope: 'all',
-        } : null
+    // One layer per TOP-LEVEL type, so Domain and Root each get their own rather
+    // than sharing a single level-0 column. Each layer carries its one
+    // entityType, which IS the placement rule: every root of that type lands
+    // there and its containment children inherit, with no per-entity assignment
+    // written and no column to fill in by hand. Both flows: a brand-new model
+    // knows its roots from its ontology alone.
+    const rootTypeCandidates = useMemo(() => deriveRootTypeCandidates({
+        entityTypes: schemaEntityTypes,
+        relationshipTypes,
+        rootEntityTypes,
+        containmentEdgeTypes,
+    }), [schemaEntityTypes, relationshipTypes, rootEntityTypes, containmentEdgeTypes])
+    const rootTypeIds = useMemo(() => rootTypeCandidates.map(c => c.typeId), [rootTypeCandidates])
 
-        if (blank) {
-            const [ontology, ...rest] = blankTemplates
-            return ontology ? [ontology, ...(perRootType ? [perRootType] : []), ...rest] : []
-        }
+    // …and one COLUMN per top-level entity, read from the source while the
+    // suggestions show: a brand-new model has no entities yet.
+    const topLevel = useTopLevelEntities(dataSourceId, rootTypeIds, !blank && showGallery && !dsSchemaLoading)
+    const entityTypesTop: EntityTypeTop[] = useMemo(() => rootTypeCandidates.flatMap(c => {
+        const of = topLevel.byType.get(c.typeId)
+        const et = typesByFold.get(caseFold(c.typeId))
+        return of ? [{ ...of, id: c.typeId, name: et?.name ?? c.typeId, plural: c.label }] : []
+    }), [rootTypeCandidates, topLevel.byType, typesByFold])
+    const withEntities = entityTypesTop.filter(t => t.over || (t.count ?? t.entities.length) > 0)
+    const columnable = withEntities.filter(t => !t.over)
+    // The largest type a column each can be made for, to begin with.
+    const firstEntityType = columnable.reduce<EntityTypeTop | null>(
+        (best, t) => (!best || (t.count ?? 0) > (best.count ?? 0) ? t : best), null)
+    // One root type with entities: a column per entity, not one column of them all.
+    const entityColumnsFirst = withEntities.length === 1 && !!firstEntityType
+    const tooMany = !firstEntityType ? withEntities.find(t => t.over) : undefined
+
+    const suggestedTemplates: GalleryTemplate[] = useMemo(() => {
+        if (blank) return blankTemplates
 
         const fromSchema: GalleryTemplate | null = schemaEntityTypes.length > 0 ? {
             id: 'from-schema',
@@ -539,18 +790,16 @@ export function LayoutStep({
             layers: deriveLayersFromOntology({ entityTypes: schemaEntityTypes }),
         } : null
 
-        return [
-            ...(perRootType ? [perRootType] : []),
-            ...(fromSchema ? [fromSchema] : []),
-        ]
-    }, [blank, blankTemplates, schemaEntityTypes, relationshipTypes, rootEntityTypes, containmentEdgeTypes])
+        return fromSchema ? [fromSchema] : []
+    }, [blank, blankTemplates, schemaEntityTypes])
 
     // One apply path for every template origin: normalize layers (mint ids/orders,
     // default colors) and record the choice so the picker can be revisited.
     // Resets assignments to {} — a template's layers get fresh ids, so any prior
     // assignments (keyed to the OLD layer ids) would otherwise dangle. Never
     // copies assignments a template might carry; only layer STRUCTURE is copied.
-    const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate) => {
+    // The one exception: a column per entity brings the assignment that places it.
+    const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate, assignments: Record<string, LayerAssignmentEntry> = {}) => {
         // Template types are suggestions written for SOME ontology: keep only the ones
         // this data source's ontology declares, in its own spelling. A layer left with
         // none keeps its name and colour and is filled by assignment, like the local
@@ -569,7 +818,7 @@ export function LayoutStep({
         }))
         updateFormData({
             layers,
-            assignments: {},
+            assignments,
             layoutTemplateId: template.id,
             contextModelId: undefined,
             contextModelVersion: undefined,
@@ -720,6 +969,45 @@ export function LayoutStep({
     //  - otherwise (layers exist) → the layer editor
     const showBlankEmptyState = blank && !showGallery && formData.layers.length === 0
     const showLayerList = formData.layers.length > 0 && !showGallery
+
+    // The suggestions with choices on them: which root types make layers, and
+    // which entities become columns.
+    const suggestionsLoading = !blank && (dsSchemaLoading || topLevel.isLoading)
+    const perTypeCard = rootTypeCandidates.length > 0 && (
+        <PerTypeCard
+            key={`type:${rootTypeIds.join('|')}`}
+            candidates={rootTypeCandidates}
+            options={rootTypeCandidates.map(c => {
+                const of = entityTypesTop.find(t => t.id === c.typeId)
+                return { id: c.typeId, name: typesByFold.get(caseFold(c.typeId))?.name ?? c.typeId, count: of?.count, over: of?.over }
+            })}
+            // On a blank model "From your ontology" stays the recommended start.
+            recommended={!blank && !entityColumnsFirst}
+            active={formData.layoutTemplateId === 'per-root-type'}
+            onCreate={chosen => handleApplyGalleryTemplate({
+                id: 'per-root-type', name: 'One layer per top-level type', description: '',
+                layers: layersForRootTypes(chosen), entityScope: 'all',
+            })}
+        />
+    )
+    const perEntityCard = firstEntityType && (
+        <PerEntityCard
+            key={`entity:${withEntities.map(t => t.id).join('|')}`}
+            types={withEntities}
+            initialType={firstEntityType.id}
+            recommended={entityColumnsFirst}
+            active={formData.layoutTemplateId === 'per-entity'}
+            onCreate={entities => {
+                // Each column IS its entity, placed by its own assignment: a closed
+                // (curated) view of those entities and what they hold.
+                const made = layersForTopLevelEntities(entities)
+                handleApplyGalleryTemplate({
+                    id: 'per-entity', name: 'One column per top-level entity', description: '',
+                    layers: made.layers, entityScope: 'curated',
+                }, made.assignments)
+            }}
+        />
+    )
 
     return (
         <div className="space-y-8">
@@ -886,7 +1174,7 @@ export function LayoutStep({
                                 animate={{ opacity: 1 }}
                                 className="p-4 space-y-6 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-xl border border-indigo-200 dark:border-indigo-800"
                             >
-                                {(suggestedTemplates.length > 0 || (!blank && dsSchemaLoading)) && (
+                                {(suggestedTemplates.length > 0 || rootTypeCandidates.length > 0 || (!blank && dsSchemaLoading)) && (
                                     <div>
                                         <div className="flex items-center gap-2 mb-3">
                                             <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
@@ -895,9 +1183,16 @@ export function LayoutStep({
                                         <TemplateGallery
                                             templates={suggestedTemplates}
                                             activeId={formData.layoutTemplateId}
-                                            loading={!blank && dsSchemaLoading}
-                                            onApply={handleApplyGalleryTemplate}
+                                            loading={suggestionsLoading}
+                                            onApply={template => handleApplyGalleryTemplate(template)}
+                                            before={blank ? undefined : entityColumnsFirst ? <>{perEntityCard}{perTypeCard}</> : <>{perTypeCard}{perEntityCard}</>}
+                                            after={blank ? perTypeCard : undefined}
                                         />
+                                        {tooMany && !suggestionsLoading && (
+                                            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                                                {tooMany.count != null ? tooMany.count.toLocaleString() : `More than ${ENTITY_COLUMNS_MAX}`} {tooMany.plural} are too many to read side by side, so a column for each isn't offered. One layer per top-level type keeps them in one column.
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                                 {templatesOn && (
