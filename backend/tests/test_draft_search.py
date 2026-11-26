@@ -168,20 +168,25 @@ async def catalog_of(provider: StubDeepSearchProvider, scope, context, complete=
 
 class Draft:
     """The draft's side: a scripted versioning service over ``MAIN``, committed to by ``commit``
-    — what each commit wrote kept by seq, so a fold can read the draft as it was."""
+    — what each commit wrote kept by seq, so a fold can read the draft as it was. ``cascade``:
+    deleting a node deletes its relationships in the same commit, as the service does."""
 
-    def __init__(self, main_nodes=MAIN, main_edges=MAIN_EDGES):
+    def __init__(self, main_nodes=MAIN, main_edges=MAIN_EDGES, cascade=False):
         self.main = {n["urn"]: dict(n) for n in main_nodes}
         self.nodes = {u: dict(n) for u, n in self.main.items()}
         self.edges = {e["id"]: dict(e) for e in main_edges}
         self.main_edges = list(main_edges)
+        self.cascade = cascade
         self.seq = 0
         self.history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         # The type of each edge row a commit wrote — None for a delete, whose row names none.
         self.edge_rows: Dict[int, List[Optional[str]]] = {}
+        # Each edge a commit wrote, as it wrote it — None for a delete.
+        self.edge_history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         self.loads: List[List[str]] = []
         self.windows: List[Any] = []
         self.as_of: List[Any] = []
+        self.edges_as_of: List[Any] = []
         # Its own graph: no patch set another test's draft cached is ever read for it.
         self.graph_id = f"g-{uuid.uuid4().hex[:8]}"
 
@@ -189,7 +194,14 @@ class Draft:
         self.seq += 1
         self.history[self.seq] = {f"id-{u}": (dict(n, urn=u) if n else None)
                                   for u, n in nodes.items()}
-        self.edge_rows[self.seq] = [e["type"] for e in add_edges] + [None for _ in drop_edges]
+        gone = {u for u, n in nodes.items() if n is None}
+        drops = list(drop_edges) + ([e for e in self.edges.values() if e["id"] not in
+                                     {d["id"] for d in drop_edges}
+                                     and (e["source"] in gone or e["target"] in gone)]
+                                    if self.cascade else [])
+        self.edge_rows[self.seq] = [e["type"] for e in add_edges] + [None for _ in drops]
+        self.edge_history[self.seq] = {**{e["id"]: dict(e) for e in add_edges},
+                                       **{e["id"]: None for e in drops}}
         for u, n in nodes.items():
             if n is None:
                 self.nodes.pop(u, None)
@@ -197,8 +209,11 @@ class Draft:
                 self.nodes[u] = dict(n, urn=u)
         for e in add_edges:
             self.edges[e["id"]] = e
-        for e in drop_edges:
+        for e in drops:
             self.edges.pop(e["id"], None)
+
+    def edges_written(self) -> set:
+        return {eid for writes in self.edge_history.values() for eid in writes}
 
     def truth(self) -> StubDeepSearchProvider:
         return StubDeepSearchProvider(nodes=list(self.nodes.values()),
@@ -223,7 +238,7 @@ class Draft:
                                              "entityType": now["entityType"],
                                              "displayName": now["displayName"], "lazy": True})
                 delta["nodesNew"].append(u)
-            elif now is not None and now != was:
+            elif now is not None and was is not None:
                 delta["nodesModified"].append({"urn": u, "entityId": f"id-{u}"})
         main_edges = {e["id"]: e for e in self.main_edges}
         for eid, e in self.edges.items():
@@ -248,17 +263,47 @@ class Draft:
         return {u: truth._ancestors(truth._by_urn[u]) for u in urns if u in truth._by_urn}
 
     async def draft_search_window(self, *, graph_id, branch_id, commit_id, since_seq=None,
-                                  limit=0, containment_types=None):
+                                  limit=0, containment_types=None, edge_ids=False):
         seq = int(commit_id.split("-")[1]) if commit_id else None
         self.windows.append((since_seq, seq))
+        out: Dict[str, Any] = {"seq": seq, "nodes": None, "edges": False, "renamed": False,
+                               **({"edgeIds": None} if edge_ids else {})}
         if since_seq is None:
-            return {"seq": seq, "nodes": None, "edges": False}
+            return out
         nodes = sorted({eid for s, writes in self.history.items()
                         if since_seq < s <= seq for eid in writes})
+        written = sorted({eid for s, writes in self.edge_history.items()
+                          if since_seq < s <= seq for eid in writes})
         moves = {t.upper() for t in containment_types or ()}
         edges = any(t is None or containment_types is None or t.upper() in moves
                     for s, rows in self.edge_rows.items() if since_seq < s <= seq for t in rows)
-        return {"seq": seq, "nodes": nodes if len(nodes) <= limit else None, "edges": edges}
+        if containment_types is not None and not edges:
+            # What each edge was before the window: retyped out of the hierarchy, it moved things.
+            mains = {e["id"]: e for e in self.main_edges}
+            for eid in written:
+                held = [w[eid] for s, w in sorted(self.edge_history.items())
+                        if s <= since_seq and eid in w]
+                was = held[-1] if held else mains.get(eid)
+                if was is not None and (not was.get("type") or was["type"].upper() in moves):
+                    edges = True
+            edges = edges or len(written) > limit
+        out.update(nodes=nodes if len(nodes) <= limit else None, edges=edges)
+        if edge_ids:
+            out["edgeIds"] = written if len(written) <= limit else None
+        return out
+
+    async def draft_edges_as_of(self, *, graph_id, branch_id, entity_ids, seq):
+        self.edges_as_of.append((list(entity_ids), seq))
+        out = {}
+        for eid in entity_ids:
+            held = [w[eid] for s, w in sorted(self.edge_history.items()) if s <= seq and eid in w]
+            if held:
+                e = held[-1]
+                out[eid] = None if e is None else {
+                    "id": eid, "sourceUrn": e["source"], "targetUrn": e["target"],
+                    "edgeType": e["type"], "confidence": e.get("confidence"),
+                    "properties": e.get("properties") or {}}
+        return out
 
     async def draft_nodes_as_of(self, *, graph_id, branch_id, entity_ids, seq):
         self.as_of.append((list(entity_ids), seq))
@@ -1127,10 +1172,11 @@ class RelDraft(Draft):
         delta = await super().branch_overlay_delta(graph_id=graph_id, branch_id=branch_id)
         main_edges = {e["id"]: e for e in self.main_edges}
         delta["edgesUpsert"], delta["edgesRemove"] = [], []
+        written = self.edges_written()
         for eid, e in self.edges.items():
             held = main_edges.get(eid)
-            if held == e:
-                continue
+            if held is not None and eid not in written:
+                continue                            # main's: the draft never wrote it
             row = {"id": eid, "sourceUrn": e["source"], "targetUrn": e["target"],
                    "edgeType": e["type"], "lazy": True}
             if held is not None:
