@@ -108,3 +108,30 @@ describe('stagedChangesStore cascade discard', () => {
     expect(useCanvasStore.getState().edges.find((e) => e.id === tempEdgeId)).toBeUndefined()
   })
 })
+
+describe('stagedChangesStore cascade discard — a column mapped to a new entity', () => {
+  beforeEach(reset)
+
+  /** A column mapping as the canvas stages it: the part of the layout it touched, before and after. */
+  const mapping = (layerId: string, from: string | undefined, to: string | undefined, discard: () => void) => ({
+    type: 'layer_config' as const,
+    targetId: `layer:${layerId}`,
+    before: { part: { layers: { [layerId]: { id: layerId, name: 'Col', order: 0, entityTypes: [], anchorUrn: from } }, assignments: {} } },
+    after: { part: { layers: { [layerId]: { id: layerId, name: 'Col', order: 0, entityTypes: [], anchorUrn: to } }, assignments: {} }, action: 'map' },
+    summary: `map ${layerId}`,
+    discard,
+  })
+
+  it('goes with the create it maps a column to — newest first, so the column ends as it was', () => {
+    const s = useStagedChangesStore.getState()
+    const taken: string[] = []
+    s.stage(createEntity('urn:staged:T', null, () => taken.push('create')))
+    s.stage(mapping('col', undefined, 'urn:staged:T', () => taken.push('map')))
+    s.stage(mapping('col', 'urn:staged:T', undefined, () => taken.push('unmap')))
+    s.stage(mapping('other', undefined, 'urn:real:X', () => taken.push('other')))
+
+    s.discard(useStagedChangesStore.getState().changes[0].id)
+    expect(taken).toEqual(['unmap', 'map', 'create'])
+    expect(useStagedChangesStore.getState().changes.map((c) => c.targetId)).toEqual(['layer:other'])
+  })
+})

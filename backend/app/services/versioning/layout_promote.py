@@ -29,7 +29,8 @@ Per key, comparing the value on each side (any side may be ABSENT):
 Layer order follows the DRAFT's array order for layers the draft has; any layer
 that exists only on published-since-fork is appended at the end, and ``order``
 is renumbered 0..n-1 on the final list. A final referential-integrity pass
-drops any surviving assignment whose ``layerId`` is no longer a merged layer.
+drops any surviving assignment whose ``layerId`` is no longer a merged layer,
+and any column anchor on an unsaved (``urn:staged:``) entity.
 
 ``merge_scope_3way`` (scalar ``entityScope``), ``merge_display_rules_3way``
 (the ``displayRules`` list, keyed by rule id as layers are) and
@@ -191,6 +192,26 @@ def _prune_orphan_assignments(assignments: dict, layers: list) -> dict:
     }
 
 
+#: The temp urn prefix a draft gives an entity it created until its save mints
+#: the real one (frontend ``assignmentMutations.TEMP_URN_PREFIX``).
+_TEMP_URN_PREFIX = "urn:staged:"
+
+
+def _strip_staged_anchors(layers: list) -> list:
+    """Referential-integrity self-heal for a column mapped to an entity: drop an
+    ``anchorUrn`` that names an unsaved entity (``urn:staged:…``). The draft
+    re-points it at the minted urn when the entity is saved; one that survives
+    names an entity no graph has (its create was discarded before the save), so
+    the published column keeps everything else and is mapped to nothing — as an
+    assignment to a deleted layer is dropped. Mutates the merged layers, which
+    the merge owns. Never raises."""
+    for layer in layers:
+        anchor = layer.get("anchorUrn") if isinstance(layer, dict) else None
+        if isinstance(anchor, str) and anchor.startswith(_TEMP_URN_PREFIX):
+            del layer["anchorUrn"]
+    return layers
+
+
 def merge_layout_3way(fork_base: dict, published: dict, draft: dict) -> dict:
     """3-way merge a Context View's ``referenceLayout`` on branch merge/publish.
 
@@ -208,7 +229,7 @@ def merge_layout_3way(fork_base: dict, published: dict, draft: dict) -> dict:
     p_layers, p_assign = _normalize(published)
     d_layers, d_assign = _normalize(draft)
 
-    merged_layers = _merge_layers(f_layers, p_layers, d_layers)
+    merged_layers = _strip_staged_anchors(_merge_layers(f_layers, p_layers, d_layers))
     merged_assignments = _merge_assignments(f_assign, p_assign, d_assign)
     merged_assignments = _prune_orphan_assignments(merged_assignments, merged_layers)
 
