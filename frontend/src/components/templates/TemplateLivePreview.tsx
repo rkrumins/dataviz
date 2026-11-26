@@ -89,9 +89,6 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
                 ) : (
                     <span>Data from <span className="font-semibold text-ink">{workspace.name}</span></span>
                 )}
-                {fit && fit.typedLayers > 0 && (
-                    <span>· matches {fit.matchedLayers} of {fit.typedLayers} layer{fit.typedLayers === 1 ? '' : 's'}</span>
-                )}
             </div>
 
             {failed ? (
@@ -111,12 +108,6 @@ function PreviewBody({ layers, choices }: { layers: readonly ViewLayerConfig[]; 
                         />
                     ))}
                 </div>
-            )}
-
-            {fit && fit.unmatchedTypes.length > 0 && (
-                <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                    Not in {workspace.name}'s semantic layer: {fit.unmatchedTypes.join(', ')}. Views there fill those layers by hand.
-                </p>
             )}
         </div>
     )

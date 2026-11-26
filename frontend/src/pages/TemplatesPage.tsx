@@ -38,9 +38,6 @@ import {
     LIBRARY_TABS, canBeWorkspaceDefault, categoryLabel, type LibraryTab, type TemplateAction,
 } from '@/components/templates/templateAudience'
 import { saveTemplateFile } from '@/components/templates/templateFile'
-import {
-    fitShare, useFitWorkspaces, useTemplateFits, type TemplateFitScore,
-} from '@/components/templates/useTemplateFits'
 import { TEMPLATE_SHORTCUTS, useTemplateKeys } from '@/components/templates/useTemplateKeys'
 import {
     useDeleteLayoutTemplate, useInvalidateLayoutTemplates, useLayoutTemplate, useLayoutTemplates,
@@ -52,25 +49,20 @@ import { layoutTemplateService, type LayoutTemplate } from '@/services/layoutTem
 import { checkPermission, usePermission, usePermissionClaims } from '@/store/auth'
 import { useWorkspacesStore } from '@/store/workspaces'
 
-type SortKey = 'updated' | 'used' | 'recent' | 'name' | 'match'
+type SortKey = 'updated' | 'used' | 'recent' | 'name'
 
 const SORTS: { id: SortKey; label: string }[] = [
     { id: 'updated', label: 'Recently updated' },
     { id: 'used', label: 'Most used' },
     { id: 'recent', label: 'Recently used by me' },
     { id: 'name', label: 'A–Z' },
-    { id: 'match', label: 'Best match' },
 ]
 
-function sortTemplates(list: LayoutTemplate[], key: SortKey, fits: Map<string, TemplateFitScore> | null): LayoutTemplate[] {
+function sortTemplates(list: LayoutTemplate[], key: SortKey): LayoutTemplate[] {
     return [...list].sort((a, b) => {
         if (key === 'used') return b.usageCount - a.usageCount || a.name.localeCompare(b.name)
         if (key === 'name') return a.name.localeCompare(b.name)
         if (key === 'recent') return (b.lastUsedAt ?? '').localeCompare(a.lastUsedAt ?? '') || a.name.localeCompare(b.name)
-        if (key === 'match' && fits) {
-            const [fa, fb] = [fits.get(a.id), fits.get(b.id)]
-            return fitShare(fb) - fitShare(fa) || (fb?.matched ?? 0) - (fa?.matched ?? 0) || b.usageCount - a.usageCount
-        }
         return b.updatedAt.localeCompare(a.updatedAt)
     })
 }
@@ -148,16 +140,8 @@ export function TemplatesPage() {
     const rootRef = useRef<HTMLDivElement>(null)
     const searchRef = useRef<HTMLInputElement>(null)
 
-    // "Fit for": how well each template matches a workspace's data. Until
-    // someone picks, the active workspace — when its data is theirs to read.
     const claims = usePermissionClaims()
     const workspaces = useWorkspacesStore(s => s.workspaces)
-    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
-    const [fitFor, setFitFor] = useState<string | null>()
-    const fitChoices = useFitWorkspaces()
-    const fitWorkspace = fitChoices.find(ws => ws.id === (fitFor === undefined ? activeWorkspaceId : fitFor)) ?? null
-    const { fits } = useTemplateFits(templates, fitWorkspace)
-    const sortBy = sort === 'match' && !fits ? 'updated' : sort
 
     // Workspaces whose new views this person decides the starting layout of.
     const adminWorkspaces = useMemo(
@@ -230,8 +214,8 @@ export function TemplatesPage() {
                 || (t.description ?? '').toLowerCase().includes(q)
                 || t.layers.some(l => l.name.toLowerCase().includes(q))),
         )
-        return sortTemplates(filtered, sortBy, fits)
-    }, [inTab, category, query, sortBy, fits])
+        return sortTemplates(filtered, sort)
+    }, [inTab, category, query, sort])
     const featured = useMemo(() => templates.filter(t => t.featured && !t.hidden), [templates])
     const recent = useMemo(
         () => templates.filter(t => t.lastUsedAt).sort((a, b) => b.lastUsedAt!.localeCompare(a.lastUsedAt!)).slice(0, 4),
@@ -315,7 +299,6 @@ export function TemplatesPage() {
     })
 
     const renderCard = (t: LayoutTemplate) => {
-        const score = fits?.get(t.id)
         return (
             <TemplateCard
                 key={t.id}
@@ -323,7 +306,6 @@ export function TemplatesPage() {
                 onOpen={() => openTemplate(t)}
                 onAction={action => act(t, action)}
                 onToggleFavourite={() => void toggleFavourite(t)}
-                fit={score && fitWorkspace ? { ...score, workspaceName: fitWorkspace.name } : null}
                 canSetDefault={defaultTargets(t).length > 0}
             />
         )
@@ -457,20 +439,6 @@ export function TemplatesPage() {
                                 ))}
                             </div>
                             <div className="ml-auto flex flex-wrap items-center gap-3">
-                                {fitChoices.length > 0 && (
-                                    <label className="flex items-center gap-2 text-xs text-ink-muted whitespace-nowrap">
-                                        Fit for
-                                        <select
-                                            value={fitWorkspace?.id ?? ''}
-                                            onChange={e => setFitFor(e.target.value || null)}
-                                            aria-label="Show how well templates fit a workspace's data"
-                                            className="input w-auto border-slate-200 dark:border-slate-700 h-9 text-sm bg-canvas-elevated"
-                                        >
-                                            <option value="">No workspace</option>
-                                            {fitChoices.map(ws => <option key={ws.id} value={ws.id}>{ws.name}</option>)}
-                                        </select>
-                                    </label>
-                                )}
                                 {isManager && (
                                     <label className="flex items-center gap-2 text-xs text-ink-muted cursor-pointer select-none whitespace-nowrap">
                                         <input
@@ -493,12 +461,12 @@ export function TemplatesPage() {
                                     </button>
                                 </HoverTip>
                                 <select
-                                    value={sortBy}
+                                    value={sort}
                                     onChange={e => setSort(e.target.value as SortKey)}
                                     aria-label="Sort templates"
                                     className="input w-auto border-slate-200 dark:border-slate-700 h-9 text-sm bg-canvas-elevated"
                                 >
-                                    {SORTS.filter(s => s.id !== 'match' || fits).map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                                    {SORTS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
                                 </select>
                             </div>
                         </div>

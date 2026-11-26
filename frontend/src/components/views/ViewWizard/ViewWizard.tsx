@@ -102,6 +102,7 @@ import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, LayerNod
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
+import type { LayerFill } from '@/components/templates/templateFit'
 
 import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
@@ -241,6 +242,10 @@ export interface WizardFormData {
     /** That template's version whose layers were applied — what its later
      *  versions are compared with. */
     contextModelVersion?: number
+    /** The types the Layout step filled that template's layers with from this
+     *  data, by layer id, until the person keeps or changes them. Wizard-only:
+     *  never saved with the view. */
+    suggestedFills?: Record<string, LayerFill>
 }
 
 export type WizardStep =

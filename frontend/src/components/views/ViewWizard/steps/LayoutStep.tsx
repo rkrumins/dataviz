@@ -20,13 +20,12 @@ import {
     LayoutTemplate,
     Search,
     Save,
-    AlertTriangle,
-    X,
     Home,
+    MousePointerClick,
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
-import type { ViewLayerConfig } from '@/types/schema'
+import type { EntityTypeSchema, LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { useLayoutTemplate, useLayoutTemplates, useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { caseFold } from '@/features/ontology/lib/caseFold'
@@ -34,12 +33,16 @@ import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
 import type { LayoutTemplate as LibraryTemplate } from '@/services/layoutTemplateService'
 import { TemplatePreview } from '@/components/templates/TemplatePreview'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
-import { fitTemplate, layersForView, type TemplateFit } from '@/components/templates/templateFit'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { fitTargetOf, layersForView, suggestFills, type LayerFill } from '@/components/templates/templateFit'
 import { LAYER_COLORS } from '../layerColors'
 import { AUDIENCE, LIBRARY_TABS, audienceOf, type LibraryTab, type TemplateAudience } from '@/components/templates/templateAudience'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
-import { deriveRootTypeCandidates, layersForRootTypes } from '../autoLayers'
+import {
+    deriveRootTypeCandidates, layersForRootTypes, layersForTopLevelEntities, type RootTypeCandidate, type TopLevelEntity,
+} from '../autoLayers'
+import { ENTITY_COLUMNS_MAX, ENTITY_COLUMNS_WARN, useTopLevelEntities, type TopLevelOfType } from '../useTopLevelEntities'
 
 // ============================================
 // Types
@@ -75,6 +78,8 @@ interface LayoutStepProps {
 
 export { LAYER_COLORS } from '../layerColors'
 
+const NONE: never[] = []
+
 // ============================================
 // Quick Start template gallery
 // ============================================
@@ -89,9 +94,8 @@ interface GalleryTemplate {
     category?: string
     recommended?: boolean
     layers: Array<Partial<ViewLayerConfig> & { name: string }>
-    /** A library template: who it is for, and how well it fits this data. */
+    /** A library template: who it is for. */
     audience?: TemplateAudience
-    fit?: TemplateFit
     /** Pin the view's entity scope when the template's layers only work under one.
      *  A template whose layers carry `entityTypes` places entities BY RULE and
      *  writes no assignments — that resolves only in open ('all') scope, and
@@ -100,29 +104,30 @@ interface GalleryTemplate {
     entityScope?: 'all' | 'curated'
 }
 
-/** "3 columns — Domains, Roots, Platforms — each carrying everything it contains."
- *  Long type lists are trimmed so the card stays a card. */
-function describeColumns(labels: string[]): string {
-    const shown = labels.slice(0, 4).join(', ')
-    const rest = labels.length - 4
-    const named = rest > 0 ? `${shown} and ${rest} more` : shown
-    return labels.length === 1
-        ? `One ${named} column, carrying everything those entities contain.`
-        : `${labels.length} columns — ${named} — each carrying everything it contains.`
+/** "2 layers: Domains, Teams." — a long list trimmed so the card stays a card. */
+function describeList(count: number, noun: string, names: string[], shown = 4): string {
+    const listed = names.slice(0, shown).join(', ')
+    return `${count} ${noun}${count === 1 ? '' : 's'}: ${listed}${count > shown ? ', …' : '.'}`
 }
 
 /** Gallery of Quick Start templates — one card per template with a mini preview,
- *  description, category chip, and selected state. Shared by BOTH creation flows. */
+ *  description, category chip, and selected state. Shared by BOTH creation flows.
+ *  `before`/`after`: cards of their own (the ones with choices on them) in the
+ *  same grid. */
 function TemplateGallery({
     templates,
     activeId,
     loading,
     onApply,
+    before,
+    after,
 }: {
     templates: GalleryTemplate[]
     activeId?: string
     loading?: boolean
     onApply: (template: GalleryTemplate) => void
+    before?: React.ReactNode
+    after?: React.ReactNode
 }) {
     if (loading) {
         return (
@@ -143,6 +148,7 @@ function TemplateGallery({
     }
     return (
         <div className="grid gap-3 sm:grid-cols-2">
+            {before}
             {templates.map(template => {
                 const active = template.id === activeId
                 return (
@@ -174,7 +180,7 @@ function TemplateGallery({
                             {template.description}
                         </p>
                         <TemplatePreview layers={template.layers} active={active} />
-                        {(template.category || template.audience || template.fit) && (
+                        {(template.category || template.audience) && (
                             <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
                                 {template.audience && (
                                     <span className={cn('px-1.5 py-0.5 text-[10px] font-semibold rounded border', AUDIENCE[template.audience].badge)}>
@@ -186,24 +192,464 @@ function TemplateGallery({
                                         {template.category.replace(/-/g, ' ')}
                                     </span>
                                 )}
-                                {template.fit && template.fit.typedLayers > 0 && (
-                                    <span className={cn(
-                                        'ml-auto px-1.5 py-0.5 text-[10px] font-semibold rounded',
-                                        template.fit.matchedLayers === template.fit.typedLayers
-                                            ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-                                    )}>
-                                        {template.fit.matchedLayers === template.fit.typedLayers
-                                            ? 'Fits your data'
-                                            : `Matches ${template.fit.matchedLayers} of ${template.fit.typedLayers} layers`}
-                                    </span>
-                                )}
                             </div>
                         )}
                     </button>
                 )
             })}
+            {after}
         </div>
+    )
+}
+
+// ============================================
+// Layers from the top of the data
+// ============================================
+
+/** One root type offered as a chip: its name, and how many entities it has when known. */
+interface RootTypeOption {
+    id: string
+    name: string
+    count?: number | null
+    over?: boolean
+}
+
+function TypeChips({ label, options, selected, onToggle }: {
+    label: string
+    options: RootTypeOption[]
+    selected: ReadonlySet<string>
+    onToggle: (id: string) => void
+}) {
+    return (
+        <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+            {options.map(o => {
+                const on = selected.has(o.id)
+                const empty = o.count === 0
+                const count = o.over ? `${ENTITY_COLUMNS_MAX}+` : o.count != null ? o.count.toLocaleString() : null
+                return (
+                    <button
+                        key={o.id}
+                        type="button"
+                        aria-label={count ? `${o.name} · ${count}` : o.name}
+                        aria-pressed={on}
+                        disabled={empty}
+                        onClick={() => onToggle(o.id)}
+                        className={cn(
+                            'inline-flex items-center h-6 px-2.5 rounded-full border text-[11px] font-medium transition-colors',
+                            on
+                                ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-200'
+                                : 'border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700/50',
+                            empty && 'opacity-50 cursor-not-allowed',
+                        )}
+                    >
+                        {on && <Check className="w-3 h-3 mr-1" aria-hidden />}
+                        {o.name}
+                        {count && <span className="ml-1 tabular-nums opacity-70" aria-hidden>· {count}</span>}
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+/** The frame the cards with choices on them share with the gallery's. */
+function ChoiceCard({ label, title, count, recommended, active, children }: {
+    /** Stable name for the card, whatever its title says just now. */
+    label: string
+    title: string
+    count: string
+    recommended?: boolean
+    active?: boolean
+    children: React.ReactNode
+}) {
+    return (
+        <div
+            role="group"
+            aria-label={label}
+            className={cn(
+                'relative rounded-xl border-2 p-4 transition-colors duration-150',
+                active
+                    ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
+                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60',
+            )}
+        >
+            {recommended && (
+                <span className="absolute -top-2 -right-2 inline-flex items-center gap-0.5 px-2 py-0.5 text-[10px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-full shadow">
+                    <Sparkles className="w-3 h-3" /> Recommended
+                </span>
+            )}
+            <div className="flex items-center justify-between gap-2 mb-1">
+                <h5 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{title}</h5>
+                <span className="text-[10px] text-slate-400 shrink-0">{count}</span>
+            </div>
+            {children}
+        </div>
+    )
+}
+
+const CREATE = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+const QUIET = 'px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors'
+
+/** One layer per root type, for the types chosen — all of them to begin with. */
+function PerTypeCard({ candidates, options, recommended, active, onCreate }: {
+    candidates: RootTypeCandidate[]
+    options: RootTypeOption[]
+    recommended: boolean
+    active: boolean
+    onCreate: (chosen: RootTypeCandidate[]) => void
+}) {
+    const [selected, setSelected] = useState<Set<string>>(() => new Set(candidates.map(c => c.typeId)))
+    const chosen = candidates.filter(c => selected.has(c.typeId))
+    const layers = layersForRootTypes(chosen)
+    const toggle = (id: string) => setSelected(prev => {
+        const next = new Set(prev)
+        if (!next.delete(id)) next.add(id)
+        return next
+    })
+    return (
+        <ChoiceCard
+            label="One layer per top-level type"
+            title="One layer per top-level type"
+            count={`${chosen.length} layer${chosen.length === 1 ? '' : 's'}`}
+            recommended={recommended}
+            active={active}
+        >
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-snug mb-2.5">
+                {chosen.length > 0
+                    ? `${describeList(chosen.length, 'layer', chosen.map(c => c.label))} Each holds everything its entities contain.`
+                    : 'Choose the top-level types to make layers for.'}
+            </p>
+            <TypeChips label="Top-level types" options={options} selected={selected} onToggle={toggle} />
+            <div className="mt-3">
+                <TemplatePreview layers={layers} active={active} />
+            </div>
+            <div className="flex justify-end mt-3">
+                <button type="button" className={CREATE} disabled={chosen.length === 0} onClick={() => onCreate(chosen)}>
+                    Create {chosen.length} layer{chosen.length === 1 ? '' : 's'}
+                </button>
+            </div>
+        </ChoiceCard>
+    )
+}
+
+/** A root type and the top-level entities it has. */
+type EntityTypeTop = TopLevelOfType & { id: string; name: string; plural: string }
+
+/**
+ * One column per top-level entity of the types chosen — the largest such type
+ * to begin with. Up to `ENTITY_COLUMNS_WARN` columns, the person can leave
+ * some out before they are made; more asks first; past `ENTITY_COLUMNS_MAX`
+ * nothing is made, with the reason.
+ */
+function PerEntityCard({ types, initialType, recommended, active, onCreate }: {
+    types: EntityTypeTop[]
+    initialType: string
+    recommended: boolean
+    active: boolean
+    onCreate: (entities: TopLevelEntity[]) => void
+}) {
+    const [selected, setSelected] = useState<Set<string>>(() => new Set([initialType]))
+    const [step, setStep] = useState<'choose' | 'confirm'>('choose')
+    const [left, setLeft] = useState<Set<string>>(() => new Set())
+    const chosenTypes = types.filter(t => selected.has(t.id))
+    const over = chosenTypes.some(t => t.over)
+    const total = chosenTypes.reduce((n, t) => n + (t.count ?? t.entities.length), 0)
+    const entities = chosenTypes.flatMap(t => t.entities).sort((a, b) => a.name.localeCompare(b.name))
+    const kept = entities.filter(e => !left.has(e.urn))
+    const toggle = (id: string) => {
+        setStep('choose')
+        setSelected(prev => {
+            const next = new Set(prev)
+            if (!next.delete(id)) next.add(id)
+            return next
+        })
+    }
+    const title = chosenTypes.length === 1
+        ? total === 1 ? `One column for ${entities[0]?.name ?? chosenTypes[0].name}` : `One column per ${chosenTypes[0].name}`
+        : chosenTypes.length > 1 ? `One column per top-level entity (${over ? `${ENTITY_COLUMNS_MAX}+` : total})` : 'One column per top-level entity'
+    const create = () => {
+        if (total === 1) onCreate(entities)
+        else setStep('confirm')
+    }
+    const columns = (n: number) => `${n} column${n === 1 ? '' : 's'}`
+    return (
+        <ChoiceCard
+            label="One column per top-level entity"
+            title={title}
+            count={over ? `${ENTITY_COLUMNS_MAX}+ columns` : columns(total)}
+            recommended={recommended}
+            active={active}
+        >
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-snug mb-2.5">
+                {chosenTypes.length === 0 ? 'Choose the top-level types whose entities become columns.'
+                    : over ? `More than ${ENTITY_COLUMNS_MAX} columns are too many to read side by side. Choose fewer types, or use one layer per top-level type.`
+                        : total === 1 ? `One column, holding everything ${entities[0]?.name} contains.`
+                            : `${describeList(total, 'column', entities.map(e => e.name), 3)} Each holds everything its entity contains.`}
+            </p>
+            <TypeChips label="Top-level types" options={types} selected={selected} onToggle={toggle} />
+            {step === 'choose' ? (
+                <>
+                    <div className="mt-3">
+                        <TemplatePreview layers={layersForTopLevelEntities(entities).layers} active={active} />
+                    </div>
+                    {!over && total > 0 && (
+                        <div className="flex justify-end mt-3">
+                            <button type="button" className={CREATE} onClick={create}>Create {columns(total)}</button>
+                        </div>
+                    )}
+                </>
+            ) : total > ENTITY_COLUMNS_WARN ? (
+                <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 p-3">
+                    <p className="text-xs text-slate-600 dark:text-slate-300">
+                        {total} columns make a wide view: it scrolls sideways. Create them anyway?
+                    </p>
+                    <div className="flex justify-end gap-2 mt-2.5">
+                        <button type="button" className={QUIET} onClick={() => setStep('choose')}>Back</button>
+                        <button type="button" className={CREATE} onClick={() => onCreate(entities)}>Create {columns(total)}</button>
+                    </div>
+                </div>
+            ) : (
+                <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 p-3">
+                    <p className="text-xs text-slate-600 dark:text-slate-300 mb-2">Leave out any you don't want.</p>
+                    <ul className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        {entities.map(e => (
+                            <li key={e.urn}>
+                                <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer min-w-0">
+                                    <input
+                                        type="checkbox"
+                                        checked={!left.has(e.urn)}
+                                        onChange={() => setLeft(prev => {
+                                            const next = new Set(prev)
+                                            if (!next.delete(e.urn)) next.add(e.urn)
+                                            return next
+                                        })}
+                                        className="rounded border-slate-300 dark:border-slate-600 text-blue-600"
+                                    />
+                                    <span className="truncate">{e.name}</span>
+                                </label>
+                            </li>
+                        ))}
+                    </ul>
+                    <div className="flex justify-end gap-2 mt-2.5">
+                        <button type="button" className={QUIET} onClick={() => setStep('choose')}>Back</button>
+                        <button type="button" className={CREATE} disabled={kept.length === 0} onClick={() => onCreate(kept)}>
+                            Create {columns(kept.length)}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </ChoiceCard>
+    )
+}
+
+// ============================================
+// What fills a layer
+// ============================================
+
+const sameTypes = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(t => b.includes(t))
+
+/** Whether a layer is filled other than by its types: by a rule, as one entity's
+ *  column, or with entities placed in it by hand. */
+function placedOtherwise(layer: ViewLayerConfig, assignments: Record<string, LayerAssignmentEntry>): boolean {
+    return !!layer.anchorUrn
+        || (layer.rules ?? []).length > 0
+        || Object.values(assignments).some(a => a.layerId === layer.id)
+}
+
+/** A type as the layer list names it: its plural name, else its id. */
+function typeLabel(typesByFold: Map<string, EntityTypeSchema>, id: string): string {
+    const et = typesByFold.get(caseFold(id))
+    return et ? (et.pluralName || et.name) : id
+}
+
+/** Under a layer's name: the types that fill it, marked while they are still a
+ *  suggestion taken from the graph — or, when nothing fills it, an invitation to
+ *  choose, with the graph's offer beside it when it has one. Read from the layer
+ *  as it is now, so an edit shows at once. */
+function LayerFillRow({ layer, suggestion, offer, typesByFold, placed, canChoose, onKeep, onChoose, onTakeOffer }: {
+    layer: ViewLayerConfig
+    suggestion?: LayerFill
+    /** What the graph could fill this open layer with. */
+    offer?: LayerFill
+    typesByFold: Map<string, EntityTypeSchema>
+    placed: boolean
+    canChoose: boolean
+    onKeep: () => void
+    onChoose: () => void
+    onTakeOffer: () => void
+}) {
+    const types = layer.entityTypes ?? []
+    if (types.length > 0) {
+        const suggested = !!suggestion && sameTypes(suggestion.types, types)
+        return (
+            <div className="flex flex-wrap items-center gap-1.5 pl-[4.75rem] pr-4 pb-3 -mt-1.5">
+                <span className="text-[11px] text-slate-400 dark:text-slate-500 mr-0.5">Fills with</span>
+                {types.map(t => {
+                    const et = typesByFold.get(caseFold(t))
+                    return (
+                        <span key={t} className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: et?.visual?.color ?? '#94a3b8' }} aria-hidden />
+                            {typeLabel(typesByFold, t)}
+                        </span>
+                    )
+                })}
+                {suggested && (
+                    <span className="inline-flex items-center gap-1 ml-1">
+                        <HoverTip
+                            label={suggestion.by === 'level'
+                                ? "By order: the layer's place follows your hierarchy, top level first"
+                                : 'By name: your graph has a type of this name'}
+                            detail="Keep it, or change it in place."
+                        >
+                            <span className="inline-flex items-center gap-1 px-2 h-6 rounded-full bg-indigo-50 dark:bg-indigo-500/10 text-[11px] font-medium text-indigo-600 dark:text-indigo-300">
+                                <Sparkles className="w-3 h-3" aria-hidden />
+                                Suggested from your data
+                            </span>
+                        </HoverTip>
+                        <button
+                            type="button"
+                            onClick={onKeep}
+                            className="inline-flex items-center gap-1 h-6 px-2 rounded-full text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                        >
+                            <Check className="w-3 h-3" aria-hidden />
+                            Keep
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onChoose}
+                            className="inline-flex items-center h-6 px-2 rounded-full text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                        >
+                            Change
+                        </button>
+                    </span>
+                )}
+            </div>
+        )
+    }
+    if (placed) return null
+    const offered = offer?.types.map(t => typeLabel(typesByFold, t)).join(' + ')
+    return (
+        <div className="pl-[4.75rem] pr-4 pb-3 -mt-1.5">
+            {canChoose ? (
+                <div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 dark:border-slate-600 p-1">
+                    <button
+                        type="button"
+                        onClick={onChoose}
+                        className="flex-1 min-w-0 flex items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-slate-500 dark:text-slate-400 hover:bg-indigo-50/60 hover:text-indigo-700 dark:hover:bg-indigo-950/30 dark:hover:text-indigo-300 transition-colors"
+                    >
+                        <MousePointerClick className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                        <span className="truncate">Choose what fills this layer — or place entities in it by hand</span>
+                    </button>
+                    {offered && (
+                        <HoverTip
+                            label={offer!.by === 'level'
+                                ? "By order: the layer's place follows your hierarchy, top level first"
+                                : 'By name: your graph has a type of this name'}
+                        >
+                            <button
+                                type="button"
+                                onClick={onTakeOffer}
+                                aria-label={`Fill ${layer.name} with ${offered}`}
+                                className="shrink-0 inline-flex items-center gap-1 h-6 px-2.5 rounded-full bg-indigo-50 dark:bg-indigo-500/10 text-[11px] font-medium text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 transition-colors"
+                            >
+                                <Sparkles className="w-3 h-3" aria-hidden />
+                                Suggest: {offered}
+                            </button>
+                        </HoverTip>
+                    )}
+                </div>
+            ) : (
+                <p className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 dark:border-slate-600 px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
+                    <MousePointerClick className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                    Place entities in this layer by hand on the next step
+                </p>
+            )}
+        </div>
+    )
+}
+
+/** "Suggest from your graph": what the graph could fill each open layer with,
+ *  shown before anything changes; the person unticks what they don't want. */
+function SuggestionReview({ layers, offers, ticked, typesByFold, onToggle, onApply, onClose }: {
+    layers: ViewLayerConfig[]
+    offers: Record<string, LayerFill>
+    ticked: ReadonlySet<string>
+    typesByFold: Map<string, EntityTypeSchema>
+    onToggle: (layerId: string) => void
+    onApply: () => void
+    onClose: () => void
+}) {
+    const rows = layers.filter(l => offers[l.id])
+    const count = rows.filter(l => ticked.has(l.id)).length
+    return (
+        <section
+            aria-label="Suggested from your graph"
+            className="rounded-xl border border-indigo-200 dark:border-indigo-800/70 bg-gradient-to-br from-indigo-50/80 to-violet-50/50 dark:from-indigo-950/40 dark:to-violet-950/20 p-4 space-y-3"
+        >
+            <div className="flex items-start gap-2.5">
+                <Wand2 className="w-4 h-4 mt-0.5 text-indigo-600 dark:text-indigo-400 shrink-0" aria-hidden />
+                <div className="min-w-0">
+                    <h5 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Suggested from your graph</h5>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        {rows.length > 0
+                            ? "Types in your graph for the layers nothing fills yet — by name, else by your hierarchy's levels. Untick any you don't want."
+                            : 'Nothing to suggest: no type left in your graph fits the open layers by name or by level. Choose what fills each one below, or place entities in them by hand.'}
+                    </p>
+                </div>
+            </div>
+            {rows.length > 0 && (
+                <ul className="rounded-lg border border-indigo-100 dark:border-indigo-900/60 bg-white/70 dark:bg-slate-900/50 divide-y divide-indigo-100/70 dark:divide-indigo-900/50">
+                    {rows.map(layer => {
+                        const offer = offers[layer.id]
+                        const labels = offer.types.map(t => typeLabel(typesByFold, t))
+                        return (
+                            <li key={layer.id}>
+                                <label className="flex items-center gap-3 px-3 py-2 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={ticked.has(layer.id)}
+                                        onChange={() => onToggle(layer.id)}
+                                        aria-label={`${layer.name}: ${labels.join(' + ')}`}
+                                        className="rounded border-slate-300 dark:border-slate-600 text-indigo-600"
+                                    />
+                                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: layer.color }} aria-hidden />
+                                    <span className="w-32 truncate text-xs font-medium text-slate-700 dark:text-slate-200">{layer.name}</span>
+                                    <ChevronRight className="w-3.5 h-3.5 text-slate-300 dark:text-slate-600 shrink-0" aria-hidden />
+                                    <span className="flex flex-wrap gap-1 flex-1 min-w-0">
+                                        {offer.types.map(t => (
+                                            <span key={t} className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: typesByFold.get(caseFold(t))?.visual?.color ?? '#94a3b8' }} aria-hidden />
+                                                {typeLabel(typesByFold, t)}
+                                            </span>
+                                        ))}
+                                    </span>
+                                    <span className="shrink-0 text-[10px] text-slate-400">{offer.by === 'level' ? 'by level' : 'by name'}</span>
+                                </label>
+                            </li>
+                        )
+                    })}
+                </ul>
+            )}
+            <div className="flex items-center justify-end gap-2">
+                <button
+                    type="button"
+                    onClick={onClose}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-slate-800 transition-colors"
+                >
+                    {rows.length > 0 ? 'Cancel' : 'Close'}
+                </button>
+                {rows.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={onApply}
+                        disabled={count === 0}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                        Apply {count} suggestion{count === 1 ? '' : 's'}
+                    </button>
+                )}
+            </div>
+        </section>
     )
 }
 
@@ -226,10 +672,23 @@ export function LayoutStep({
         isLoading: dsSchemaLoading,
     } = useDataSourceSchema(dataSourceId)
     const storeEntityTypes = useSchemaEntityTypes()
+    const blankSchema = useSchemaStore(s => s.schema)
     const schemaEntityTypes = blank ? storeEntityTypes : dsEntityTypes
+    const relationshipTypes = (blank ? blankSchema?.relationshipTypes : dsRelationshipTypes) ?? NONE
+    const rootEntityTypes = (blank ? blankSchema?.rootEntityTypes : dsRootEntityTypes) ?? NONE
+    const containmentEdgeTypes = (blank ? blankSchema?.containmentEdgeTypes : dsContainmentEdgeTypes) ?? NONE
     const availableEntityTypes = useMemo(
         () => schemaEntityTypes.slice().sort((a, b) => a.name.localeCompare(b.name)),
         [schemaEntityTypes]
+    )
+    const typesByFold = useMemo(() => new Map(schemaEntityTypes.map(et => [caseFold(et.id), et])), [schemaEntityTypes])
+
+    // What a library template is fitted to: this data's types and hierarchy, or
+    // null while it declares none (no ontology, an empty one, a failed read) —
+    // a template's hints are then kept as written.
+    const fitTarget = useMemo(
+        () => fitTargetOf({ entityTypes: schemaEntityTypes, relationshipTypes, rootEntityTypes, containmentEdgeTypes }),
+        [schemaEntityTypes, relationshipTypes, rootEntityTypes, containmentEdgeTypes],
     )
 
     // ── Quick Start templates (both creation flows) ───────────────────────────
@@ -237,7 +696,6 @@ export function LayoutStep({
     // Existing sources: an ontology-derived recommended template (their assigned
     // schema has levels too) ahead of the org's backend/local templates. Both
     // render through the same TemplateGallery.
-    const blankSchema = useSchemaStore(s => s.schema)
     const blankTemplates = useMemo(
         () => (blank && blankSchema ? blankQuickStartTemplates(blankSchema) : []),
         [blank, blankSchema],
@@ -265,9 +723,7 @@ export function LayoutStep({
     const templatesOn = useLayoutTemplatesEnabled()
     const [libraryTab, setLibraryTab] = useState<LibraryTab>('all')
     const [libraryQuery, setLibraryQuery] = useState('')
-    const [dismissedFitFor, setDismissedFitFor] = useState<string | null>(null)
     const [savingAsTemplate, setSavingAsTemplate] = useState(false)
-    const declaredTypes = useMemo(() => schemaEntityTypes.map(et => et.id), [schemaEntityTypes])
     const libraryTabs = useMemo(
         () => LIBRARY_TABS.filter(tab => tab.id === 'all' || library.some(tab.match)),
         [library],
@@ -285,34 +741,43 @@ export function LayoutStep({
                 category: t.category ?? undefined,
                 layers: t.layers,
                 audience: audienceOf(t),
-                fit: fitTemplate(t.layers, declaredTypes),
             }))
-    }, [library, libraryTab, libraryQuery, declaredTypes])
+    }, [library, libraryTab, libraryQuery])
 
     // What the data itself suggests, per flow; the library follows it.
+    // One layer per TOP-LEVEL type, so Domain and Root each get their own rather
+    // than sharing a single level-0 column. Each layer carries its one
+    // entityType, which IS the placement rule: every root of that type lands
+    // there and its containment children inherit, with no per-entity assignment
+    // written and no column to fill in by hand. Both flows: a brand-new model
+    // knows its roots from its ontology alone.
+    const rootTypeCandidates = useMemo(() => deriveRootTypeCandidates({
+        entityTypes: schemaEntityTypes,
+        relationshipTypes,
+        rootEntityTypes,
+        containmentEdgeTypes,
+    }), [schemaEntityTypes, relationshipTypes, rootEntityTypes, containmentEdgeTypes])
+    const rootTypeIds = useMemo(() => rootTypeCandidates.map(c => c.typeId), [rootTypeCandidates])
+
+    // …and one COLUMN per top-level entity, read from the source while the
+    // suggestions show: a brand-new model has no entities yet.
+    const topLevel = useTopLevelEntities(dataSourceId, rootTypeIds, !blank && showGallery && !dsSchemaLoading)
+    const entityTypesTop: EntityTypeTop[] = useMemo(() => rootTypeCandidates.flatMap(c => {
+        const of = topLevel.byType.get(c.typeId)
+        const et = typesByFold.get(caseFold(c.typeId))
+        return of ? [{ ...of, id: c.typeId, name: et?.name ?? c.typeId, plural: c.label }] : []
+    }), [rootTypeCandidates, topLevel.byType, typesByFold])
+    const withEntities = entityTypesTop.filter(t => t.over || (t.count ?? t.entities.length) > 0)
+    const columnable = withEntities.filter(t => !t.over)
+    // The largest type a column each can be made for, to begin with.
+    const firstEntityType = columnable.reduce<EntityTypeTop | null>(
+        (best, t) => (!best || (t.count ?? 0) > (best.count ?? 0) ? t : best), null)
+    // One root type with entities: a column per entity, not one column of them all.
+    const entityColumnsFirst = withEntities.length === 1 && !!firstEntityType
+    const tooMany = !firstEntityType ? withEntities.find(t => t.over) : undefined
+
     const suggestedTemplates: GalleryTemplate[] = useMemo(() => {
         if (blank) return blankTemplates
-
-        // One column per TOP-LEVEL type, so Domain and Root each get their own
-        // rather than sharing a single level-0 column. Each layer carries its one
-        // entityType, which IS the placement rule: every root of that type lands
-        // there and its containment children inherit, with no per-entity
-        // assignment written and no column to fill in by hand.
-        const rootTypeCandidates = deriveRootTypeCandidates({
-            entityTypes: schemaEntityTypes,
-            relationshipTypes: dsRelationshipTypes,
-            rootEntityTypes: dsRootEntityTypes,
-            containmentEdgeTypes: dsContainmentEdgeTypes,
-        })
-        const perRootType: GalleryTemplate | null = rootTypeCandidates.length > 0 ? {
-            id: 'per-root-type',
-            name: 'One layer per top-level type',
-            description: describeColumns(rootTypeCandidates.map(c => c.label)),
-            category: 'schema',
-            recommended: true,
-            layers: layersForRootTypes(rootTypeCandidates),
-            entityScope: 'all',
-        } : null
 
         const fromSchema: GalleryTemplate | null = schemaEntityTypes.length > 0 ? {
             id: 'from-schema',
@@ -325,21 +790,16 @@ export function LayoutStep({
             layers: deriveLayersFromOntology({ entityTypes: schemaEntityTypes }),
         } : null
 
-        return [
-            ...(perRootType ? [perRootType] : []),
-            ...(fromSchema ? [fromSchema] : []),
-        ]
-    }, [
-        blank, blankTemplates, schemaEntityTypes,
-        dsRelationshipTypes, dsRootEntityTypes, dsContainmentEdgeTypes,
-    ])
+        return fromSchema ? [fromSchema] : []
+    }, [blank, blankTemplates, schemaEntityTypes])
 
     // One apply path for every template origin: normalize layers (mint ids/orders,
     // default colors) and record the choice so the picker can be revisited.
     // Resets assignments to {} — a template's layers get fresh ids, so any prior
     // assignments (keyed to the OLD layer ids) would otherwise dangle. Never
     // copies assignments a template might carry; only layer STRUCTURE is copied.
-    const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate) => {
+    // The one exception: a column per entity brings the assignment that places it.
+    const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate, assignments: Record<string, LayerAssignmentEntry> = {}) => {
         // Template types are suggestions written for SOME ontology: keep only the ones
         // this data source's ontology declares, in its own spelling. A layer left with
         // none keeps its name and colour and is filled by assignment, like the local
@@ -358,20 +818,22 @@ export function LayoutStep({
         }))
         updateFormData({
             layers,
-            assignments: {},
+            assignments,
             layoutTemplateId: template.id,
             contextModelId: undefined,
             contextModelVersion: undefined,
+            suggestedFills: undefined,
             entityScope: template.entityScope,
         })
         setGalleryOpen(false)
     }, [updateFormData, schemaEntityTypes])
 
-    // A library template: every structural field kept, types resolved against
-    // this data's semantic layer (unknown ones reported, never silently empty),
+    // A library template, as authored: every structural field kept, the types
+    // this data declares (the rest dropped, or all kept when it declares none),
     // fresh layer ids, and the template recorded as where the view started.
+    // Filling its open layers from the graph is an offer (`suggestFills`).
     const libraryTemplateUpdate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers' | 'version'>): Partial<WizardFormData> => {
-        const layers = layersForView(template.layers, declaredTypes)
+        const layers = layersForView(template.layers, fitTarget)
         return {
             layoutType: 'reference',
             layers,
@@ -379,14 +841,14 @@ export function LayoutStep({
             layoutTemplateId: template.id,
             contextModelId: template.id,
             contextModelVersion: template.version,
+            suggestedFills: undefined,
             // Layers that place by rule resolve only in open scope (see GalleryTemplate.entityScope).
             entityScope: layers.some(l => l.entityTypes.length > 0 || (l.rules?.length ?? 0) > 0) ? 'all' : undefined,
         }
-    }, [declaredTypes])
+    }, [fitTarget])
 
     const handleApplyLibraryTemplate = useCallback((template: Pick<LibraryTemplate, 'id' | 'layers' | 'version'>) => {
         updateFormData(libraryTemplateUpdate(template))
-        setDismissedFitFor(null)
         setGalleryOpen(false)
     }, [updateFormData, libraryTemplateUpdate])
 
@@ -420,22 +882,45 @@ export function LayoutStep({
     const startEmpty = useCallback(() => {
         updateFormData({
             layers: [], assignments: {}, layoutTemplateId: undefined,
-            contextModelId: undefined, contextModelVersion: undefined, entityScope: undefined,
+            contextModelId: undefined, contextModelVersion: undefined, suggestedFills: undefined, entityScope: undefined,
         })
     }, [updateFormData])
 
-    // How the template this view started from fits this data — derived, so it
-    // reads the same however the step is reached, until it is dismissed.
+    // The template this view started from, named where the layers are edited.
     const appliedTemplate = formData.contextModelId
         ? library.find(t => t.id === formData.contextModelId)
             ?? (fetchedInitial.data?.id === formData.contextModelId ? fetchedInitial.data : undefined)
         : undefined
-    const appliedFit = useMemo(
-        () => appliedTemplate && dismissedFitFor !== appliedTemplate.id
-            ? { name: appliedTemplate.name, fit: fitTemplate(appliedTemplate.layers, declaredTypes) }
-            : null,
-        [appliedTemplate, dismissedFitFor, declaredTypes],
-    )
+
+    // What the graph could fill each open layer with, read from the layers as they
+    // are now — the applied template's own hints included, as applying dropped the
+    // ones this data lacks. Never a layer entities were placed in by hand.
+    const offers = useMemo(() => {
+        const hintsOf = (layer: ViewLayerConfig) =>
+            appliedTemplate?.layers.find(t => t.id === layer.templateLayerId)?.entityTypes ?? []
+        const open = new Set(formData.layers.filter(l => !placedOtherwise(l, formData.assignments)).map(l => l.id))
+        return Object.fromEntries(Object.entries(suggestFills(formData.layers, fitTarget, hintsOf)).filter(([id]) => open.has(id)))
+    }, [formData.layers, formData.assignments, fitTarget, appliedTemplate])
+    /** The layers ticked in "Suggest from your graph"; null while it is closed. */
+    const [reviewing, setReviewing] = useState<Set<string> | null>(null)
+
+    /** Fill layers with what the graph suggests, each marked until kept or changed. */
+    const takeOffers = useCallback((fills: Record<string, LayerFill>) => {
+        if (Object.keys(fills).length === 0) return
+        updateFormData({
+            layers: formData.layers.map(l => (fills[l.id] ? { ...l, entityTypes: fills[l.id].types } : l)),
+            suggestedFills: { ...formData.suggestedFills, ...fills },
+            // Layers that place by type resolve only in open scope (see GalleryTemplate.entityScope).
+            entityScope: formData.entityScope ?? 'all',
+        })
+    }, [formData.layers, formData.suggestedFills, formData.entityScope, updateFormData])
+
+    /** The person keeps what the graph suggested for a layer: it is no longer a suggestion. */
+    const handleKeepFill = useCallback((layerId: string) => {
+        const rest = { ...formData.suggestedFills }
+        delete rest[layerId]
+        updateFormData({ suggestedFills: rest })
+    }, [formData.suggestedFills, updateFormData])
     // ────────────────────────────────────────────────────────────────────────
 
     const handleSelectLayoutType = useCallback((type: 'graph' | 'hierarchy' | 'reference') => {
@@ -484,6 +969,45 @@ export function LayoutStep({
     //  - otherwise (layers exist) → the layer editor
     const showBlankEmptyState = blank && !showGallery && formData.layers.length === 0
     const showLayerList = formData.layers.length > 0 && !showGallery
+
+    // The suggestions with choices on them: which root types make layers, and
+    // which entities become columns.
+    const suggestionsLoading = !blank && (dsSchemaLoading || topLevel.isLoading)
+    const perTypeCard = rootTypeCandidates.length > 0 && (
+        <PerTypeCard
+            key={`type:${rootTypeIds.join('|')}`}
+            candidates={rootTypeCandidates}
+            options={rootTypeCandidates.map(c => {
+                const of = entityTypesTop.find(t => t.id === c.typeId)
+                return { id: c.typeId, name: typesByFold.get(caseFold(c.typeId))?.name ?? c.typeId, count: of?.count, over: of?.over }
+            })}
+            // On a blank model "From your ontology" stays the recommended start.
+            recommended={!blank && !entityColumnsFirst}
+            active={formData.layoutTemplateId === 'per-root-type'}
+            onCreate={chosen => handleApplyGalleryTemplate({
+                id: 'per-root-type', name: 'One layer per top-level type', description: '',
+                layers: layersForRootTypes(chosen), entityScope: 'all',
+            })}
+        />
+    )
+    const perEntityCard = firstEntityType && (
+        <PerEntityCard
+            key={`entity:${withEntities.map(t => t.id).join('|')}`}
+            types={withEntities}
+            initialType={firstEntityType.id}
+            recommended={entityColumnsFirst}
+            active={formData.layoutTemplateId === 'per-entity'}
+            onCreate={entities => {
+                // Each column IS its entity, placed by its own assignment: a closed
+                // (curated) view of those entities and what they hold.
+                const made = layersForTopLevelEntities(entities)
+                handleApplyGalleryTemplate({
+                    id: 'per-entity', name: 'One column per top-level entity', description: '',
+                    layers: made.layers, entityScope: 'curated',
+                }, made.assignments)
+            }}
+        />
+    )
 
     return (
         <div className="space-y-8">
@@ -573,7 +1097,7 @@ export function LayoutStep({
                         exit={{ opacity: 0, height: 0 }}
                         className="space-y-4 pt-6 border-t border-slate-200 dark:border-slate-700"
                     >
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
                             <div>
                                 <h4 className="font-bold text-slate-900 dark:text-white">
                                     {showGallery ? 'Choose a starting template' : 'Configure Layers'}
@@ -581,15 +1105,28 @@ export function LayoutStep({
                                 <p className="text-sm text-slate-500">
                                     {showGallery
                                         ? 'Pick a starting arrangement — you can refine the layers next'
-                                        : 'Define the horizontal layers for your context view'}
+                                        : appliedTemplate
+                                            ? `Started from “${appliedTemplate.name}”. Refine its layers below.`
+                                            : 'Define the horizontal layers for your context view'}
                                 </p>
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
+                                {showLayerList && fitTarget && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setReviewing(reviewing ? null : new Set(Object.keys(offers)))}
+                                        aria-expanded={!!reviewing}
+                                        className="flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                                    >
+                                        <Wand2 className="w-4 h-4" />
+                                        Suggest from your graph
+                                    </button>
+                                )}
                                 {templatesOn && !showGallery && formData.layers.length > 0 && (
                                     <button
                                         type="button"
                                         onClick={() => setSavingAsTemplate(true)}
-                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                     >
                                         <Save className="w-4 h-4" />
                                         Save as template
@@ -598,7 +1135,7 @@ export function LayoutStep({
                                 {!showGallery && !imported && (
                                     <button
                                         onClick={handleSwitchTemplate}
-                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                     >
                                         <Repeat className="w-4 h-4" />
                                         Switch template
@@ -610,7 +1147,7 @@ export function LayoutStep({
                                 {(!showGallery || !blank) && (
                                     <button
                                         onClick={handleAddLayer}
-                                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                                        className="flex items-center gap-2 whitespace-nowrap px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
                                     >
                                         <Plus className="w-4 h-4" />
                                         Add Layer
@@ -637,7 +1174,7 @@ export function LayoutStep({
                                 animate={{ opacity: 1 }}
                                 className="p-4 space-y-6 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-xl border border-indigo-200 dark:border-indigo-800"
                             >
-                                {(suggestedTemplates.length > 0 || (!blank && dsSchemaLoading)) && (
+                                {(suggestedTemplates.length > 0 || rootTypeCandidates.length > 0 || (!blank && dsSchemaLoading)) && (
                                     <div>
                                         <div className="flex items-center gap-2 mb-3">
                                             <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
@@ -646,9 +1183,16 @@ export function LayoutStep({
                                         <TemplateGallery
                                             templates={suggestedTemplates}
                                             activeId={formData.layoutTemplateId}
-                                            loading={!blank && dsSchemaLoading}
-                                            onApply={handleApplyGalleryTemplate}
+                                            loading={suggestionsLoading}
+                                            onApply={template => handleApplyGalleryTemplate(template)}
+                                            before={blank ? undefined : entityColumnsFirst ? <>{perEntityCard}{perTypeCard}</> : <>{perTypeCard}{perEntityCard}</>}
+                                            after={blank ? perTypeCard : undefined}
                                         />
+                                        {tooMany && !suggestionsLoading && (
+                                            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                                                {tooMany.count != null ? tooMany.count.toLocaleString() : `More than ${ENTITY_COLUMNS_MAX}`} {tooMany.plural} are too many to read side by side, so a column for each isn't offered. One layer per top-level type keeps them in one column.
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                                 {templatesOn && (
@@ -721,36 +1265,23 @@ export function LayoutStep({
                             </div>
                         )}
 
-                        {/* How a library template fit this data's semantic layer — say what
-                            didn't match instead of leaving columns silently empty. */}
-                        {appliedFit && showLayerList && (
-                            appliedFit.fit.unmatchedTypes.length > 0 ? (
-                                <div role="status" className="flex items-start gap-3 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50/60 dark:bg-amber-950/20 px-4 py-3">
-                                    <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed flex-1">
-                                        <span className="font-semibold text-slate-800 dark:text-slate-100">
-                                            "{appliedFit.name}" matches {appliedFit.fit.matchedLayers} of {appliedFit.fit.typedLayers} layers to this data.
-                                        </span>{' '}
-                                        Not in its semantic layer: {appliedFit.fit.unmatchedTypes.join(', ')}. Pick types for those layers below, or place entities in them by hand.
-                                    </p>
-                                    <button type="button" onClick={() => setDismissedFitFor(formData.contextModelId ?? null)} aria-label="Dismiss" className="p-0.5 rounded text-slate-400 hover:text-slate-600">
-                                        <X className="w-3.5 h-3.5" />
-                                    </button>
-                                </div>
-                            ) : (
-                                <div role="status" className="flex items-start gap-3 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/60 dark:bg-emerald-950/20 px-4 py-3">
-                                    <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
-                                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed flex-1">
-                                        <span className="font-semibold text-slate-800 dark:text-slate-100">Started from "{appliedFit.name}".</span>{' '}
-                                        {appliedFit.fit.typedLayers > 0
-                                            ? 'Every layer matched this data\'s semantic layer. Refine them below.'
-                                            : 'Its layers are filled by hand: place entities in them on the next step.'}
-                                    </p>
-                                    <button type="button" onClick={() => setDismissedFitFor(formData.contextModelId ?? null)} aria-label="Dismiss" className="p-0.5 rounded text-slate-400 hover:text-slate-600">
-                                        <X className="w-3.5 h-3.5" />
-                                    </button>
-                                </div>
-                            )
+                        {reviewing && showLayerList && (
+                            <SuggestionReview
+                                layers={formData.layers}
+                                offers={offers}
+                                ticked={reviewing}
+                                typesByFold={typesByFold}
+                                onToggle={id => setReviewing(prev => {
+                                    const next = new Set(prev)
+                                    if (!next.delete(id)) next.add(id)
+                                    return next
+                                })}
+                                onApply={() => {
+                                    takeOffers(Object.fromEntries(Object.entries(offers).filter(([id]) => reviewing.has(id))))
+                                    setReviewing(null)
+                                }}
+                                onClose={() => setReviewing(null)}
+                            />
                         )}
 
                         {/* Blank models: empty template chosen — prompt to build layers */}
@@ -805,6 +1336,17 @@ export function LayoutStep({
                                                 <ChevronRight className="w-5 h-5 text-slate-400" />
                                             )}
                                         </div>
+                                        <LayerFillRow
+                                            layer={layer}
+                                            suggestion={formData.suggestedFills?.[layer.id]}
+                                            typesByFold={typesByFold}
+                                            placed={placedOtherwise(layer, formData.assignments)}
+                                            canChoose={availableEntityTypes.length > 0}
+                                            offer={offers[layer.id]}
+                                            onKeep={() => handleKeepFill(layer.id)}
+                                            onChoose={() => setExpandedLayerId(layer.id)}
+                                            onTakeOffer={() => takeOffers({ [layer.id]: offers[layer.id] })}
+                                        />
 
                                         {/* Expanded Content */}
                                         <AnimatePresence>

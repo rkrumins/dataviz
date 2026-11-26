@@ -4,23 +4,34 @@
  * Applying a template is a client-side copy of layer STRUCTURE only: it never
  * carries assignments into formData.assignments (a fresh create or template
  * switch always resets them to {}), every layer gets a fresh id, and a library
- * template is recorded as where the view started. Its entity types resolve
- * against THIS data's semantic layer, and what doesn't match is said, not
- * silently dropped.
+ * template is recorded as where the view started. It comes in as AUTHORED;
+ * filling its open layers from the graph is an offer the person takes — all at
+ * once from the header, or one layer at a time — and keeps or changes in place.
+ * Nothing says a template "doesn't match", and cards make no claim about data.
  */
 import { useState } from 'react'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 
 // The data source's ontology, as useDataSourceSchema reports it — mutable so a
 // case can give the source an ontology, or hold it loading.
-const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], isLoading: false }))
+const ds = vi.hoisted(() => ({ entityTypes: [] as unknown[], rootEntityTypes: [] as string[], isLoading: false }))
 const lib = vi.hoisted(() => ({ templates: [] as unknown[], isLoading: false, enabled: true }))
+// The source's top-level entities per root type, as the Layout step reads them.
+const top = vi.hoisted(() => ({ byType: new Map<string, unknown>(), isLoading: false }))
 
 vi.mock('@/hooks/useDataSourceSchema', () => ({
-  useDataSourceSchema: () => ({ entityTypes: ds.entityTypes, isLoading: ds.isLoading, isError: false }),
+  useDataSourceSchema: () => ({
+    entityTypes: ds.entityTypes, relationshipTypes: [], rootEntityTypes: ds.rootEntityTypes, containmentEdgeTypes: [],
+    isLoading: ds.isLoading, isError: false,
+  }),
+}))
+
+vi.mock('../../useTopLevelEntities', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../useTopLevelEntities')>()),
+  useTopLevelEntities: () => top,
 }))
 
 vi.mock('@/hooks/useLayoutTemplates', () => ({
@@ -41,6 +52,8 @@ vi.mock('@/store/workspaces', () => {
   return { useWorkspacesStore }
 })
 
+import { useSchemaStore } from '@/store/schema'
+import type { WorkspaceSchema } from '@/types/schema'
 import { LayoutStep } from '../LayoutStep'
 import type { WizardFormData } from '../../ViewWizard'
 
@@ -77,6 +90,43 @@ const DATA_MESH = template({
   ],
 })
 
+/** The built-in "Analytics Pipeline" (backend/app/db/seed_templates.py): stages, not containment. */
+const ANALYTICS = template({
+  id: 'tpl_analytics', name: 'Analytics Pipeline',
+  layers: [
+    { id: 'raw', name: 'Raw', entityTypes: ['raw', 'source', 'extract'], order: 0 },
+    { id: 'curated', name: 'Curated', entityTypes: ['curated', 'clean', 'validated'], order: 1 },
+    { id: 'aggregated', name: 'Aggregated', entityTypes: ['aggregated', 'summary', 'metric'], order: 2 },
+    { id: 'dashboard', name: 'Dashboard', entityTypes: ['dashboard', 'report', 'visualization'], order: 3 },
+  ],
+})
+
+/** Domain contains System contains Dataset. */
+const DSD = [
+  { id: 'Domain', name: 'Domain', pluralName: 'Domains', hierarchy: { level: 0, canContain: ['System'] }, visual: { color: '#7c3aed' } },
+  { id: 'System', name: 'System', pluralName: 'Systems', hierarchy: { level: 1, canContain: ['Dataset'] }, visual: { color: '#2563eb' } },
+  { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 2, canContain: [] }, visual: { color: '#059669' } },
+]
+
+const TEAM = { id: 'Team', name: 'Team', pluralName: 'Teams', hierarchy: { level: 0, canContain: [] }, visual: { color: '#ea580c' } }
+
+/** A root type's top-level entities: these names, and how many there are in all. */
+function ofType(type: string, names: string[], count = names.length) {
+  return {
+    entities: names.slice(0, 201).map(name => ({ urn: `urn:${type}:${name}`, name, type, childCount: 2 })),
+    count, over: count > 200,
+  }
+}
+const named = (n: number, prefix = 'Unit') => Array.from({ length: n }, (_, i) => `${prefix} ${String(i + 1).padStart(3, '0')}`)
+const PER_TYPE = 'One layer per top-level type'
+const PER_ENTITY = 'One column per top-level entity'
+
+/** The layer editor's row for a layer. */
+const layerRow = (name: string) => screen.getByText(name, { selector: 'span' }).closest('li') as HTMLElement
+const SUGGESTED = 'Suggested from your data'
+const TO_FILL = 'Choose what fills this layer — or place entities in it by hand'
+const SUGGEST_ALL = 'Suggest from your graph'
+
 function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
   return {
     name: 'Test view',
@@ -112,6 +162,10 @@ function Harness({ spy, ...props }: { spy: (u: Partial<WizardFormData>) => void 
 
 afterEach(() => {
   ds.entityTypes = []
+  ds.rootEntityTypes = []
+  top.byType = new Map()
+  top.isLoading = false
+  useSchemaStore.setState({ schema: null })
   ds.isLoading = false
   lib.templates = []
   lib.isLoading = false
@@ -140,26 +194,121 @@ describe('LayoutStep — the template library', () => {
     expect(call.layers.map((l: { templateLayerId: string }) => l.templateLayerId)).toEqual(['bronze', 'silver', 'gold'])
   })
 
-  it("resolves a template's types against the data source and names what didn't match", () => {
-    ds.entityTypes = [
-      { id: 'Dataset', name: 'Dataset', pluralName: 'Datasets', hierarchy: { level: 0, canContain: [] } },
-      { id: 'System', name: 'System', pluralName: 'Systems', hierarchy: { level: 0, canContain: [] } },
-    ]
-    lib.templates = [DATA_MESH]
+  it("library cards show the template's own layers and make no claim about the data", () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS, MEDALLION]
+    render(<Harness spy={vi.fn()} dataSourceId="ds1" />)
+
+    const analytics = screen.getByText('Analytics Pipeline').closest('button')!
+    expect(analytics).toHaveTextContent('Raw')
+    expect(analytics).not.toHaveTextContent('Domains')
+    expect(analytics).not.toHaveTextContent('by hand')
+    expect(screen.queryByText(/Matches \d+ of|Fits your data|Filled by hand/)).not.toBeInTheDocument()
+  })
+
+  it('applying a template keeps its layers as authored, and offers what the graph could fill', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS, DATA_MESH]
     const spy = vi.fn()
     render(<Harness spy={spy} dataSourceId="ds1" />)
 
-    // The card says how well it fits before anyone applies it.
-    expect(screen.getByText('Matches 1 of 2 layers')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Data Mesh'))
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
 
     const call = spy.mock.calls[0][0]
-    // A layer whose types the ontology lacks survives, empty; a declared type
-    // takes the ontology's spelling, once.
-    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domain', 'Data Product'])
-    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], ['Dataset']])
-    expect(screen.getByRole('status')).toHaveTextContent('matches 1 of 2 layers')
-    expect(screen.getByRole('status')).toHaveTextContent('bounded-context, data-product, domain, table')
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Raw', 'Curated', 'Aggregated', 'Dashboard'])
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], [], [], []])
+    expect(call.suggestedFills).toBeUndefined()
+    expect(screen.queryByText(SUGGESTED)).not.toBeInTheDocument()
+    // Every open layer invites filling; where the graph has something, a quiet offer.
+    expect(within(layerRow('Raw')).getByText(TO_FILL)).toBeInTheDocument()
+    expect(within(layerRow('Raw')).getByRole('button', { name: 'Fill Raw with Domains' })).toBeInTheDocument()
+    expect(within(layerRow('Dashboard')).getByText(TO_FILL)).toBeInTheDocument()
+    expect(within(layerRow('Dashboard')).queryByRole('button', { name: /^Fill Dashboard/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByText('Started from “Analytics Pipeline”. Refine its layers below.')).toBeInTheDocument()
+  })
+
+  it('a layer takes the graph\'s offer on a click, marked for the person to keep or change', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+
+    fireEvent.click(within(layerRow('Raw')).getByRole('button', { name: 'Fill Raw with Domains' }))
+
+    expect(spy.mock.calls.at(-1)![0].layers[0].entityTypes).toEqual(['Domain'])
+    expect(within(layerRow('Raw')).getByText('Domains')).toBeInTheDocument()
+    expect(within(layerRow('Raw')).getByText(SUGGESTED)).toBeInTheDocument()
+    expect(within(layerRow('Raw')).queryByText(TO_FILL)).not.toBeInTheDocument()
+    // Kept: the types stay, the suggestion is settled.
+    fireEvent.click(within(layerRow('Raw')).getByRole('button', { name: 'Keep' }))
+    expect(within(layerRow('Raw')).queryByText(SUGGESTED)).not.toBeInTheDocument()
+    expect(within(layerRow('Raw')).getByText('Domains')).toBeInTheDocument()
+  })
+
+  it('"Suggest from your graph" previews a fill for every open layer, and applies what is ticked', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+
+    fireEvent.click(screen.getByRole('button', { name: SUGGEST_ALL }))
+    const preview = screen.getByRole('region', { name: 'Suggested from your graph' })
+    expect(within(preview).getByRole('checkbox', { name: 'Raw: Domains' })).toBeChecked()
+    expect(within(preview).getByRole('checkbox', { name: 'Curated: Systems' })).toBeChecked()
+    expect(within(preview).getByRole('checkbox', { name: 'Aggregated: Datasets' })).toBeChecked()
+    expect(within(preview).queryByRole('checkbox', { name: /^Dashboard/ })).not.toBeInTheDocument()
+    expect(spy).toHaveBeenCalledTimes(1)   // nothing applied before it is confirmed
+
+    fireEvent.click(within(preview).getByRole('checkbox', { name: 'Curated: Systems' }))
+    fireEvent.click(within(preview).getByRole('button', { name: 'Apply 2 suggestions' }))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([['Domain'], [], ['Dataset'], []])
+    expect(call.entityScope).toBe('all')
+    expect(screen.queryByRole('region', { name: 'Suggested from your graph' })).not.toBeInTheDocument()
+    expect(within(layerRow('Raw')).getByText(SUGGESTED)).toBeInTheDocument()
+    expect(within(layerRow('Aggregated')).getByText(SUGGESTED)).toBeInTheDocument()
+
+    // Changed in place: it is the person's choice now.
+    fireEvent.click(within(layerRow('Aggregated')).getByRole('button', { name: 'Change' }))
+    fireEvent.click(within(layerRow('Aggregated')).getByRole('button', { name: 'System' }))
+    expect(within(layerRow('Aggregated')).queryByText(SUGGESTED)).not.toBeInTheDocument()
+  })
+
+  it('switching templates brings the new one in as authored', () => {
+    ds.entityTypes = DSD
+    lib.templates = [ANALYTICS, DATA_MESH]
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+    fireEvent.click(within(layerRow('Raw')).getByRole('button', { name: 'Fill Raw with Domains' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch template' }))
+    fireEvent.click(screen.getByText('Data Mesh'))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([['Domain'], ['Dataset']])
+    expect(call.suggestedFills).toBeUndefined()
+    expect(screen.queryByText(SUGGESTED)).not.toBeInTheDocument()
+    confirm.mockRestore()
+  })
+
+  it("keeps a template's types as written when the data declares none, and claims nothing", () => {
+    lib.templates = [ANALYTICS]
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    fireEvent.click(screen.getByText('Analytics Pipeline'))
+
+    const call = spy.mock.calls[0][0]
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual(ANALYTICS.layers.map(l => l.entityTypes))
+    expect(screen.queryByText(SUGGESTED)).not.toBeInTheDocument()
+    expect(screen.queryByText(TO_FILL)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: SUGGEST_ALL })).not.toBeInTheDocument()
   })
 
   it('waits for the ontology before a template can be applied', () => {
@@ -176,7 +325,7 @@ describe('LayoutStep — the template library', () => {
 
     expect(spy).toHaveBeenCalledTimes(1)
     expect(spy.mock.calls[0][0].contextModelId).toBe('tpl_medallion')
-    expect(screen.getByRole('status')).toHaveTextContent('Started from "Medallion"')
+    expect(screen.getByText('Started from “Medallion”. Refine its layers below.')).toBeInTheDocument()
   })
 
   it("starts from the workspace's default, with one click back to an empty canvas", () => {
@@ -226,5 +375,145 @@ describe('LayoutStep — the template library', () => {
     expect(spy.mock.calls[0][0].contextModelId).toBeUndefined()
     expect(spy.mock.calls[0][0].contextModelVersion).toBeUndefined()
     expect(spy.mock.calls[0][0].assignments).toEqual({})
+  })
+})
+
+describe('LayoutStep — a brand-new model', () => {
+  it('offers one layer per top-level type, matching the roots in any case', () => {
+    useSchemaStore.setState({
+      schema: {
+        id: 'ont', name: 'Ontology', version: '1', views: [], defaultViewId: '',
+        entityTypes: DSD, relationshipTypes: [], containmentEdgeTypes: [], lineageEdgeTypes: [],
+        // Spelled otherwise than the type it names: still that type.
+        rootEntityTypes: ['domain'],
+      } as unknown as WorkspaceSchema,
+    })
+    const spy = vi.fn()
+    render(<Harness spy={spy} blank />)
+
+    expect(screen.getByText('From your ontology')).toBeInTheDocument()
+    expect(screen.getByText('Start empty')).toBeInTheDocument()
+    // Root types come from the ontology alone: chips, with no counts to show.
+    const card = screen.getByRole('group', { name: PER_TYPE })
+    expect(within(card).getByRole('button', { name: 'Domain' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('group', { name: PER_ENTITY })).not.toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 1 layer' }))
+
+    const call = spy.mock.calls[0][0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domains'])
+    expect(call.layers[0].entityTypes).toEqual(['Domain'])
+    expect(call.layoutTemplateId).toBe('per-root-type')
+    // Its layers place by rule, which resolves only in open scope.
+    expect(call.entityScope).toBe('all')
+  })
+})
+
+describe('LayoutStep — layers from the top of the data', () => {
+  it('one layer per top-level type uses every root type, and makes only the ones chosen', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', named(5))], ['Team', ofType('Team', named(3))]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_TYPE })
+    expect(within(card).getByText('Recommended')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Domain · 5' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(card).getByRole('button', { name: 'Team · 3' })).toHaveAttribute('aria-pressed', 'true')
+    expect(card).toHaveTextContent('2 layers: Domains, Teams')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Team · 3' }))
+    expect(card).toHaveTextContent('1 layer: Domains')
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 1 layer' }))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domains'])
+    expect(call.layers[0].entityTypes).toEqual(['Domain'])
+    expect(call.entityScope).toBe('all')
+  })
+
+  it('a single root type with a few entities recommends a column each, and lets some be left out', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance', 'Marketing', 'Ops', 'Sales', 'Support'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    expect(within(card).getByText('Recommended')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: PER_TYPE })).queryByText('Recommended')).not.toBeInTheDocument()
+    expect(within(card).getByText('One column per Domain')).toBeInTheDocument()
+    expect(card).toHaveTextContent('5 columns: Finance, Marketing, Ops, …')
+    expect(within(card).getByRole('button', { name: 'Domain · 5' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 5 columns' }))
+    expect(within(card).getByRole('checkbox', { name: 'Finance' })).toBeChecked()
+    fireEvent.click(within(card).getByRole('checkbox', { name: 'Ops' }))
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 4 columns' }))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Finance', 'Marketing', 'Sales', 'Support'])
+    expect(call.layers.map((l: { anchorUrn: string }) => l.anchorUrn)).toEqual(
+      ['urn:Domain:Finance', 'urn:Domain:Marketing', 'urn:Domain:Sales', 'urn:Domain:Support'])
+    expect(Object.keys(call.assignments).sort()).toEqual(call.layers.map((l: { anchorUrn: string }) => l.anchorUrn).sort())
+    expect(call.entityScope).toBe('curated')
+    expect(call.layoutTemplateId).toBe('per-entity')
+  })
+
+  it('a single entity makes one column for it, at once', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    expect(within(card).getByText('One column for Finance')).toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 1 column' }))
+    expect(spy.mock.calls.at(-1)![0].layers.map((l: { name: string }) => l.name)).toEqual(['Finance'])
+  })
+
+  it('more than 24 columns asks first, with no list to pick from', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', named(30))]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 30 columns' }))
+    expect(spy).not.toHaveBeenCalled()
+    expect(card).toHaveTextContent('30 columns make a wide view')
+    expect(within(card).queryByRole('checkbox')).not.toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 30 columns' }))
+    expect(spy.mock.calls.at(-1)![0].layers).toHaveLength(30)
+  })
+
+  it('more than 200 is not offered, and says why', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', named(201), 1204)]])
+    render(<Harness spy={vi.fn()} dataSourceId="ds1" />)
+
+    expect(screen.queryByRole('group', { name: PER_ENTITY })).not.toBeInTheDocument()
+    expect(screen.getByText(/1,204 Domains are too many to read side by side/)).toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: PER_TYPE })).getByText('Recommended')).toBeInTheDocument()
+  })
+
+  it('with several root types, a column per entity is offered too, counted on the types chosen', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', named(20, 'Domain'))], ['Team', ofType('Team', named(10, 'Team'))]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" />)
+
+    const card = screen.getByRole('group', { name: PER_ENTITY })
+    expect(within(card).queryByText('Recommended')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: PER_TYPE })).getByText('Recommended')).toBeInTheDocument()
+    // The largest type to begin with, alone.
+    expect(within(card).getByRole('button', { name: 'Domain · 20' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(card).getByRole('button', { name: 'Team · 10' })).toHaveAttribute('aria-pressed', 'false')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Team · 10' }))
+    expect(within(card).getByText('One column per top-level entity (30)')).toBeInTheDocument()
+    fireEvent.click(within(card).getByRole('button', { name: 'Create 30 columns' }))
+    // Thirty in all is over the line, whichever types they come from.
+    expect(card).toHaveTextContent('30 columns make a wide view')
+    expect(within(card).queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(spy).not.toHaveBeenCalled()
   })
 })
