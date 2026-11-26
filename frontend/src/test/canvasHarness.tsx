@@ -501,6 +501,7 @@ function stubProvider(
  *  effect finds nothing to change and returns. */
 function stubFetch(
   estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated', versioned = false, viewCounts?: ViewScopeCounts,
+  answer?: (url: string, init?: RequestInit) => unknown,
 ): () => void {
   const original = globalThis.fetch
   const view = {
@@ -510,8 +511,12 @@ function stubFetch(
       content: { entityScope },
     },
   }
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    const answered = answer?.(url, init)
+    if (answered !== undefined) {
+      return new Response(JSON.stringify(answered), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
     // The view's library (display rules, saved queries): empty, and editable.
     const library = { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true }
     // `versioned`: the data source has version control — its graph resolves, and the rest of
@@ -680,6 +685,9 @@ export async function renderCanvasWithTrace(
     persona?: PersonaMode
     /** What `/views/counts` answers: the views the reader can see, per data source. None by default. */
     viewCounts?: ViewScopeCounts
+    /** The server's answer to a request the harness does not answer itself (a save's
+     *  `/graph/changes`, a drafts policy); `undefined` leaves it to the harness. */
+    answer?: (url: string, init?: RequestInit) => unknown
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -692,7 +700,7 @@ export async function renderCanvasWithTrace(
     if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
   }
   releaseFetch?.()
-  releaseFetch = stubFetch(estate, opts.entityScope, opts.versioned, opts.viewCounts)
+  releaseFetch = stubFetch(estate, opts.entityScope, opts.versioned, opts.viewCounts, opts.answer)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
   // anything: with no draft open (or edit mode off) every connect/edit path

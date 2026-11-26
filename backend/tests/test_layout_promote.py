@@ -165,6 +165,32 @@ class TestReferentialIntegrity:
         assert result["layers"] == []
         assert "urn:a" not in result["assignments"]
 
+    def test_column_mapped_to_an_unsaved_entity_is_published_mapped_to_nothing(self):
+        # A draft column mapped to an entity created in the draft keeps its temp
+        # ``urn:staged:`` anchor only until the save re-points it. One that slips
+        # through (its create discarded before the save) names an entity no graph
+        # has: the published column keeps everything else and maps to nothing.
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = copy.deepcopy(f)
+        d = _layout(layers=[
+            _layer("l1", "A", 0, anchorUrn="urn:staged:domain:new-1", nameFromAnchor=True, color="#10b981"),
+            _layer("l2", "Sales", 1, anchorUrn="urn:li:domain:sales"),
+        ])
+        d_before = copy.deepcopy(d)
+        result = merge_layout_3way(f, p, d)
+        by_id = {l["id"]: l for l in result["layers"]}
+        assert "anchorUrn" not in by_id["l1"]
+        assert by_id["l1"]["nameFromAnchor"] is True and by_id["l1"]["color"] == "#10b981"
+        assert by_id["l2"]["anchorUrn"] == "urn:li:domain:sales"
+        assert d == d_before  # inputs are never mutated
+
+    def test_published_side_staged_anchor_is_stripped_too(self):
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = _layout(layers=[_layer("l1", "A", 0, anchorUrn="urn:staged:x:1")])
+        d = copy.deepcopy(f)
+        result = merge_layout_3way(f, p, d)
+        assert "anchorUrn" not in result["layers"][0]
+
 
 class TestScopeMerge:
     def test_scope_draft_changed_draft_wins(self):

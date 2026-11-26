@@ -9,8 +9,8 @@
  * move changes the data, and the section says so: the tag, and who it reaches. The entity menu's
  * "Move to another parent…" dialog (MoveParentDialog) offers the same search.
  */
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { ArrowUpRight, CornerLeftUp, CornerRightDown, Home, Info, MoveRight, Network, Search } from 'lucide-react'
+import { useId, useMemo, useRef, useState } from 'react'
+import { ArrowUpRight, CornerLeftUp, CornerRightDown, Home, Info, MoveRight, Network } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { useBranchStore } from '@/store/branchStore'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
@@ -18,10 +18,10 @@ import { ChangeKindTag } from '@/components/canvas/context-view/DropHint'
 import { NO_REACH, moveReachLine } from '@/components/canvas/context-view/changeKind'
 import { moveHost } from '@/store/canvasLayoutBridge'
 import { parentPlacementPhrase, relationshipLabel } from '@/lib/relationshipLabel'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Section } from '../DrawerSection'
 import { useContainmentParent, useMoveTargets } from './useContainment'
+import { EntitySearchPicker, type PickerOption } from './EntitySearchPicker'
 
 export function PlacementSummary({ nodeId, childCount, onFocusNode }: {
   nodeId: string
@@ -150,9 +150,6 @@ export function PlacementEditor({ nodeId }: { nodeId: string }) {
   )
 }
 
-/** Rows a search shows at once; the rest wait for a narrower search. */
-const PICKER_ROWS = 50
-
 /** The picker's first option: no parent at all. Not an entity id. */
 const TOP = '\u0000top'
 const TOP_LABEL = 'On its own, at the top'
@@ -170,34 +167,20 @@ export function MoveTargetPicker({ nodeId, onPick, canStandAlone, onTop, default
   onCancel?: () => void
 }) {
   const [open, setOpen] = useState(defaultOpen)
-  const [query, setQuery] = useState('')
-  const [active, setActive] = useState(0)
   const targets = useMoveTargets(nodeId, open)
-  const listId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
 
   const topOffered = open && canStandAlone()
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    const hits = q ? targets.filter((t) => t.label.toLowerCase().includes(q) || t.type.toLowerCase().includes(q)) : targets
-    const top = topOffered && (!q || `${TOP_LABEL} top level`.toLowerCase().includes(q)) ? [{ id: TOP, label: TOP_LABEL, type: '' }] : []
-    return [...top, ...hits]
-  }, [targets, query, topOffered])
-  const shown = matches.slice(0, PICKER_ROWS)
+  const options = useMemo((): PickerOption[] => [
+    ...(topOffered ? [{ id: TOP, label: TOP_LABEL, badge: 'No parent', icon: Home, keywords: `${TOP_LABEL} top level`, separated: true }] : []),
+    ...targets.map((t) => ({ id: t.id, label: t.label, badge: t.type })),
+  ], [targets, topOffered])
 
-  const close = () => { setOpen(false); setQuery(''); setActive(0) }
-  const cancel = onCancel ?? close
+  const close = () => setOpen(false)
   const pick = (id: string) => {
     close()
     if (id === TOP) onTop()
     else onPick(id)
-  }
-
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(i + 1, shown.length - 1)) }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)) }
-    else if (e.key === 'Enter' && shown[active]) { e.preventDefault(); pick(shown[active].id) }
-    else if (e.key === 'Escape') { e.preventDefault(); cancel() }
   }
 
   if (!open) {
@@ -209,67 +192,16 @@ export function MoveTargetPicker({ nodeId, onPick, canStandAlone, onTop, default
   }
 
   return (
-    <div className="space-y-1.5">
-      <div className="rounded-xl border border-glass-border overflow-hidden">
-        <div className="flex items-center gap-2 px-3 border-b border-glass-border">
-          <Search className="w-3.5 h-3.5 text-ink-muted shrink-0" aria-hidden />
-          <input
-            ref={inputRef}
-            autoFocus={defaultOpen}
-            role="combobox"
-            aria-expanded="true"
-            aria-controls={listId}
-            aria-activedescendant={shown[active] ? `${listId}-${active}` : undefined}
-            aria-label="Search for a new parent"
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setActive(0) }}
-            onKeyDown={onKeyDown}
-            placeholder={`Search ${targets.length.toLocaleString()} possible parents…`}
-            className="flex-1 min-w-0 py-2 bg-transparent outline-none text-sm text-ink placeholder:text-ink-muted"
-          />
-          <Button variant="ghost" size="sm" onClick={cancel}>Cancel</Button>
-        </div>
-        <ul id={listId} role="listbox" aria-label="Possible parents" className="max-h-56 overflow-y-auto custom-scrollbar py-1">
-          {shown.map((t, i) => (
-            <li
-              key={t.id}
-              id={`${listId}-${i}`}
-              role="option"
-              aria-selected={i === active}
-              onMouseEnter={() => setActive(i)}
-              onMouseDown={(e) => { e.preventDefault(); pick(t.id) }}
-              className={cn('flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer text-sm',
-                i === active ? 'bg-accent-lineage/10 text-ink' : 'text-ink',
-                t.id === TOP && shown.length > 1 && 'border-b border-glass-border mb-1')}
-            >
-              {t.id === TOP ? (
-                <>
-                  <span className="flex items-center gap-2 min-w-0">
-                    <Home className="w-3.5 h-3.5 text-ink-muted shrink-0" aria-hidden />
-                    <span className="truncate">{t.label}</span>
-                  </span>
-                  <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted shrink-0">No parent</span>
-                </>
-              ) : (
-                <>
-                  <span className="truncate">{t.label}</span>
-                  <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted shrink-0">{t.type}</span>
-                </>
-              )}
-            </li>
-          ))}
-          {matches.length === 0 && (
-            <li className="px-3 py-3 text-xs text-ink-muted italic">
-              {targets.length === 0 ? 'Nothing in this view can contain this one.' : 'Nothing matches that search.'}
-            </li>
-          )}
-        </ul>
-        {matches.length > shown.length && (
-          <p className="px-3 py-1.5 border-t border-glass-border text-[11px] text-ink-muted">
-            Showing {shown.length} of {matches.length.toLocaleString()} — type to narrow it down.
-          </p>
-        )}
-      </div>
-    </div>
+    <EntitySearchPicker
+      options={options}
+      onPick={pick}
+      onCancel={onCancel ?? close}
+      searchLabel="Search for a new parent"
+      listLabel="Possible parents"
+      placeholder={`Search ${targets.length.toLocaleString()} possible parents…`}
+      emptyText="Nothing in this view can contain this one."
+      autoFocus={defaultOpen}
+      inputRef={inputRef}
+    />
   )
 }

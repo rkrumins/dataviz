@@ -135,17 +135,21 @@ function restorePin(childKey: string, pin: LayerAssignmentEntry | null) {
 
 /**
  * Where a moved entity is shown — the rule a create follows (ContextViewCanvas `onEntityStaged`).
- * Placed by hand in a column that holds its type (an App in the Apps column), it stays there; any
- * other placement is cleared, so it follows its new parent. At the top level there is no parent to
- * follow: it keeps its placement, else takes the column that holds its type, else the one it was
- * drawn in. Returns the column it is placed in by hand, if any.
+ * Placed by hand in a column that holds its type (an App in the Apps column), it stays there — as it
+ * does in the column mapped to it, which IS it, wherever it sits in the data; any other placement is
+ * cleared, so it follows its new parent. At the top level there is no parent to follow: it keeps its
+ * placement, else takes the column that holds its type, else the one it was drawn in. Returns the
+ * column it is placed in by hand, if any.
  */
 function placeMoved(childKey: string, childType: string, toTop: boolean, drawnIn: string | undefined): string | undefined {
   const w = layoutWriter()
   if (!w) return undefined
   const layout = w.current()
   const pin = layout.assignments[childKey]
-  const holdsType = (layerId: string) => (layout.layers.find((l) => l.id === layerId)?.entityTypes ?? []).includes(childType)
+  const holdsType = (layerId: string) => {
+    const layer = layout.layers.find((l) => l.id === layerId)
+    return (layer?.entityTypes ?? []).includes(childType) || layer?.anchorUrn === childKey
+  }
   if (toTop) {
     if (pin) return pin.layerId
     const column = layout.layers.find((l) => (l.entityTypes ?? []).includes(childType))?.id ?? drawnIn
@@ -477,7 +481,9 @@ export function useReparentNode() {
     const parentName = parentKey ? nameOf(parentKey) : undefined
     const stays = (layerId: string | undefined) => {
       const column = columnName(layerId)
-      return column ? ` It stays in ${column}, the column that holds its type.` : ''
+      if (!column) return ''
+      const own = layoutWriter()?.current().layers.find((l) => l.id === layerId)?.anchorUrn === childKey
+      return own ? ` It keeps its own column, ${column}.` : ` It stays in ${column}, the column that holds its type.`
     }
     if (child?.data?.isPending === 'create') {
       const pointed = restageCreate(childKey, parentKey, parentLabel, v.edgeType)

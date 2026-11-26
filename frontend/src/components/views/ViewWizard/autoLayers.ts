@@ -264,6 +264,8 @@ export function layersForTopLevelEntities(
       // column spends its only row repeating its own name, with everything you
       // came to see one expand deeper.
       anchorUrn: entity.urn,
+      // Named after it, and renamed with it, until someone names the column.
+      nameFromAnchor: true,
     })
     assignments[entity.urn] = {
       layerId: id,

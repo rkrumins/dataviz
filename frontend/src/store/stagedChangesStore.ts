@@ -284,10 +284,22 @@ function showOnCanvas(from: StagedChange | null, to: StagedChange | null, what: 
   }
 }
 
+/** The entities a staged layout change maps a column to, before or after it — the layers of its
+ *  `before.part` / `after.part` (layerMutations `LayoutPart`), which a column mapping carries. */
+function mappedEntities(c: StagedChange): string[] {
+  const urns: string[] = []
+  for (const side of [c.before, c.after]) {
+    const layers = (side as { part?: { layers?: Record<string, { anchorUrn?: string } | null> } } | undefined)?.part?.layers
+    for (const layer of Object.values(layers ?? {})) if (layer?.anchorUrn) urns.push(layer.anchorUrn)
+  }
+  return urns
+}
+
 /**
  * The `roots` plus every staged `create_entity` descendant of them, found by walking the temp-urn →
  * `after.parentUrn` linkage, plus any staged `create_edge` changes anchored to one of those
- * entities' temp urns and any `move_entity` into one of them. Returned LEAF-FIRST (deepest descendants and edges before their ancestors)
+ * entities' temp urns, any `move_entity` into one of them, and any column mapping (`layer_config`)
+ * that names one of them as a column's entity. Returned LEAF-FIRST (deepest descendants and edges before their ancestors)
  * so discard hooks restore children before parents, regardless of staging order or same-millisecond
  * timestamps; siblings keep their staging order. Used so discarding a staged parent also discards
  * the children created under it (no orphans) and any edges staged against them (no phantoms).
@@ -344,6 +356,14 @@ function collectStagedSubtree(all: readonly StagedChange[], roots: readonly Stag
         if (!after || !(urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) continue
       } else if (c.type === 'move_entity') {
         if (!urnDepth.has((c.after as { parentId?: string | null } | undefined)?.parentId ?? '')) continue
+      } else if (c.type === 'layer_config') {
+        // A column mapped to one of them lets go of it: the mapping goes with the create. Each such
+        // change puts back the part of the layout it found, so they are taken back newest first —
+        // deeper the later it was staged — and the column ends as it was before the first.
+        if (!mappedEntities(c).some((urn) => urnDepth.has(urn))) continue
+        depthById.set(c.id, maxDepth + 2 + order.get(c.id)!)
+        victims.push(c)
+        continue
       } else continue
       depthById.set(c.id, maxDepth + 1)
       victims.push(c)

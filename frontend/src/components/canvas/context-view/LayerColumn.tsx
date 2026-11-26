@@ -32,12 +32,12 @@ import { useNarrowVisibility } from '@/features/narrow/narrowStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
-import { DropHint } from './DropHint'
+import { ChangeKindTag, DropHint } from './DropHint'
 import { dropSurfaceClass, moveHint, sameHint, type DropHintSpec } from './dropKind'
 import { draggedEntity } from './entityDrag'
 import { draggedLayer, setDraggedLayer } from './layerDrag'
 import { useReparentNode } from './useReparentNode'
-import { COLUMN_KIND_ICON, columnKind, columnKindCopy, type ColumnKind, type ColumnKindCopy } from './columnKind'
+import { COLUMN_KIND_ICON, columnKind, columnKindCopy, type ColumnKind, type ColumnKindCopy, type MapOffer } from './columnKind'
 import { ColumnKindMark } from './ColumnKindMark'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import { resolveEntityName } from '@/lib/entityDisplayName'
@@ -300,6 +300,13 @@ interface LayerColumnProps {
   anchorIssue?: 'missing' | 'duplicate'
   /** A column of types: how many entities of other types are placed in it by hand. */
   handPlaced?: number
+  /** Mapping the column to an entity (a view change, columnKind.ts `mapOffer`): what it offers
+   *  here, or why not. Absent: nothing to say (a column of types, or no editing). */
+  mapOffer?: MapOffer
+  /** Open the picker that maps this column to an entity — or, mapped already, to another. */
+  onMapLayer?: (layerId: string) => void
+  /** Show the entity this column is mapped to as a row in it instead. */
+  onUnmapLayer?: (layerId: string) => void
   /** Folded into a spine. The canvas's fold window decides (useLayerFold);
    *  the column only asks, through `onFoldChange`. */
   isFolded?: boolean
@@ -473,6 +480,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   anchorMore,
   anchorIssue,
   handPlaced = 0,
+  mapOffer,
+  onMapLayer,
+  onUnmapLayer,
   subsetFeed,
   emptyText,
   onSearchInLayer,
@@ -564,6 +574,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [draftGroupName, setDraftGroupName] = useState('')
   const headerNameTaken = draftGroupName.trim() !== '' && !!groupNameClash([layer], layer.id, null, [draftGroupName])
   const [draftName, setDraftName] = useState(layer.name)
+  // A name left as the header shows it is no rename — least of all for a column whose name follows
+  // its entity, which a rename would stop following.
+  const commitRename = () => { if (onRenameLayer && draftName.trim() !== layer.name) onRenameLayer(layer.id, draftName) }
   // A rename asked for from outside (the layer menu, or a layer just inserted): open the name the
   // moment the request is new — adjusted during render, so there is no effect and no extra paint.
   const [renameSeen, setRenameSeen] = useState(0)
@@ -1843,6 +1856,31 @@ export const LayerColumn = React.memo(function LayerColumn({
       st.selectNode(id)
     })
   } : undefined
+  // Mapping it to an entity: map it (to another), show its entity as a row — or why not.
+  const layerId = layer.id
+  const mapping = useMemo((): { onMap?: () => void; onUnmap?: () => void; refused?: string } | undefined => {
+    if (!mapOffer) return undefined
+    if (mapOffer.kind === 'refused') return { refused: mapOffer.reason }
+    return {
+      onMap: onMapLayer ? () => onMapLayer(layerId) : undefined,
+      onUnmap: mapOffer.kind === 'mapped' && mapOffer.canUnmap && onUnmapLayer ? () => onUnmapLayer(layerId) : undefined,
+    }
+  }, [mapOffer, onMapLayer, onUnmapLayer, layerId])
+  // What the name's card offers for it.
+  const mapLabel = layer.anchorUrn ? 'Map to another entity…' : 'Map this column to…'
+  const cardMapping = useMemo((): CardMapping | undefined => {
+    if (!mapping) return undefined
+    if (mapping.refused) return { refused: mapping.refused, actions: [] }
+    const actions: CardMapping['actions'] = []
+    if (mapping.onUnmap && anchorName) actions.push({ label: `Show ${anchorName} as a row`, icon: LucideIcons.Rows3, onClick: mapping.onUnmap })
+    if (mapping.onMap) actions.push({ label: mapLabel, icon: LucideIcons.Link2, onClick: mapping.onMap })
+    return actions.length > 0 ? { actions } : undefined
+  }, [mapping, anchorName, mapLabel])
+  // An empty mapped column is its entity with nothing inside — never a column whose entity vanished.
+  const anchorTypeName = useMemo(() => {
+    const id = anchorNode?.data?.type as string | undefined
+    return id ? viewEntityTypes.find((t) => t.id === id)?.name ?? id : undefined
+  }, [anchorNode, viewEntityTypes])
 
   // dragleave fires on the element left, so a drag cancelled or dropped elsewhere clears it here.
   useEffect(() => {
@@ -1922,8 +1960,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   // another column, is a problem with the data to fix, not an empty layer: it
   // says why whatever this is.
   const emptyLayerMessage = usePreferencesStore(s => s.emptyLayerMessage) ?? 'always'
-  const showEmptyMessage = !!anchorIssue
+  const showEmptyMessage = !!anchorIssue || kind === 'mapped'
     || !(emptyLayerMessage === 'never' || (emptyLayerMessage === 'tracing-hidden' && isTracing))
+  // An empty column mapped to an entity: what is inside it — nothing, yet, or ever.
+  const emptyInside = kind === 'mapped' && anchorName && !emptyText ? anchorName : null
 
   return (
     <motion.div
@@ -2366,10 +2406,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => {
                       e.stopPropagation()
-                      if (e.key === 'Enter') { onRenameLayer(layer.id, draftName); setIsRenaming(false) }
+                      if (e.key === 'Enter') { commitRename(); setIsRenaming(false) }
                       if (e.key === 'Escape') { setDraftName(layer.name); setIsRenaming(false) }
                     }}
-                    onBlur={() => { onRenameLayer(layer.id, draftName); setIsRenaming(false) }}
+                    onBlur={() => { commitRename(); setIsRenaming(false) }}
                     className={cn("flex-1 min-w-0 px-2 rounded-lg bg-canvas-overlay border border-accent-lineage/60 font-semibold text-ink outline-none", header.inputClass)}
                   />
                 ) : (
@@ -2384,6 +2424,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     kindCopy={kindCopy}
                     onOpenAnchor={openAnchor}
                     anchorName={anchorName}
+                    mapping={cardMapping}
                   />
                 )}
                 <div className="flex-shrink-0 flex items-center gap-1.5">
@@ -3248,7 +3289,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                       ? 'This column\u2019s entity is gone'
                       : anchorIssue === 'duplicate'
                         ? 'Another column holds this entity'
-                        : emptyText ?? (isBlankModel ? 'No entities yet' : 'No assigned entities yet')}
+                        : emptyInside
+                          ? (addInsideName ? `Nothing inside ${emptyInside} yet` : `Nothing inside ${emptyInside}`)
+                          : emptyText ?? (isBlankModel ? 'No entities yet' : 'No assigned entities yet')}
                   </p>
                   {/* Plain token, not `/40`: an alpha suffix on a CSS-variable
                       token emits no CSS at all, so the neighbouring hint has been
@@ -3257,16 +3300,33 @@ export const LayerColumn = React.memo(function LayerColumn({
                   {anchorIssue && (
                     <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">
                       {anchorIssue === 'missing'
-                        ? 'It was removed from the source, so there is nothing left to show here. Delete the column, or point it at another entity.'
-                        : 'Two columns are built around the same entity; only the first can show it. Delete this one, or anchor it elsewhere.'}
+                        ? 'It was removed from the source, so there is nothing left to show here. Delete the column, or map it to another entity.'
+                        : 'Two columns are built around the same entity; only the first can show it. Delete this one, or map it to another entity.'}
                     </p>
                   )}
+                  {anchorIssue && mapping?.onMap && (
+                    <EmptyAction color={layer.color} icon={LucideIcons.Link2} label="Map to another entity…" onClick={mapping.onMap} />
+                  )}
+                  {emptyInside && (addInsideName ? (
+                    onAddToLayer
+                      ? <EmptyAction color={layer.color} icon={LucideIcons.Plus} label={`Add inside ${emptyInside}`} onClick={() => onAddToLayer(layer.id)} />
+                      : <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">What\u2019s added inside {emptyInside} shows here.</p>
+                  ) : (
+                    <>
+                      <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">
+                        {`${/^[aeiou]/i.test(anchorTypeName ?? '') ? 'An' : 'A'} ${anchorTypeName ?? 'entity of this type'} holds nothing, so this column stays empty.`}
+                      </p>
+                      {mapping?.onUnmap && (
+                        <EmptyAction color={layer.color} icon={LucideIcons.Rows3} label={`Show ${emptyInside} as a row`} onClick={mapping.onUnmap} />
+                      )}
+                    </>
+                  ))}
                   {/* The hint follows the affordance. `onAddToLayer` is what renders the "+"
                       (see the header above), and the caller only passes it inside a draft — so
                       with editing unavailable (read-only, or version control switched off) there
                       is no "+" anywhere on screen, and telling someone to click one is just a
                       small lie in the corner of the page. */}
-                  {onAddToLayer && !anchorIssue && (
+                  {onAddToLayer && !anchorIssue && !emptyInside && (
                     <p className="text-xs text-ink-muted/40 mt-1">
                       {addInsideName ? `Click + to add inside ${addInsideName}` : isBlankModel ? 'Click + to add entities' : 'Click + to assign entities'}
                     </p>
@@ -3662,6 +3722,33 @@ const TITLE_POPOVER_WIDTH = 320
 /** A layer card lists this many properties; Layer settings has them all. */
 const LAYER_CARD_PROPERTIES = 8
 
+/** What a column's card offers for mapping it to an entity (a view change), or why it can't. */
+interface CardMapping {
+  actions: Array<{ label: string; icon: LucideIcons.LucideIcon; onClick: () => void }>
+  refused?: string
+}
+
+/** One way on from an empty column: a soft pill in the column's colour. */
+function EmptyAction({ color, icon: Icon, label, onClick }: {
+  color?: string
+  icon: LucideIcons.LucideIcon
+  label: string
+  onClick: () => void
+}) {
+  const tint = color ?? '#6366f1'
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+      className="mt-3 inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+      style={{ color: tint, backgroundColor: `${tint}14`, borderColor: `${tint}33` }}
+    >
+      <Icon className="w-3.5 h-3.5" aria-hidden />
+      {label}
+    </button>
+  )
+}
+
 function LayerHeaderTitle({
   name,
   description,
@@ -3673,6 +3760,7 @@ function LayerHeaderTitle({
   kindCopy,
   onOpenAnchor,
   anchorName,
+  mapping,
 }: {
   name: string
   description?: string
@@ -3691,6 +3779,8 @@ function LayerHeaderTitle({
   /** A mapped column: open the details of the entity it is. */
   onOpenAnchor?: () => void
   anchorName?: string
+  /** Mapping it to an entity: the ways it offers, or why not. */
+  mapping?: CardMapping
 }) {
   const resolvedColor = color ?? '#6b7280'
   const propertyEntries = Object.entries(properties ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -3885,6 +3975,30 @@ function LayerHeaderTitle({
                           Open {anchorName ? `${anchorName}’s` : 'its'} details
                           <LucideIcons.ArrowUpRight className="w-3 h-3" aria-hidden />
                         </button>
+                      )}
+                      {mapping?.refused && (
+                        <div data-column-mapping="refused" className="pt-1">
+                          <DropHint compact kind="blocked" title="Can’t map this column to an entity" detail={mapping.refused} />
+                        </div>
+                      )}
+                      {mapping && mapping.actions.length > 0 && (
+                        <div data-column-mapping="offered" className="pt-1.5 space-y-1.5">
+                          <div className="flex flex-wrap gap-1.5">
+                            {mapping.actions.map(({ label, icon: Icon, onClick }) => (
+                              <button
+                                key={label}
+                                type="button"
+                                // Pressing it focused it, which asks the card to open again: it stays shut.
+                                onClick={(e) => { e.stopPropagation(); clearTimeout(openTimerRef.current); setOpen(false); onClick() }}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.10] dark:border-white/[0.10] bg-black/[0.03] dark:bg-white/[0.04] px-2 py-1 text-[12px] font-semibold text-ink hover:bg-accent-lineage/10 hover:text-accent-lineage hover:border-accent-lineage/30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                              >
+                                <Icon className="w-3.5 h-3.5" aria-hidden />
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          <ChangeKindTag kind="view" />
+                        </div>
                       )}
                     </div>
                   </div>
