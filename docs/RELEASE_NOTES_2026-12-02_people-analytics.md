@@ -1,7 +1,7 @@
 # Release Notes — People Analytics
 
 **Date:** 2026-12-02
-**Migrations:** `20261202_1000_pev_actor_ws`, `20261202_1100_people_index`, `20261203_1000_people_rollup` (revise `20261201_1000_ontology_create`)
+**Migrations:** `20261202_1000_pev_actor_ws`, `20261202_1100_people_index`, `20261203_1000_people_rollup` (revise `20261201_1000_ontology_create`); `20261204_1100_merge_people` joins them with main's head (`20261204_1000_discussion_path`) and runs nothing
 
 ---
 
