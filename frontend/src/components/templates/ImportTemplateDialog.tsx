@@ -9,20 +9,15 @@ import { motion } from 'framer-motion'
 import { FileJson, Loader2, Upload, X } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { useWorkspaceEntityTypes } from '@/hooks/useWorkspaceEntityTypes'
 import { useInvalidateLayoutTemplates } from '@/hooks/useLayoutTemplates'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { cn } from '@/lib/utils'
 import {
     layoutTemplateService, type LayoutTemplate, type TemplateVisibility,
 } from '@/services/layoutTemplateService'
-import { useWorkspacesStore } from '@/store/workspaces'
 import { AudiencePicker } from './AudiencePicker'
-import { FitRing } from './TemplateCard'
 import { TemplatePreview } from './TemplatePreview'
 import { readTemplateFile, type TemplateFileContent } from './templateFile'
-import { fitTemplate } from './templateFit'
-import { primarySource, useFitWorkspaces } from './useTemplateFits'
 
 /** "Finance flow" → "Finance flow (imported)", then "(imported 2)" … until it is free. */
 function freeName(name: string, taken: ReadonlySet<string>): string {
@@ -32,27 +27,6 @@ function freeName(name: string, taken: ReadonlySet<string>): string {
         const candidate = `${name.slice(0, 80 - suffix.length)}${suffix}`
         if (!taken.has(candidate.toLowerCase())) return candidate
     }
-}
-
-/** How the file's layers fit the active workspace's data, when it can be read. */
-function FitLine({ layers }: { layers: TemplateFileContent['layers'] }) {
-    const choices = useFitWorkspaces()
-    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
-    const workspace = choices.find(ws => ws.id === activeWorkspaceId) ?? choices[0]
-    const source = workspace ? primarySource(workspace) : undefined
-    const { types } = useWorkspaceEntityTypes(workspace?.id, source?.id)
-    if (!workspace || !types) return null
-    const fit = fitTemplate(layers, types)
-    if (fit.typedLayers === 0) return null
-    return (
-        <div className="flex items-center gap-2 text-xs text-ink-muted">
-            <FitRing matched={fit.matchedLayers} typed={fit.typedLayers} workspaceName={workspace.name} />
-            <span>
-                Matches {fit.matchedLayers} of {fit.typedLayers} layer{fit.typedLayers === 1 ? '' : 's'} in {workspace.name}
-                {fit.unmatchedTypes.length > 0 && <> — not there: {fit.unmatchedTypes.join(', ')}</>}
-            </span>
-        </div>
-    )
 }
 
 export function ImportTemplateDialog({ existingNames, onClose, onImported }: {
@@ -197,7 +171,6 @@ export function ImportTemplateDialog({ existingNames, onClose, onImported }: {
                                 <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
                                     <TemplatePreview layers={content.layers} />
                                     {content.description && <p className="text-xs text-ink-muted">{content.description}</p>}
-                                    <FitLine layers={content.layers} />
                                 </div>
                                 <label className="block">
                                     <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Name</span>

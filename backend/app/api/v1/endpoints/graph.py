@@ -26,7 +26,7 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
-    ChildrenBatchParent, ChildrenBatchResult,
+    ChildrenBatchParent, ChildrenBatchResult, UnplacedTopLevelResult,
     EdgesBeneathRequest, EdgesBeneathResult, TraceClosureRequest, TraceClosureResult,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
@@ -57,6 +57,7 @@ from backend.app.services.advanced_search_service import (
     follows_relationships,
 )
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.unplaced_top_level import unplaced_top_level
 from backend.app.services.versioning.ids import derived_entity_id, new_entity_id
 from backend.app.services.deep_search import (
     CompileError,
@@ -1995,6 +1996,58 @@ async def get_top_level_nodes(
         raise HTTPException(status_code=400, detail=str(exc))
     except ProviderConfigurationError as exc:
         # Logical error — not a cache-fallback case; surface as 400.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Ontology configuration error: {exc}. Configure containment "
+                "edge types on the active ontology (or set CONTAINMENT_EDGE_TYPES "
+                "as a deployment-level override)."
+            ),
+        )
+
+
+class _UnplacedTopLevelRequest(BaseModel):
+    """Body for /nodes/top-level/unplaced: the types a view is about, and the urns it places."""
+    entity_types: List[str] = Field(..., alias="entityTypes", min_length=1, max_length=50)
+    placed_urns: List[str] = Field(default_factory=list, alias="placedUrns", max_length=10_000)
+    limit: int = Field(50, ge=1, le=200)
+
+    class Config:
+        populate_by_name = True
+
+
+@router.post(
+    "/nodes/top-level/unplaced",
+    response_model=UnplacedTopLevelResult,
+    response_model_by_alias=True,
+)
+async def get_unplaced_top_level(
+    response: Response,
+    body: _UnplacedTopLevelRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+) -> UnplacedTopLevelResult:
+    """The top-level entities of ``entityTypes`` that a view does not place: how many, by type,
+    and the first ``limit`` of them by name (``complete`` False: the counts are a lower bound).
+
+    A view's health check asks this once per load, sending the urns it places of those types.
+    Read through ``/nodes/top-level``'s own provider read — label-indexed, keyset-paged, and the
+    draft's on a branch (``?branchId=``) — to the end of the set, under a ceiling
+    (``services/unplaced_top_level``). A POST: the placed urns are the request."""
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    async def read_page(cursor: Optional[str], size: int) -> TopLevelNodesResult:
+        return await engine.get_top_level_or_orphan_nodes(
+            entity_types=body.entity_types, limit=size, cursor=cursor, include_child_count=True,
+        )
+
+    async def compute() -> UnplacedTopLevelResult:
+        return await unplaced_top_level(read_page, placed=body.placed_urns, limit=body.limit)
+
+    try:
+        return await _bounded_compute(engine, compute)()
+    except CursorMismatchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ProviderConfigurationError as exc:
         raise HTTPException(
             status_code=400,
             detail=(

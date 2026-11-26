@@ -20,6 +20,7 @@ import { useMemo } from 'react'
 import { ChevronRight, Repeat } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { caseFold } from '@/features/ontology/lib/caseFold'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -73,16 +74,22 @@ export function buildHierarchyLevels(
     if (entityTypes.length === 0) return []
 
     const byId = new Map(entityTypes.map(et => [et.id, et]))
-    const canContain = (id: string) => byId.get(id)?.hierarchy?.canContain ?? []
+    // `To`, `to` and `TO` are one ontology type (caseFold): a root list or a
+    // canContain may spell a type otherwise than the type itself does.
+    const byFold = new Map<string, string>()
+    entityTypes.forEach(et => { if (!byFold.has(caseFold(et.id))) byFold.set(caseFold(et.id), et.id) })
+    const typeIds = (ids: readonly string[]) =>
+        [...new Set(ids.map(id => byFold.get(caseFold(id))).filter((id): id is string => !!id))]
+    const canContain = (id: string) => typeIds(byId.get(id)?.hierarchy?.canContain ?? [])
 
     // Roots, most-trustworthy source first: the schema's own list, then an
     // explicit level 0, then "never contained by anything else".
-    let rootIds = rootEntityTypes.filter(id => byId.has(id))
+    let rootIds = typeIds(rootEntityTypes)
     if (rootIds.length === 0) {
         rootIds = entityTypes.filter(et => et.hierarchy?.level === 0).map(et => et.id)
     }
     if (rootIds.length === 0) {
-        const contained = new Set(entityTypes.flatMap(et => et.hierarchy?.canContain ?? []))
+        const contained = new Set(entityTypes.flatMap(et => canContain(et.id)))
         rootIds = entityTypes.filter(et => !contained.has(et.id)).map(et => et.id)
     }
     if (rootIds.length === 0) return []

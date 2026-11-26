@@ -17,7 +17,7 @@ import { act, createEvent, fireEvent, screen, within } from '@testing-library/re
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
-import { anchoredEstate, cfoEstate, movesEstate } from '@/test/fixtures/traceEstates'
+import { anchoredEstate, cfoEstate, columnsEstate, movesEstate } from '@/test/fixtures/traceEstates'
 import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaStore } from '@/store/persona'
@@ -31,6 +31,7 @@ import { useBuildRowsStore } from '@/components/canvas/create/buildmode/buildRow
 import { makeRow } from '@/components/canvas/create/buildmode/buildRow'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 
 /** The columns, left to right, as rendered. */
 const columnIds = () =>
@@ -192,9 +193,16 @@ describe('a draft edited end to end in the Business view', () => {
     expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Edited layer “Warehouse”' })])
   }, 30000)
 
+  /** A layer's ⋯ → Delete layer…, and the dialog's default: remove the column, keep its entities. */
+  const deleteLayer = async (h: TraceCanvasHarness, layerId: string) => {
+    await fromLayerMenu(h, layerId, 'Delete layer…')
+    await act(async () => { fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove column' })) })
+    await h.settle()
+  }
+
   it('a layer\'s ⋯ deletes it, staged', async () => {
     const h = await openBusiness()
-    await fromLayerMenu(h, 'warehouse', 'Delete layer')
+    await deleteLayer(h, 'warehouse')
     expect(columnIds()).toEqual(['report'])
     expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Deleted layer “Warehouse”' })])
   }, 30000)
@@ -293,7 +301,7 @@ describe('a draft edited end to end in the Business view', () => {
 
   it('Undo takes the last change back', async () => {
     const h = await openBusiness()
-    await fromLayerMenu(h, 'warehouse', 'Delete layer')
+    await deleteLayer(h, 'warehouse')
     expect(columnIds()).toEqual(['report'])
     await act(async () => { fireEvent.click(document.querySelector<HTMLElement>('[data-toolbar-item="undo"]')!) })
     await h.settle()
@@ -303,7 +311,7 @@ describe('a draft edited end to end in the Business view', () => {
 
   it('Review & Save discards a change; Done keeps the draft open until nothing is pending', async () => {
     const h = await openBusiness()
-    await fromLayerMenu(h, 'warehouse', 'Delete layer')
+    await deleteLayer(h, 'warehouse')
     await fromLayerMenu(h, 'report', 'Insert layer to the right')
     expect(staged()).toHaveLength(2)
 
@@ -1211,5 +1219,477 @@ describe('moving an entity: a data change, said as one — and the view\'s own a
     await h.settle()
     expect(screen.getByRole('dialog', { name: 'Move Billing to another parent' }))
       .toHaveTextContent('Retail data pipeline has 3 other views. Each one that shows Billing will show it under the new parent once published.')
+  }, 30000)
+})
+
+// ─── Deleting a column, and taking an entity out: what it changes, said first ──────────────────
+//
+// The graph is the truth and a view is a lens. Deleting a column is a VIEW change — its entities
+// show where their parent or a type column puts them, or leave the view — unless the reader also
+// deletes them from the DATA: staged in the draft, with what is inside them, reviewed on save.
+// The dialog says which, and exactly what happens, before anything does.
+
+const staged = () => useStagedChangesStore.getState().changes
+const layout = () => normalizeReferenceLayout(useSchemaStore.getState().getActiveView()!.layout!.referenceLayout)
+const columnOfCard = (id: string) =>
+  document.getElementById(`layer-node-${id}`)?.closest<HTMLElement>('[data-layer-id].group\\/column')?.dataset.layerId
+const notice = (match: RegExp) => useNotificationStore.getState().notifications.find((n) => match.test(n.message))
+const press = async (h: TraceCanvasHarness, n: ReturnType<typeof notice>, label: string) => {
+  const action = [n?.action, n?.secondaryAction].find((a) => a?.label === label)
+  if (!action) throw new Error(`the notice offers no ${label}`)
+  await act(async () => { action.onClick() })
+  await h.settle()
+}
+const click = async (h: TraceCanvasHarness, el: HTMLElement) => {
+  await act(async () => { fireEvent.click(el) })
+  await h.settle()
+}
+const menu = () => document.querySelector<HTMLElement>('[data-canvas-context-menu]')
+const menuItem = (label: string) => [...(menu()?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+  .find((b) => b.querySelector('span.block')?.textContent?.trim() === label)
+const menuLabels = () => [...(menu()?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+  .map((b) => b.querySelector('span.block')?.textContent?.trim()).filter(Boolean)
+
+/** Right-click a column's header and choose Delete layer…: the dialog it opens. */
+const askToDelete = async (h: TraceCanvasHarness, layerId: string, name: string) => {
+  await act(async () => { fireEvent.contextMenu(headerOf(layerId)) })
+  await h.settle()
+  await click(h, menuItem('Delete layer…')!)
+  return screen.getByRole('dialog', { name: `Delete the ${name} column` })
+}
+/** A choice in the dialog: its tag, and what it says will happen, line by line. */
+const option = (kind: 'view' | 'data') => {
+  const el = document.querySelector<HTMLElement>(`[data-delete-choice="${kind}"]`)
+  if (!el) throw new Error(`the dialog offers no ${kind} choice`)
+  return {
+    el,
+    radio: el.querySelector<HTMLInputElement>('input[type="radio"]')!,
+    tag: el.querySelector('[data-change-tag]')?.textContent,
+    lines: [...el.querySelectorAll('li')].map((li) => li.textContent),
+  }
+}
+const confirm = (dialog: HTMLElement) => within(dialog).getAllByRole('button').at(-1)!
+
+/** What the delete-impact read answers, per entity: everything inside it, and its relationships. */
+const IMPACT: Record<string, { inside: string[]; edges: string[] }> = {
+  Ops: { inside: ['ops.a', 'ops.b', 'ops.c'], edges: ['e1', 'e2', 'e3', 'e4', 'shared'] },
+  Lab: { inside: [], edges: ['e5', 'shared'] },
+  Sales: { inside: ['CRM', 'leads', 'Quotes'], edges: ['c1', 'c2', 'c3', 'l1'] },
+  Marketing: { inside: ['Campaigns'], edges: ['c4'] },
+}
+const answerImpact = (url: string) => {
+  const m = /\/graph\/nodes\/([^/]+)\/delete-impact/.exec(url)
+  if (!m) return undefined
+  const urn = decodeURIComponent(m[1])
+  const i = IMPACT[urn] ?? { inside: [], edges: [] }
+  return {
+    nodes: [urn, ...i.inside].map((u) => ({ entityId: u, urn: u })),
+    edges: i.edges.map((e) => ({ entityId: e })),
+    nodeTotal: 1 + i.inside.length, edgeTotal: i.edges.length,
+  }
+}
+
+const openColumns = async (opts: { scope?: 'all' | 'curated'; persona?: 'business'; counted?: boolean; draft?: boolean } = {}) => {
+  if (opts.counted) {
+    useWorkspacesStore.setState({ workspaces: [{ id: 'harness-ws', name: 'Harness', dataSources: [{ id: 'ds-retail', label: 'Retail' }] }] } as never)
+  }
+  const h = await renderCanvasWithTrace(columnsEstate(), {
+    focus: 'Ops', draft: opts.draft ?? true, deferTrace: true, persona: opts.persona, entityScope: opts.scope,
+    entityTypes: [
+      ontologyType('domain', 'Domain', ['app'], [], 0),
+      ontologyType('app', 'App', ['dataset'], ['domain'], 1),
+      ontologyType('dataset', 'Dataset', [], ['app'], 2),
+    ],
+    ...(opts.counted ? {
+      dataSourceId: 'ds-retail',
+      viewCounts: { total: 0, byWorkspace: {}, byDataSource: { 'ds-retail': 3 } },
+      answer: answerImpact,
+    } : {}),
+  })
+  // The delete-impact read needs the draft's graph.
+  if (opts.counted) act(() => useBranchStore.setState({ graphId: 'harness-graph' } as never))
+  allowNesting()
+  await h.settle()
+  return h
+}
+
+const resetColumns = () => {
+  useStagedChangesStore.setState({ changes: [], redoStack: [], past: [], isReviewPanelOpen: false })
+  useNotificationStore.setState({ notifications: [] })
+  useHierarchyBuilderStore.getState().close()
+  useBranchStore.setState({ graphId: null } as never)
+  useWorkspacesStore.setState({ workspaces: [] } as never)
+}
+
+describe('deleting a column: a guided choice that says what happens to what it shows', () => {
+  beforeEach(resetColumns)
+
+  it('an empty column: a simple confirm — only the column goes, only this view', async () => {
+    const h = await openColumns()
+    const dialog = await askToDelete(h, 'spare', 'Spare')
+    expect(dialog).toHaveTextContent('Nothing is in it — only the column goes.')
+    expect(dialog.querySelector('[data-change-tag]')?.textContent).toBe('Only this view')
+    expect(document.querySelector('[data-delete-choice]')).toBeNull()
+    expect(confirm(dialog)).toHaveTextContent('Delete column')
+    await click(h, confirm(dialog))
+    expect(columnIds()).not.toContain('spare')
+    expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Deleted layer “Spare”' })])
+    const done = notice(/^Removed the Spare column\./)!
+    expect(done.message).toBe('Removed the Spare column. Only this view — the data is unchanged.')
+    await press(h, done, 'Undo')
+    expect(columnIds()).toEqual(['fin', 'domains', 'apps', 'picked', 'shelf', 'spare'])
+    expect(staged()).toEqual([])
+  }, 30000)
+
+  it('by default it removes only the column, saying where its entities go — here, out of the view (curated)', async () => {
+    const h = await openColumns()
+    const dialog = await askToDelete(h, 'picked', 'Picked')
+    expect(dialog).toHaveTextContent('Choose what happens to the 2 entities it shows.')
+    const keep = option('view')
+    expect(keep.radio.checked).toBe(true)
+    expect(keep.el).toHaveTextContent('Remove the column — keep its entities')
+    expect(keep.tag).toBe('Only this view')
+    expect(keep.lines).toEqual([
+      'Lab and Ops won’t be in this view.',
+      'The 2 entities placed here by hand lose that place.',
+    ])
+    expect(option('data').el).toHaveTextContent('Also delete its entities from the data')
+    expect(option('data').radio.checked).toBe(false)
+    expect(confirm(dialog)).toHaveTextContent('Remove column')
+
+    await click(h, confirm(dialog))
+    expect(columnIds()).toEqual(['fin', 'domains', 'apps', 'shelf', 'spare'])
+    expect(document.getElementById('layer-node-Ops')).toBeNull()
+    expect(layout().assignments).not.toHaveProperty('Ops')
+    expect(layout().assignments).not.toHaveProperty('Lab')
+    expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Deleted layer “Picked”' })])
+    expect(staged().some((c) => c.type === 'delete_entity')).toBe(false)
+    const done = notice(/^Removed the Picked column\./)!
+    expect(done.message).toBe('Removed the Picked column. Lab and Ops are no longer in this view. Only this view — the data is unchanged.')
+
+    // Undo puts back the column where it stood, and what was placed in it.
+    await press(h, done, 'Undo')
+    expect(columnIds()).toEqual(['fin', 'domains', 'apps', 'picked', 'shelf', 'spare'])
+    expect(columnOfCard('Ops')).toBe('picked')
+    expect(layout().assignments).toHaveProperty('Lab')
+    expect(staged()).toEqual([])
+  }, 30000)
+
+  it('in a view open to its data source, they fall to the column of their type', async () => {
+    const h = await openColumns({ scope: 'all' })
+    await askToDelete(h, 'picked', 'Picked')
+    expect(option('view').lines).toEqual([
+      'Lab and Ops will show in Domains, by their type.',
+      'The 2 entities placed here by hand lose that place.',
+    ])
+    await click(h, confirm(screen.getByRole('dialog')))
+    expect(columnOfCard('Ops')).toBe('domains')
+    expect(columnOfCard('Lab')).toBe('domains')
+  }, 30000)
+
+  it('one placed apart from its parent goes back under it, in its parent\'s column', async () => {
+    const h = await openColumns()
+    await askToDelete(h, 'apps', 'Apps')
+    expect(option('view').lines).toEqual([
+      'Quotes will go back under its parent, Sales, in Domains.',
+      'The one entity placed here by hand loses that place.',
+    ])
+    await click(h, confirm(screen.getByRole('dialog')))
+    const chevron = cardBody('Sales').querySelector('svg.lucide-chevron-right')?.closest('button')
+    if (chevron) await click(h, chevron as HTMLElement)
+    expect(columnOfCard('Quotes')).toBe('domains')
+  }, 30000)
+
+  it('groups and the groups inside them go with the column', async () => {
+    const h = await openColumns()
+    await askToDelete(h, 'shelf', 'Shelf')
+    expect(option('view').lines).toEqual([
+      'Archive and Vault won’t be in this view.',
+      'The 2 entities placed here by hand lose that place.',
+      'Its groups Shelf and Deep go with it.',
+    ])
+    await click(h, confirm(screen.getByRole('dialog')))
+    expect(columnIds()).not.toContain('shelf')
+    await press(h, notice(/^Removed the Shelf column\./), 'Undo')
+    const shelf = layout().layers.find((l) => l.id === 'shelf')!
+    expect(shelf.logicalNodes).toEqual([{ id: 'g-shelf', name: 'Shelf', type: 'group', children: [{ id: 'g-deep', name: 'Deep', type: 'group' }] }])
+    expect(layout().assignments.Vault).toMatchObject({ layerId: 'shelf', logicalNodeId: 'g-deep' })
+  }, 30000)
+
+  it('also deleting its entities from the data says how much, and who it reaches, first — and stages it as data changes', async () => {
+    const h = await openColumns({ counted: true })
+    const dialog = await askToDelete(h, 'picked', 'Picked')
+    await click(h, option('data').radio)
+    const data = option('data')
+    expect(data.tag).toBe('Changes the data · this view and 2 others on Retail')
+    expect(data.lines).toEqual([
+      '2 entities and 3 inside them; 6 relationships.',
+      'Staged in this draft — nothing is deleted until you save it; the other views follow once it’s published.',
+    ])
+    expect(confirm(dialog)).toHaveTextContent('Delete 2 entities')
+
+    await click(h, confirm(dialog))
+    expect(staged().map((c) => c.type).sort()).toEqual(['delete_entity', 'delete_entity', 'layer_config'])
+    expect(staged().filter((c) => c.type === 'delete_entity').map((c) => c.targetUrn).sort()).toEqual(['Lab', 'Ops'])
+    // The impact it showed is the one each delete carries to Review & Save — read once.
+    expect(staged().find((c) => c.targetUrn === 'Ops')!.summary).toBe("Delete 'Ops' — also removes 3 contained entities, 5 relationships")
+    expect(columnIds()).not.toContain('picked')
+    const done = notice(/^Removed the Picked column and staged deleting/)!
+    expect(done.message).toBe('Removed the Picked column and staged deleting its 2 entities, with everything inside them. A data change — this view now, and 2 other views on Retail once published.')
+    expect([done.action?.label, done.secondaryAction?.label]).toEqual(['Undo', 'Review & Save'])
+
+    // Undo takes the whole choice back: the deletes and the column.
+    await press(h, done, 'Undo')
+    expect(staged()).toEqual([])
+    expect(columnOfCard('Ops')).toBe('picked')
+    expect(useCanvasStore.getState().nodes.find((n) => n.id === 'Ops')?.data?.isPending).toBeUndefined()
+  }, 30000)
+
+  it('a staged delete is discarded from Review & Save like any other — the column stays removed', async () => {
+    const h = await openColumns({ counted: true })
+    await askToDelete(h, 'picked', 'Picked')
+    await click(h, option('data').radio)
+    await click(h, confirm(screen.getByRole('dialog')))
+    const ops = staged().find((c) => c.type === 'delete_entity' && c.targetUrn === 'Ops')!
+    act(() => useStagedChangesStore.getState().discard(ops.id))
+    await h.settle()
+    expect(staged().map((c) => c.type).sort()).toEqual(['delete_entity', 'layer_config'])
+    expect(useCanvasStore.getState().nodes.find((n) => n.id === 'Ops')?.data?.isPending).toBeUndefined()
+    expect(columnIds()).not.toContain('picked')
+  }, 30000)
+
+  it('names what is inside them but shown in another column — it goes too', async () => {
+    const h = await openColumns({ counted: true })
+    await askToDelete(h, 'domains', 'Domains')
+    expect(option('view').lines).toEqual([
+      'Marketing and Sales won’t be in this view.',
+      'The 2 entities placed here by hand lose that place.',
+    ])
+    await click(h, option('data').radio)
+    expect(option('data').lines).toEqual([
+      '2 entities and 4 inside them; 5 relationships.',
+      'Also deletes Quotes, inside them but shown in Apps.',
+      'Staged in this draft — nothing is deleted until you save it; the other views follow once it’s published.',
+    ])
+  }, 30000)
+
+  it('entities new in this draft have their creates discarded, not deletes staged — and Undo brings them back', async () => {
+    const h = await openColumns()
+    await click(h, within(headerOf('picked')).getByRole('button', { name: 'Add entity to Picked' }))
+    const input = screen.getByPlaceholderText('Enter display name...')
+    await act(async () => { fireEvent.change(input, { target: { value: 'Payroll' } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await h.settle()
+    act(() => useHierarchyBuilderStore.getState().close())
+    await h.settle()
+    const create = staged().find((c) => c.type === 'create_entity')!
+    const temp = create.targetUrn!
+    expect(columnOfCard(temp)).toBe('picked')
+
+    const dialog = await askToDelete(h, 'picked', 'Picked')
+    await click(h, option('data').radio)
+    expect(option('data').lines).toEqual([
+      '3 entities, with everything inside them.',
+      '1 is new in this draft — its create is discarded instead.',
+      'Staged in this draft — nothing is deleted until you save it; every view follows once it’s published.',
+    ])
+    await click(h, confirm(dialog))
+    expect(staged().some((c) => c.id === create.id)).toBe(false)
+    expect(staged().filter((c) => c.type === 'delete_entity').map((c) => c.targetUrn).sort()).toEqual(['Lab', 'Ops'])
+    expect(useCanvasStore.getState().nodes.some((n) => n.id === temp)).toBe(false)
+
+    await press(h, notice(/^Removed the Picked column and staged deleting/), 'Undo')
+    expect(staged().map((c) => c.id)).toEqual([create.id])
+    expect(columnOfCard(temp)).toBe('picked')
+  }, 30000)
+
+  it('where the draft takes no data edits, the data choice is offered disabled, saying why', async () => {
+    const h = await openColumns()
+    act(() => useFeaturesStore.setState({ values: { ...useFeaturesStore.getState().values, editModeEnabled: false } } as never))
+    await h.settle()
+    const dialog = await askToDelete(h, 'picked', 'Picked')
+    expect(option('data').radio.disabled).toBe(true)
+    expect(option('data').lines).toEqual(['Editing is turned off for this workspace, so nothing can be deleted from the data.'])
+    expect(option('view').radio.checked).toBe(true)
+    await click(h, confirm(dialog))
+    expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config' })])
+  }, 30000)
+
+  it('in a trace, nothing is deleted: the layer menu offers no Delete', async () => {
+    const h = await openColumns()
+    await h.startTrace('Ops')
+    await act(async () => { fireEvent.contextMenu(headerOf('picked')) })
+    await h.settle()
+    expect(menuLabels().some((l) => /^Delete/.test(l!))).toBe(false)
+  }, 30000)
+
+  it('the column\'s own trash, in the Technical header, opens the same dialog', async () => {
+    const h = await openColumns()
+    await click(h, within(headerOf('picked')).getByRole('button', { name: 'Delete Picked' }))
+    expect(screen.getByRole('dialog', { name: 'Delete the Picked column' })).toBeInTheDocument()
+  }, 30000)
+})
+
+describe('taking an entity out: from this view, or from the data — its menu says which', () => {
+  beforeEach(resetColumns)
+
+  /** An item of the menu on screen: its label's state, what it says under it, and its kind's tag. */
+  const item = (label: string) => {
+    const b = menuItem(label)
+    if (!b) throw new Error(`the menu offers no "${label}" (it has ${menuLabels().join(', ')})`)
+    return { el: b, off: b.disabled, hint: b.querySelector('span.block + span:not([data-change-tag])')?.textContent ?? null, tag: b.querySelector('[data-change-tag]')?.textContent }
+  }
+  const rightClick = async (h: TraceCanvasHarness, id: string) => {
+    await act(async () => { fireEvent.contextMenu(cardBody(id)) })
+    await h.settle()
+  }
+  const expand = async (h: TraceCanvasHarness, id: string) => {
+    const chevron = cardBody(id).querySelector('svg.lucide-chevron-right')?.closest('button')
+    if (!chevron) throw new Error(`no chevron on ${id}`)
+    await click(h, chevron as HTMLElement)
+  }
+  const toolbarUndo = (h: TraceCanvasHarness) => click(h, document.querySelector<HTMLElement>('[data-toolbar-item="undo"]')!)
+
+  it('"Remove from this view": a hand-placed entity leaves the view — only this view, with Undo', async () => {
+    const h = await openColumns()
+    await rightClick(h, 'Ops')
+    expect(item('Remove from this view')).toMatchObject({ off: false, tag: 'Only this view' })
+    expect(item('Delete from data')).toMatchObject({ off: false, tag: 'Changes the data · every view' })
+    await click(h, item('Remove from this view').el)
+
+    expect(document.getElementById('layer-node-Ops')).toBeNull()
+    expect(layout().assignments).not.toHaveProperty('Ops')
+    expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: "Remove 'Ops' from this view" })])
+    const done = notice(/^Ops is no longer in this view\./)!
+    expect(done.message).toBe('Ops is no longer in this view. Only this view — the data is unchanged.')
+    await press(h, done, 'Undo')
+    expect(columnOfCard('Ops')).toBe('picked')
+    expect(staged()).toEqual([])
+  }, 30000)
+
+  it('is no removal where its parent or a column\'s type shows it — it says why, and does nothing', async () => {
+    const h = await openColumns()
+    await expand(h, 'Sales')
+    await rightClick(h, 'CRM')
+    expect(item('Remove from this view')).toMatchObject({ off: true, hint: 'Shown because it’s inside Sales', tag: 'Only this view' })
+    await click(h, item('Remove from this view').el)
+    expect(staged()).toEqual([])
+    await act(async () => { fireEvent.keyDown(document, { key: 'Escape' }) })
+    await h.settle()
+
+    // Placed apart from its parent: taking the placement away puts it back under Sales — not out.
+    await rightClick(h, 'Quotes')
+    expect(item('Remove from this view')).toMatchObject({ off: true, hint: 'Shown because it’s inside Sales' })
+  }, 30000)
+
+  it('in a view open to its data source, a type column holds it all the same', async () => {
+    const h = await openColumns({ scope: 'all' })
+    await rightClick(h, 'Sales')
+    expect(item('Remove from this view')).toMatchObject({ off: true, hint: 'Shown because Domains holds every Domain' })
+    await act(async () => { fireEvent.keyDown(document, { key: 'Escape' }) })
+    await h.settle()
+    await rightClick(h, 'Ops')
+    expect(item('Remove from this view')).toMatchObject({ off: true, hint: 'Shown because Domains holds every Domain' })
+  }, 30000)
+
+  it('"Delete from data": the delete, said as a data change with who it reaches — staged, with Undo', async () => {
+    const h = await openColumns({ counted: true })
+    await rightClick(h, 'Ops')
+    expect(item('Delete from data').tag).toBe('Changes the data · this view and 2 others on Retail')
+    await click(h, item('Delete from data').el)
+    expect(staged().map((c) => [c.type, c.targetUrn])).toEqual([['delete_entity', 'Ops']])
+    expect(useCanvasStore.getState().nodes.find((n) => n.id === 'Ops')?.data?.isPending).toBe('delete')
+    const done = notice(/^Ops will be deleted from the data/)!
+    expect(done.message).toBe('Ops will be deleted from the data, with everything inside it. A data change — this view now, and 2 other views on Retail once published.')
+    expect([done.action?.label, done.secondaryAction?.label]).toEqual(['Undo', 'Review & Save'])
+    await press(h, done, 'Undo')
+    expect(staged()).toEqual([])
+    expect(useCanvasStore.getState().nodes.find((n) => n.id === 'Ops')?.data?.isPending).toBeUndefined()
+  }, 30000)
+
+  it('a new entity is discarded rather than deleted — and Undo brings it back', async () => {
+    const h = await openColumns()
+    await click(h, within(headerOf('picked')).getByRole('button', { name: 'Add entity to Picked' }))
+    const input = screen.getByPlaceholderText('Enter display name...')
+    await act(async () => { fireEvent.change(input, { target: { value: 'Payroll' } }) })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await h.settle()
+    act(() => useHierarchyBuilderStore.getState().close())
+    await h.settle()
+    const create = staged().find((c) => c.type === 'create_entity')!
+    await rightClick(h, create.targetUrn!)
+    await click(h, item('Delete from data').el)
+    expect(staged()).toEqual([])
+    const done = notice(/^Payroll was new in this draft/)!
+    expect(done.message).toBe('Payroll was new in this draft — it’s discarded.')
+    await press(h, done, 'Undo')
+    expect(staged().map((c) => c.id)).toEqual([create.id])
+    expect(columnOfCard(create.targetUrn!)).toBe('picked')
+  }, 30000)
+
+  it('a selection acts as one: both out of the view, or both deleted — one notice, one Undo', async () => {
+    const h = await openColumns()
+    act(() => { useCanvasStore.getState().selectNode('Ops'); useCanvasStore.getState().selectNode('Lab', true) })
+    await h.settle()
+    await rightClick(h, 'Ops')
+    await click(h, item('Remove 2 from this view').el)
+    expect(document.getElementById('layer-node-Ops')).toBeNull()
+    expect(document.getElementById('layer-node-Lab')).toBeNull()
+    expect(useNotificationStore.getState().notifications.map((n) => n.message))
+      .toEqual(['2 entities are no longer in this view. Only this view — the data is unchanged.'])
+    await toolbarUndo(h)
+    expect(columnOfCard('Ops')).toBe('picked')
+    expect(columnOfCard('Lab')).toBe('picked')
+    expect(staged()).toEqual([])
+
+    useNotificationStore.setState({ notifications: [] })
+    act(() => { useCanvasStore.getState().selectNode('Ops'); useCanvasStore.getState().selectNode('Lab', true) })
+    await h.settle()
+    await rightClick(h, 'Lab')
+    await click(h, item('Delete 2 from data').el)
+    expect(staged().map((c) => c.targetUrn).sort()).toEqual(['Lab', 'Ops'])
+    expect(useNotificationStore.getState().notifications.map((n) => n.message))
+      .toEqual(['2 entities will be deleted from the data, with everything inside them. A data change — every view that shows it, once published.'])
+    await press(h, notice(/^2 entities will be deleted/), 'Undo')
+    expect(staged()).toEqual([])
+  }, 30000)
+
+  it('a selection takes out what it can, and says what stays', async () => {
+    const h = await openColumns()
+    await expand(h, 'Sales')
+    act(() => { useCanvasStore.getState().selectNode('Ops'); useCanvasStore.getState().selectNode('CRM', true) })
+    await h.settle()
+    await rightClick(h, 'CRM')
+    await click(h, item('Remove 2 from this view').el)
+    expect(document.getElementById('layer-node-Ops')).toBeNull()
+    expect(columnOfCard('CRM')).toBe('domains')
+    expect(notice(/^Ops is no longer in this view\./)?.message)
+      .toBe('Ops is no longer in this view. CRM still shows, where this view puts it. Only this view — the data is unchanged.')
+  }, 30000)
+
+  it('where the draft takes no data edits, "Delete from data" says why — this view can still change', async () => {
+    const h = await openColumns()
+    act(() => useFeaturesStore.setState({ values: { ...useFeaturesStore.getState().values, editModeEnabled: false } } as never))
+    await h.settle()
+    await rightClick(h, 'Ops')
+    expect(item('Delete from data')).toMatchObject({ off: true, hint: 'Editing is turned off' })
+    expect(item('Remove from this view').off).toBe(false)
+  }, 30000)
+
+  it('outside a draft, both are offered to one who can start editing — disabled, saying how', async () => {
+    const h = await openColumns({ draft: false })
+    act(() => useBranchStore.setState({ graphId: 'harness-graph' } as never))
+    await h.settle()
+    await rightClick(h, 'Ops')
+    expect(item('Remove from this view')).toMatchObject({ off: true, hint: 'Start editing to change this view' })
+    expect(item('Delete from data')).toMatchObject({ off: true, hint: 'Start editing to change the data' })
+  }, 30000)
+
+  it('in a trace, neither is offered', async () => {
+    const h = await openColumns()
+    await h.startTrace('Ops')
+    await rightClick(h, 'Ops')
+    expect(menuLabels()).not.toContain('Remove from this view')
+    expect(menuLabels()).not.toContain('Delete from data')
   }, 30000)
 })

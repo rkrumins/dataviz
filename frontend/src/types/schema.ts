@@ -206,6 +206,13 @@ export interface ViewConfiguration {
    *  its base are what it shows. Written only by the server; absent on every other view. */
   search?: import('./searchView').SearchViewDefinition;
 
+  /** Whether a Context View is meant to show everything in its source (`config.coverage`):
+   *  'complete' — new top-level entities of its types are offered on the canvas as they
+   *  arrive; 'specialised' — a lens on part of the source, never offered them. Absent on
+   *  views made before views said: read as specialised. Changed on its own
+   *  (`PUT /views/{id}` `coverage`), never by a layout write. */
+  coverage?: 'complete' | 'specialised';
+
   // Permissions
   isDefault: boolean;
   /** The full visibility tier ('private' | 'workspace' | 'enterprise').
@@ -361,8 +368,17 @@ export interface ViewLayerConfig {
    *
    * Purely a rendering promotion: the anchor still carries its own assignment,
    * so a client that doesn't know this field renders the column the old way.
+   * The two always change together (layerMutations `mapLayerToEntity` / `unmapLayer`).
    */
   anchorUrn?: string;
+
+  /**
+   * The column's name is its anchor's: the header shows the entity's live
+   * display name while the column is mapped, and `name` holds the last one
+   * seen (what any other reader of `name` shows). Set when a column is mapped
+   * while nobody had named it; a rename clears it.
+   */
+  nameFromAnchor?: boolean;
 
   /**
    * The layer's own properties — an owner, a purpose, an SLA: whatever the

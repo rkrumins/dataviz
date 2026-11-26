@@ -56,6 +56,7 @@ import { WizardShell } from '@/components/wizard/WizardShell'
 import {
     CreationProgressBody,
     CreationSuccessBody,
+    NewRootsNote,
     CreationBusyFooter,
     CreationErrorFooter,
     CreationSuccessFooter,
@@ -87,7 +88,9 @@ import {
 import { recordEvent } from '@/services/telemetryService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePublishGate } from '@/hooks/usePublishGate'
-import { provisionBlankGraph, GraphNameUnavailableError, type BlankGraphResult } from '@/services/versioningApiService'
+import {
+    applyGraphChanges, provisionBlankGraph, resolveAndOpenDraft, GraphNameUnavailableError, type BlankGraphResult,
+} from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { SchemaScope } from '@/components/schema/SchemaScope'
@@ -102,6 +105,11 @@ import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, LayerNod
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
+import type { LayerFill } from '@/components/templates/templateFit'
+import {
+    listOf, mapMadeRoots, newRootProblems, rootCreateOps, rootsToMake, type NewRoot, type RootToMake,
+} from './layerSource'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 
 import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
@@ -241,6 +249,21 @@ export interface WizardFormData {
     /** That template's version whose layers were applied — what its later
      *  versions are compared with. */
     contextModelVersion?: number
+    /** The types the Layout step filled that template's layers with from this
+     *  data, by layer id, until the person keeps or changes them. Wizard-only:
+     *  never saved with the view. */
+    suggestedFills?: Record<string, LayerFill>
+    /** Blank models only: the top-level entity a column is mapped to, by layer id — of a root
+     *  type, named on Layout, and made with the model: in its draft, once the graph and the view
+     *  exist (`makeNewRoots`). Wizard-only: the view is saved with those columns hand-picked, and
+     *  the draft maps each to the entity made for it. */
+    newRoots?: Record<string, NewRoot>
+    /** Context Views only: whether the view is meant to show everything in its source
+     *  (`config.coverage`). The Layout step infers it from the suggestion the layers were made
+     *  with — 'complete' only when it left nothing out — and the Preview step shows it as a
+     *  switch the person can turn either way. An edit opens on the view's own; undefined there
+     *  is a view that never said, and is saved without one unless the person chooses. */
+    coverage?: 'complete' | 'specialised'
 }
 
 export type WizardStep =
@@ -1190,6 +1213,21 @@ function ViewWizardBody({
     // follow-up updateViewLayout fails, a retry re-drives ONLY the layout write
     // against this id instead of minting a second view.
     const createdViewIdRef = useRef<string | null>(null)
+    // A brand-new model's top-level entities: what to make, and how far making them got — held so a
+    // retry reuses the draft, the save's key (a save that landed unanswered is not made twice) and
+    // the urns it was answered with.
+    const newRootsRef = useRef<{
+        viewId: string
+        dataSourceId: string
+        viewName: string
+        layout: NormalizedReferenceLayout
+        pinned: WizardFormData['entityScope']
+        roots: RootToMake[]
+        key: string
+        branchId?: string
+        assigned?: Record<string, string>
+    } | null>(null)
+    const [newRootsOutcome, setNewRootsOutcome] = useState<{ names: string[]; error?: string; busy?: boolean } | null>(null)
 
     // Create-mode initial form: layers start empty for both existing and blank
     // scopes — blank models choose their starting layers via a template on Layout.
@@ -1225,7 +1263,7 @@ function ViewWizardBody({
     // save-and-close behaviour — there's nothing to navigate to.
     const [phase, setPhase] = useState<'steps' | 'creating' | 'success'>('steps')
     const [stageStates, setStageStates] = useState<Record<CreationStageId, CreationStageState>>({
-        provision: 'pending', create: 'pending', layout: 'pending', import: 'pending', publication: 'pending',
+        provision: 'pending', create: 'pending', layout: 'pending', roots: 'pending', import: 'pending', publication: 'pending',
     })
     const [submitError, setSubmitError] = useState<string | null>(null)
     /** A free graph name the server handed back after a late collision (blank models). */
@@ -1266,6 +1304,7 @@ function ViewWizardBody({
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
                 advancedFilters: fieldFiltersToActiveFilters(editingView.filters.fieldFilters),
                 scopeEdges: layers[0]?.scopeEdges,
+                coverage: editingView.coverage,
                 isValid: true,
             })
         }
@@ -1298,7 +1337,7 @@ function ViewWizardBody({
             setDriftDismissed(false)
             setPhase('steps')
             setSubmitError(null)
-            setStageStates({ provision: 'pending', create: 'pending', layout: 'pending', import: 'pending', publication: 'pending' })
+            setStageStates({ provision: 'pending', create: 'pending', layout: 'pending', roots: 'pending', import: 'pending', publication: 'pending' })
             clearSelection()
             clearAssignments()
             if (mode === 'create') {
@@ -1382,6 +1421,13 @@ function ViewWizardBody({
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
 
+    // A brand-new model's columns mapped to entities it makes: each named, once per type.
+    const plannedRoots = useMemo(
+        () => (isBlank && formData.layoutType === 'reference' ? rootsToMake(formData.layers, formData.newRoots) : []),
+        [isBlank, formData.layoutType, formData.layers, formData.newRoots],
+    )
+    const rootsNamed = plannedRoots.length === 0 || Object.keys(newRootProblems(formData.layers, formData.newRoots)).length === 0
+
     const canProceed = useMemo(() => {
         switch (currentStep) {
             case 'basics': {
@@ -1399,7 +1445,7 @@ function ViewWizardBody({
                 // before proceeding (empty is a valid, explicit choice). Reference
                 // layout is where templates/layers apply; other layouts pass through.
                 if (isBlank && formData.layoutType === 'reference') {
-                    return formData.layoutTemplateId !== undefined
+                    return formData.layoutTemplateId !== undefined && rootsNamed
                 }
                 return formData.layoutType !== undefined
             }
@@ -1415,10 +1461,10 @@ function ViewWizardBody({
             case 'assignment': return true
             // An imported view's selection is its own; an empty one (a rule-driven view) is valid.
             case 'entities': return isImport || formData.visibleEntityTypes.length > 0
-            case 'preview': return true
+            case 'preview': return rootsNamed
             default: return false
         }
-    }, [currentStep, formData, isImport, reconciled, importHydrated, importSession, importDataBranch])
+    }, [currentStep, formData, isImport, reconciled, importHydrated, importSession, importDataBranch, rootsNamed])
 
     const handleNext = useCallback(() => {
         const idx = activeSteps.findIndex(s => s.id === currentStep)
@@ -1591,6 +1637,49 @@ function ViewWizardBody({
         setCurrentStep('reconcile')
     }, [importSession])
 
+    /**
+     * Make a brand-new model's top-level entities and map its columns to them. The graph is new, so
+     * no draft is open on it yet (the canvas opens one for a blank model): open it, as the canvas
+     * would, for the view. Then ONE save makes every entity there, and each column is mapped to the
+     * urn its entity was given, in the draft's copy of the view's layout — the view keeps them
+     * hand-picked, as its entities exist only in the draft until it is published. A failure leaves
+     * them hand-picked, and the landing says so, with a retry.
+     */
+    const makeNewRoots = useCallback(async () => {
+        const run = newRootsRef.current
+        if (!run) return
+        const names = run.roots.map(r => r.name)
+        setNewRootsOutcome(prev => ({ names, error: prev?.error, busy: true }))
+        setStageStates(s => ({ ...s, roots: 'active' }))
+        try {
+            if (!run.branchId) {
+                const resolved = await resolveAndOpenDraft(resolvedWorkspaceId, {
+                    dataSourceId: run.dataSourceId, originatingViewId: run.viewId,
+                })
+                if (!resolved.myDraft?.branchId) throw new Error('A draft of the new model could not be opened.')
+                run.branchId = resolved.myDraft.branchId
+                // The view opens on that draft.
+                createdBranchRef.current = run.branchId
+            }
+            if (!run.assigned) {
+                const saved = await applyGraphChanges(resolvedWorkspaceId, run.dataSourceId, run.branchId,
+                    rootCreateOps(run.roots), `Top-level entities for “${run.viewName}”`, run.key)
+                run.assigned = saved.assigned ?? {}
+            }
+            const mapped = mapMadeRoots(run.layout, run.roots, run.assigned)
+            await updateViewLayout(run.viewId, {
+                referenceLayout: mapped,
+                entityScope: resolveWizardEntityScope(run.pinned, mapped, undefined),
+            }, run.branchId)
+            setStageStates(s => ({ ...s, roots: 'done' }))
+            setNewRootsOutcome({ names })
+        } catch (err) {
+            console.error('[ViewWizard] making the new model’s top-level entities failed', err)
+            setStageStates(s => ({ ...s, roots: 'failed' }))
+            setNewRootsOutcome({ names, error: err instanceof Error ? err.message : 'They could not be made.' })
+        }
+    }, [resolvedWorkspaceId])
+
     const handleSubmit = useCallback(async () => {
         if (isImport) {
             await handleImportSubmit()
@@ -1699,6 +1788,8 @@ function ViewWizardBody({
                         // creator can use that template.
                         contextModelId: formData.layoutType === 'reference' ? formData.contextModelId : undefined,
                         contextModelVersion: formData.layoutType === 'reference' ? formData.contextModelVersion : undefined,
+                        // A new Context View always says: one never offered a choice is specialised.
+                        coverage: formData.layoutType === 'reference' ? formData.coverage ?? 'specialised' : undefined,
                     })
                     if (!result.success || !result.data) {
                         setStageStates(s => ({ ...s, create: 'failed' }))
@@ -1755,6 +1846,13 @@ function ViewWizardBody({
                     createdViewRef.current = savedView
                     clearDraft()
                     setStageStates(s => ({ ...s, layout: 'done' }))
+                    if (plannedRoots.length > 0 && dataSourceId) {
+                        newRootsRef.current ??= {
+                            viewId: createdViewId, dataSourceId, viewName: formData.name, layout: normalizedLayout,
+                            pinned: formData.entityScope, roots: plannedRoots, key: newRequestId(),
+                        }
+                        await makeNewRoots()
+                    }
                     setPhase('success')
                 } catch (err) {
                     // The view itself was created; only its layout failed to save. Stay
@@ -1796,6 +1894,9 @@ function ViewWizardBody({
                         contextModelId: formData.contextModelId,
                         contextModelVersion: formData.contextModelVersion,
                     }),
+                    // The view's own, or the one chosen here. A view that never said and was
+                    // not given one here keeps saying nothing.
+                    ...(formData.layoutType === 'reference' && formData.coverage && { coverage: formData.coverage }),
                 }, fullViewQuery.data?.config)
                 if (wantsPublication) {
                     try {
@@ -1859,7 +1960,7 @@ function ViewWizardBody({
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, fullViewQuery.data, editingView, clearDraft, canPublishHere, notify, isImport, handleImportSubmit])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, fullViewQuery.data, editingView, clearDraft, canPublishHere, notify, isImport, handleImportSubmit, plannedRoots, makeNewRoots])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         markDirty()
@@ -1935,8 +2036,10 @@ function ViewWizardBody({
 
     // Auto-open: the view is saved and there is nowhere else to go, so open it for
     // the user unless they say otherwise ("Stay here").
+    // …unless what it was made with is still to make: the person reads why, and retries or opens it.
+    const holdOpen = !!newRootsOutcome?.error || !!newRootsOutcome?.busy
     const countdown = useAutoOpenCountdown({
-        enabled: mode === 'create' && phase === 'success',
+        enabled: mode === 'create' && phase === 'success' && !holdOpen,
         onFire: handleOpenNow,
     })
 
@@ -1983,7 +2086,15 @@ function ViewWizardBody({
             detail: 'Writing the layout this view opens with',
             state: stageStates.layout,
         },
-    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication, importStaged, importWithData])
+        ...(plannedRoots.length > 0 ? [{
+            id: 'roots' as const,
+            label: `Making ${listOf(plannedRoots.map(r => r.name))}`,
+            detail: plannedRoots.length === 1
+                ? 'In a draft of the new model, then mapping its column to it'
+                : 'In a draft of the new model, then mapping their columns to them',
+            state: stageStates.roots,
+        }] : []),
+    ], [isBlank, stageStates, isImport, isImportUpdate, importTargetLabel, importWantsPublication, importStaged, importWithData, plannedRoots])
 
     /** What the user just built — shown on the success step. */
     const successStats: CreationSummaryStat[] = useMemo(() => {
@@ -2034,7 +2145,7 @@ function ViewWizardBody({
         : phase === 'success'
             ? (
                 <CreationSuccessFooter
-                    remaining={countdown.remaining}
+                    remaining={holdOpen ? -1 : countdown.remaining}
                     onOpenNow={() => { countdown.cancel(); handleOpenNow() }}
                     onStayHere={() => { countdown.cancel(); handleStayHere() }}
                 />
@@ -2069,7 +2180,8 @@ function ViewWizardBody({
                 : (isImport ? (isImportUpdate ? 'Update' : 'Import') : 'Create')}
             terminalSubtitle={
                 phase === 'success'
-                    ? (importResult?.staged ? 'Waiting in a draft — opening it next' : 'All done — opening it next')
+                    ? (importResult?.staged ? 'Waiting in a draft — opening it next'
+                        : holdOpen ? 'Saved — its top-level entities are still to make' : 'All done — opening it next')
                     : submitError
                         ? 'Something went wrong — nothing was lost'
                         : isImport ? 'Importing your view…' : 'Saving your view…'
@@ -2093,6 +2205,14 @@ function ViewWizardBody({
                             scopeLabel={scopeContext?.dataSourceLabel}
                             isBlank={isBlank}
                             stats={successStats}
+                            note={newRootsOutcome && (
+                                <NewRootsNote
+                                    names={newRootsOutcome.names}
+                                    error={newRootsOutcome.error}
+                                    busy={newRootsOutcome.busy}
+                                    onRetry={() => void makeNewRoots()}
+                                />
+                            )}
                         />
                         {isImport && importResult && (
                             <ImportResultNote result={importResult} withData={importWithData ? importData?.started?.draftName : undefined}
@@ -2292,6 +2412,8 @@ function ViewWizardBody({
                         formData={formData}
                         scopeContext={scopeContext}
                         viewEntityScope={editingView?.content?.entityScope}
+                        // An import saves the file's view as it is: nothing to change here.
+                        updateFormData={isImport ? undefined : updateFormData}
                     />
                 </>
             )}

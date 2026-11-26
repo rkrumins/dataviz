@@ -28,6 +28,7 @@ import type { LineageEdge, LineageNode } from '@/store/canvas'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { layoutWriter } from '@/store/canvasLayoutBridge'
 import { assignEntities, restoreAssignment } from '@/components/canvas/context-view/assignmentMutations'
+import { mapLayerToEntity, restoreLayoutPart, type LayoutPart } from '@/components/canvas/context-view/layerMutations'
 import type { LayerAssignmentEntry } from '@/types/schema'
 import { clearPendingSave, getPendingSave, resumePendingSave } from '@/features/versioning/model/saveStagedChangesToDraft'
 import {
@@ -82,6 +83,16 @@ function rebuildDiscard(change: SerializableChange): (() => void) | undefined {
         else if (before.layout) w?.persist(before.layout)
       }
     }
+    case 'layer_config': {
+      // A column mapping carries the part of the layout it touched (ContextViewCanvas `stageMapping`):
+      // it puts that back, as it did before the reload — and so when the create it names goes.
+      const part = (change.before as { part?: LayoutPart } | undefined)?.part
+      if (!part) return undefined
+      return () => {
+        const w = layoutWriter()
+        if (w) w.persist(restoreLayoutPart(w.current(), part))
+      }
+    }
     default:
       return undefined
   }
@@ -98,11 +109,17 @@ export function buildSnapshot(scopeKey: string, branchId: string | null): Staged
   const cs = useCanvasStore.getState()
   // Exactly what the overlay treats as pending: the snapshot carries every canvas copy it would keep.
   const pending = overlayOnReplace({ nodes: [], edges: [] }, { nodes: cs.nodes, edges: cs.edges }, staged.changes)
-  const assignments = layoutWriter()?.current().assignments ?? {}
+  const layout = layoutWriter()?.current()
+  const assignments = layout?.assignments ?? {}
   const pins: Record<string, string> = {}
+  const created = new Set<string>()
   for (const n of pending.nodes) {
-    if (n.data?.isPending === 'create' && assignments[n.id]?.layerId) pins[n.id] = assignments[n.id].layerId
+    if (n.data?.isPending !== 'create') continue
+    created.add(n.id)
+    if (assignments[n.id]?.layerId) pins[n.id] = assignments[n.id].layerId
   }
+  const anchors: Record<string, string> = {}
+  for (const l of layout?.layers ?? []) if (l.anchorUrn && created.has(l.anchorUrn)) anchors[l.id] = l.anchorUrn
   return {
     version: SNAPSHOT_VERSION,
     scopeKey,
@@ -114,6 +131,7 @@ export function buildSnapshot(scopeKey: string, branchId: string | null): Staged
     pendingNodes: pending.nodes,
     pendingEdges: pending.edges,
     pins,
+    anchors,
     pendingSave: getPendingSave(scopeKey) ?? undefined,
   }
 }
@@ -170,15 +188,21 @@ export function useStagedDraftPersistence(
         applyStatus: 'idle',
         lastApplyResult: null,
       })
-      // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins).
+      // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins), and a
+      // column mapped to one its mapping (`anchors`) — where the view lost it, and only there.
       const writer = layoutWriter()
       const pins = Object.entries(snapshot.pins ?? {})
-      if (writer && pins.length > 0) {
+      const anchors = Object.entries(snapshot.anchors ?? {})
+      if (writer && (pins.length > 0 || anchors.length > 0)) {
         let layout = writer.current()
         for (const [urn, layerId] of pins) {
           if (!layout.assignments[urn] && layout.layers.some((l) => l.id === layerId)) {
             layout = assignEntities(layout, [urn], layerId)
           }
+        }
+        for (const [layerId, urn] of anchors) {
+          const layer = layout.layers.find((l) => l.id === layerId)
+          if (layer && !layer.anchorUrn) layout = mapLayerToEntity(layout, layerId, urn)
         }
         if (layout !== writer.current()) writer.persist(layout)
       }

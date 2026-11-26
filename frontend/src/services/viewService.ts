@@ -29,6 +29,8 @@ export interface CreateViewRequest {
     contextModelVersion?: number
     visibility?: ViewVisibility
     tags?: string[]
+    /** A Context View's `config.coverage`: whether it is meant to show everything in its source. */
+    coverage?: 'complete' | 'specialised'
 }
 
 export interface UpdateViewRequest {
@@ -44,6 +46,9 @@ export interface UpdateViewRequest {
     contextModelVersion?: number
     visibility?: ViewVisibility
     tags?: string[]
+    /** Sent on its own, beside the config (the server writes it over whatever the config says).
+     *  Left out, the view keeps its own. */
+    coverage?: 'complete' | 'specialised'
 }
 
 export interface ViewServiceResult<T> {
@@ -149,7 +154,7 @@ class ViewServiceImpl {
                 workspaceId: request.workspaceId,
                 dataSourceId: request.dataSourceId,
                 viewType: request.layoutType,
-                config: buildViewConfig(request),
+                config: { ...buildViewConfig(request), ...(request.coverage && { coverage: request.coverage }) },
                 visibility: request.visibility ?? 'private',
                 tags: request.tags,
             })
@@ -189,6 +194,7 @@ class ViewServiceImpl {
                 ...(request.layoutType && { viewType: request.layoutType }),
                 config: buildViewConfig(request, base),
                 tags: request.tags,
+                coverage: request.coverage,
             })
 
             if (request.visibility && request.visibility !== result.visibility) {

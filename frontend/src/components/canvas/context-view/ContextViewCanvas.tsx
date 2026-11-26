@@ -15,7 +15,7 @@
 
 import React, { useState, useMemo, useCallback, useRef, useEffect, useContext } from 'react'
 import { AnimatePresence, motion, useReducedMotionConfig } from 'framer-motion'
-import { cn } from '@/lib/utils'
+import { cn, generateId } from '@/lib/utils'
 import {
   useSchemaStore,
   normalizeEdgeType,
@@ -36,8 +36,16 @@ import { registerLayoutWriter, registerMoveHost } from '@/store/canvasLayoutBrid
 import { MOVE_NOTICE_MS, discardAction, useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useWorkspaceViewCounts } from '@/features/ontology/hooks/useWorkspaceViewCounts'
-import { columnChoices, dataTagText, moveFooter, viewNotice, type DataReach } from './changeKind'
+import { columnChoices, dataNoticeTail, dataTagText, moveFooter, reachNote, viewNotice, type DataReach } from './changeKind'
 import { MoveParentDialog } from './MoveParentDialog'
+import { MapColumnDialog, type MapCandidate } from './MapColumnDialog'
+import { DeleteColumnDialog, type DeleteColumnPlan } from './DeleteColumnDialog'
+import {
+  columnAfter, fateLines, fateOf, groupsLine, namesOf, outermostOf, placedLine, type PlacementAfter,
+} from './columnDelete'
+import type { DeleteImpact } from '@/services/versioningApiService'
+import { columnKind, mapOffer, type MapOffer } from './columnKind'
+import { nodeIndexOf } from '@/lib/storeIndex'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode, usePersonaStore } from '@/store/persona'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
@@ -72,9 +80,12 @@ import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers'
-import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
+import type { AggregatedEdgeInfo, GraphNode, TraceV2Result, UnplacedTopLevelResult } from '@/providers/GraphDataProvider'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
+import { claimedFeedTypes, layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
+import { toCanvasNode } from '@/lib/canvasNodeMapper'
+import { ENTITY_COLUMNS_MAX } from '@/components/views/ViewWizard/useTopLevelEntities'
+import { placedOfTypes, rootTypesToCheck } from './unplacedRoots'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -145,7 +156,7 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
-import { CanvasContextMenu, type ContextMenuAction, type MoveChoices } from '../CanvasContextMenu'
+import { CanvasContextMenu, type ContextMenuAction, type EntityExit, type MoveChoices } from '../CanvasContextMenu'
 import { compareSelectionAction, menuSelection } from '../selectionMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette, type CommandItem } from '../CommandPalette'
@@ -184,6 +195,7 @@ import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
+import { useColumnsOutOfSight } from './useColumnsOutOfSight'
 import { keepClearOfDrawer, shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -334,6 +346,11 @@ const NARROW_PRESET_ICONS: Record<PresetId, ContextMenuAction['icon']> = {
   downstream: 'ArrowDownRight',
 }
 const NO_URNS: readonly string[] = []
+// The placement preview's inputs while nothing is about to change: it then runs on nothing.
+const NO_NODES: LineageNode[] = []
+const NO_LAYERS: ViewLayerConfig[] = []
+const NO_PLACED = new Map<string, { layerId: string }>()
+const NO_ASSIGNMENTS: NormalizedReferenceLayout['assignments'] = {}
 
 /** Flag-on write policy for a NEW root entity (One Placement Contract): the layer to pin it to with
  *  an explicit entry, or undefined when none is needed — an open view whose contract already places
@@ -376,7 +393,7 @@ import { zoomScalesPercentages } from '@/lib/cssZoom'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
-import { deleteView, getView, updateViewLayout, viewToViewConfig } from '@/services/viewApiService'
+import { deleteView, getView, updateView, updateViewLayout, viewToViewConfig } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { useFailoverRetry } from '@/hooks/useFailoverRetry'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
@@ -460,6 +477,42 @@ function explicitDescendants(
 /** An entity by the name the reader sees it by, at the moment it is said. */
 const shownName = (data: EntityNameFields | null | undefined, fallback: string) =>
   resolveEntityName(data, usePersonaStore.getState().mode, fallback)
+
+/** The entity the canvas holds as `urn`, by the name the reader sees it by — now. */
+const nameNow = (urn: string) => shownName(nodeIndexOf(useCanvasStore.getState().nodes).get(urn)?.data, urn)
+
+const LAYER_PALETTE = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
+/** A new column's colour at `at` (in `ordered`, display order): one its neighbours don't already
+ *  wear, so it reads as its own. */
+function freshLayerColor(ordered: readonly ViewLayerConfig[], at: number): string {
+  const neighbours = new Set([ordered[at - 1]?.color, ordered[at]?.color].filter(Boolean).map((c) => String(c).toLowerCase()))
+  const start = ordered.length % LAYER_PALETTE.length
+  return LAYER_PALETTE.map((_, i) => LAYER_PALETTE[(start + i) % LAYER_PALETTE.length]).find((c) => !neighbours.has(c)) ?? LAYER_PALETTE[start]
+}
+
+/** A column's name as it shows: its entity's, while it follows it (ViewLayerConfig.nameFromAnchor). */
+const columnName = (layer: ViewLayerConfig) => (layer.nameFromAnchor && layer.anchorUrn ? nameNow(layer.anchorUrn) : layer.name)
+
+/** What adding top-level entities says: "3 Domains", "5 top-level entities". */
+function rootsWhat(found: { byType: ReadonlyArray<{ one: string; many: string }> }, n: number): string {
+  return found.byType.length === 1
+    ? `${n.toLocaleString()} ${n === 1 ? found.byType[0].one : found.byType[0].many}`
+    : `${n.toLocaleString()} top-level ${n === 1 ? 'entity' : 'entities'}`
+}
+
+/** The entity a column is mapped to, when a complete load found it gone from this source — now. */
+function goneAnchorOf(layer: ViewLayerConfig): string | null {
+  const { hydrationStatus, nodes } = useCanvasStore.getState()
+  return layer.anchorUrn && hydrationStatus === 'ready' && !nodeIndexOf(nodes).get(layer.anchorUrn) ? layer.anchorUrn : null
+}
+
+/** What a placement said besides where it went: the columns mapped to it that let go of it. */
+function letGo(before: NormalizedReferenceLayout, after: NormalizedReferenceLayout): string {
+  return before.layers
+    .filter((l) => l.anchorUrn && !after.layers.find((a) => a.id === l.id)?.anchorUrn)
+    .map((l) => ` The ${columnName(l)} column is no longer mapped to it.`)
+    .join('')
+}
 
 /** The rendered-tree context used to resolve custom-order reordering. */
 interface ReorderTreeContext {
@@ -1579,9 +1632,13 @@ export function ContextViewCanvas({
         orderKey = generateKeyBetween(assignmentOps.lastOrderKeyInLayer(base, layerId), null)
       } catch { /* malformed keys — fall back to the unkeyed alpha tail */ }
     }
-    const after = assignmentOps.assignEntities(base, [entityId], layerId, { clearDescendants, orderKey })
+    // A column mapped to it lets go of it in the same change: it is shown here now.
+    const after = layerOps.unmapMovedAnchors(before,
+      assignmentOps.assignEntities(base, [entityId], layerId, { clearDescendants, orderKey }))
     // What this drop changed — and only that comes back on discard (an edit made since stays).
-    const touched = assignmentOps.changedAssignments(before, after)
+    const touch = layerOps.touchedBy(before, after)
+    const was = layerOps.layoutPart(before, touch)
+    const now = layerOps.layoutPart(after, touch)
     persistReferenceLayout(after)
     // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
     // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
@@ -1600,13 +1657,13 @@ export function ContextViewCanvas({
         before: { layerId: prevLayerId, layerName: prevLayer?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
-        discard: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), before, touched)),
-        reapply: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), after, touched)),
+        discard: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)),
+        reapply: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)),
       },
     )
     useNotificationStore.getState().add({
       type: 'success',
-      message: viewNotice(`${shownName(entity?.data, entityName)} now shows in ${targetLayer?.name ?? 'that layer'}.`, clearDescendants.length),
+      message: viewNotice(`${shownName(entity?.data, entityName)} now shows in ${targetLayer?.name ?? 'that layer'}.${letGo(before, after)}`, clearDescendants.length),
       action: discardAction(id),
       durationMs: MOVE_NOTICE_MS,
     })
@@ -2100,13 +2157,6 @@ export function ContextViewCanvas({
     })
     : null), [placementContractOn, activeView?.content, activeView?.layout?.referenceLayout, activeLayers])
 
-  // Layer Strip chips — stable identity so the strip's scroll-measure
-  // effect doesn't re-attach on unrelated canvas re-renders.
-  const stripLayers = useMemo(
-    () => sortedLayers.map(l => ({ id: l.id, name: l.name, color: l.color || '#6366f1' })),
-    [sortedLayers],
-  )
-
   // Monotonic version counter — replaces brittle fingerprint sampling.
   // Incremented automatically by canvas store middleware on every node/edge mutation.
   const canvasVersion = useCanvasVersion()
@@ -2549,6 +2599,58 @@ export function ContextViewCanvas({
   // columns still show browse and every authoring affordance on them still
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
+
+  // ── What the canvas WOULD draw, with a layout about to change ──────────────────────────────────
+  // A column about to be deleted (Delete layer…'s dialog), or entities about to lose their placement
+  // (the entity menu's "Remove from this view"): the canvas's own placement, run on the layout as it
+  // would be — so what the dialog or the menu says happens is what the canvas then draws, by parent,
+  // type, scope and session drag alike. With nothing about to change it runs on nothing.
+  const [deleteColumnFor, setDeleteColumnFor] = useState<string | null>(null)
+  const sessionPlaced = feedPlacements ?? instanceAssignments
+  // What "Remove from this view" would take out: the entity right-clicked, or the selection it is part of.
+  // Keyed by the ids themselves, so the preview runs once per opening, not once per render.
+  const menuTarget = interactions.state.contextMenu.isOpen ? interactions.state.contextMenu.target : null
+  const removalKey = menuTarget?.type === 'node' && isDraft && !traceActive && !serverPlaced
+    ? menuSelection(menuTarget.id, selectedNodeIds).filter((id) => displayMap.has(id) && !displayMap.get(id)!.isLogical).join('\n')
+    : ''
+  const removalIds = useMemo(() => (removalKey ? removalKey.split('\n') : NO_URNS), [removalKey])
+  const placementPreview = useMemo(() => {
+    const now: NormalizedReferenceLayout = { layers: activeLayers, assignments: activeReferenceLayout.assignments }
+    if (deleteColumnFor) {
+      return { layout: layerOps.deleteColumn(now, deleteColumnFor), drops: (_id: string, layerId: string) => layerId === deleteColumnFor }
+    }
+    // Only a placement can be taken away: with none among them, the canvas as it is answers.
+    const placed = removalIds.filter((id) => now.assignments[id] || sessionPlaced.has(id))
+    if (placed.length === 0) return null
+    const out = new Set(placed)
+    return { layout: assignmentOps.unassignEntities(now, placed), drops: (id: string) => out.has(id) }
+  }, [deleteColumnFor, removalIds, activeLayers, activeReferenceLayout.assignments, sessionPlaced])
+  const previewInputs = useMemo(() => {
+    if (!placementPreview) return null
+    const keep = <T extends { layerId: string }>(placed: ReadonlyMap<string, T>) =>
+      new Map([...placed].filter(([id, a]) => !placementPreview.drops(id, a.layerId)))
+    return {
+      layers: [...placementPreview.layout.layers].sort((a, b) => a.order - b.order),
+      session: keep(sessionPlaced),
+      backend: keep(effectiveAssignments),
+      spec: placementContractOn
+        ? compilePlacementSpec({ content: { ...activeView?.content, entityScope: activeEntityScope }, layout: { referenceLayout: placementPreview.layout } })
+        : null,
+    }
+  }, [placementPreview, sessionPlaced, effectiveAssignments, placementContractOn, activeView?.content, activeEntityScope])
+  const placedAfter = useLayerAssignment({
+    nodes: previewInputs ? nodes : NO_NODES,
+    sortedLayers: previewInputs?.layers ?? NO_LAYERS,
+    nodeEdgeFingerprint: previewInputs ? nodeEdgeFingerprint : '',
+    instanceAssignments: previewInputs?.session ?? NO_PLACED,
+    effectiveAssignments: previewInputs?.backend ?? NO_PLACED,
+    nodeMap, childMap, parentMap,
+    assignments: placementPreview?.layout.assignments ?? NO_ASSIGNMENTS,
+    entityScope: activeEntityScope,
+    defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
+    placementSpec: previewInputs?.spec ?? null,
+    placementChains,
+  })
   // Connect mode only makes sense on a writable canvas: leaving the draft or
   // starting a trace ends it, rather than leaving a tool on that can't link.
   const connectEngaged = edgeConnect.state.tool || edgeConnect.state.mode === 'armed'
@@ -3698,8 +3800,10 @@ export function ContextViewCanvas({
     const targetLayer = before.layers.find(l => l.id === layerId)
     const prevLayerId = before.assignments[entity.urn]?.layerId
     const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
-    const after = assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants })
-    const touched = assignmentOps.changedAssignments(before, after)
+    const after = layerOps.unmapMovedAnchors(before, assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants }))
+    const touch = layerOps.touchedBy(before, after)
+    const was = layerOps.layoutPart(before, touch)
+    const now = layerOps.layoutPart(after, touch)
     persistReferenceLayout(after)
     // Clear any stale store instanceAssignment so the canonical move renders immediately (see handleAssignToLayer).
     useReferenceModelStore.getState().removeEntityAssignment(entity.urn)
@@ -3713,13 +3817,13 @@ export function ContextViewCanvas({
         before: { layerId: prevLayerId, layerName: before.layers.find(l => l.id === prevLayerId)?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entity.name}' → ${targetLayer?.name ?? layerId}`,
-        discard: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), before, touched)),
-        reapply: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), after, touched)),
+        discard: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)),
+        reapply: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)),
       },
     )
     useNotificationStore.getState().add({
       type: 'success',
-      message: viewNotice(`${shownName(nodeMap.get(nodeId)?.data, entity.name)} now shows in ${targetLayer?.name ?? layerId}.`, clearDescendants.length),
+      message: viewNotice(`${shownName(nodeMap.get(nodeId)?.data, entity.name)} now shows in ${targetLayer?.name ?? layerId}.${letGo(before, after)}`, clearDescendants.length),
       action: discardAction(id),
       durationMs: MOVE_NOTICE_MS,
     })
@@ -3731,7 +3835,7 @@ export function ContextViewCanvas({
   // the shared Undo/Redo (undo runs `discard` → persistReferenceLayout(before)), while staying DECOUPLED
   // from the data source — `layer_config` has no apply hook, so it never becomes a graph op
   // (stagedChangesToOps ignores it). persistReferenceLayout already ran, so the column is live; discard
-  // reverts the whole layout (layers + assignments, e.g. deleteLayer's remap).
+  // reverts the whole layout (layers + assignments).
   const stageLayerChange = useCallback((
     targetId: string,
     before: NormalizedReferenceLayout,
@@ -3754,16 +3858,11 @@ export function ContextViewCanvas({
   // left / right, the gutter "+"). Returns its id, so the caller can open its name.
   const addLayer = useCallback((name: string, opts?: { at?: number }): string => {
     const before = currentLayout()
-    const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
     const id = `layer-${Date.now()}`
     // Display order, whatever order the stored array happens to be in.
     const ordered = [...before.layers].sort((a, b) => a.order - b.order)
     const at = opts?.at == null ? ordered.length : Math.max(0, Math.min(opts.at, ordered.length))
-    // A colour its neighbours don't already wear, so the new column reads as its own.
-    const neighbours = new Set([ordered[at - 1]?.color, ordered[at]?.color].filter(Boolean).map((c) => String(c).toLowerCase()))
-    const start = before.layers.length % palette.length
-    const color = palette.map((_, i) => palette[(start + i) % palette.length]).find((c) => !neighbours.has(c)) ?? palette[start]
-    const fresh = { id, name, description: '', icon: 'Layers', color, entityTypes: [], order: at }
+    const fresh = { id, name, description: '', icon: 'Layers', color: freshLayerColor(ordered, at), entityTypes: [], order: at }
     // Appending keeps the stored array exactly as it was; inserting works in display order.
     const layers = opts?.at == null
       ? layerOps.appendLayer(before.layers, fresh)
@@ -3970,8 +4069,10 @@ export function ContextViewCanvas({
     const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const key = (entity?.data?.urn as string) ?? entityId
     const name = (entity?.data?.label as string) ?? key
-    const after = assignmentOps.assignEntities(before, [key], layerId, { logicalNodeId: groupId })
-    const touched = assignmentOps.changedAssignments(before, after)
+    const after = layerOps.unmapMovedAnchors(before, assignmentOps.assignEntities(before, [key], layerId, { logicalNodeId: groupId }))
+    const touch = layerOps.touchedBy(before, after)
+    const was = layerOps.layoutPart(before, touch)
+    const now = layerOps.layoutPart(after, touch)
     persistReferenceLayout(after)
     revealGroup(after.layers, layerId, groupId)
     useReferenceModelStore.getState().removeEntityAssignment(key)
@@ -3984,13 +4085,13 @@ export function ContextViewCanvas({
         before: { layerId: before.assignments[key]?.layerId },
         after: { layerId, logicalNodeId: groupId, entityName: name },
         summary: `Place '${name}' in group “${groupName}” (${layerNameOf(before, layerId)})`,
-        discard: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), before, touched)),
-        reapply: () => persistReferenceLayout(assignmentOps.restoreAssignments(currentLayout(), after, touched)),
+        discard: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)),
+        reapply: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)),
       },
     )
     useNotificationStore.getState().add({
       type: 'success',
-      message: viewNotice(`${shownName(entity?.data, name)} now shows in the group “${groupName}” in ${layerNameOf(before, layerId)}.`),
+      message: viewNotice(`${shownName(entity?.data, name)} now shows in the group “${groupName}” in ${layerNameOf(before, layerId)}.${letGo(before, after)}`),
       action: discardAction(id),
       durationMs: MOVE_NOTICE_MS,
     })
@@ -4012,29 +4113,40 @@ export function ContextViewCanvas({
     const trimmed = name.trim()
     const before = currentLayout()
     const old = before.layers.find((l) => l.id === id)
-    if (!trimmed || !old || old.name === trimmed) return
+    // Its own name, kept, also stops a column following its entity's.
+    if (!trimmed || !old || (old.name === trimmed && !old.nameFromAnchor)) return
     const after = { ...before, layers: layerOps.renameLayer(before.layers, id, trimmed) }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
-  const deleteLayer = useCallback((id: string) => {
+  // Delete a column — a view change: the layer, its groups and every placement in it go; what it
+  // showed then shows where its parent or a type column puts it, or leaves the view (the dialog
+  // said which). Staged as ONE change carrying just the part of the layout it touched, so its Undo
+  // puts the column back where it stood, with its placements, and keeps every later edit.
+  const removeColumn = useCallback((id: string): string | undefined => {
     const before = currentLayout()
     const target = before.layers.find((l) => l.id === id)
-    if (!target) return
-    const layers = layerOps.removeLayer(before.layers, id)
-    const fallbackId = layers[0]?.id
-    // Remap the deleted layer's assignments to the first remaining layer so their entities don't vanish
-    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them.
-    const assignments: NormalizedReferenceLayout['assignments'] = {}
-    for (const [urn, entry] of Object.entries(before.assignments)) {
-      if (entry.layerId !== id) assignments[urn] = entry
-      else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
-    }
-    const after = { ...before, layers, assignments }
+    if (!target) return undefined
+    const after = layerOps.deleteColumn(before, id)
+    const touch = layerOps.touchedBy(before, after)
+    const was = layerOps.layoutPart(before, touch)
+    const now = layerOps.layoutPart(after, touch)
     persistReferenceLayout(after)
-    stageLayerChange(`layer:${id}`, before, after, 'delete', `Deleted layer “${target.name}”`)
-  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+    // A session record of where an entity was dragged outranks the layout: one naming this column
+    // would keep its entity there, in a column that is gone.
+    const session = useReferenceModelStore.getState()
+    for (const [urn, a] of session.instanceAssignments) if (a.layerId === id || touch.urns.includes(urn)) session.removeEntityAssignment(urn)
+    return useStagedChangesStore.getState().stage({
+      type: 'layer_config',
+      targetId: `layer:${id}`,
+      before: { part: was },
+      after: { part: now, action: 'delete' },
+      summary: `Deleted layer “${columnName(target)}”`,
+      discard: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)),
+      reapply: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)),
+    })
+  }, [currentLayout, persistReferenceLayout])
 
   // Reorder a layer column (drag). Assignments key off layer id, so nodes and their edges move with the
   // column for free.
@@ -4047,6 +4159,123 @@ export function ContextViewCanvas({
     persistReferenceLayout(after)
     stageLayerChange(`layer:${draggedId}`, before, after, 'reorder', `Reordered layer “${dragged.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // ── Mapping a column to an entity ─────────────────────────────────────────────────────────────
+  // A MAPPED column is a top-level entity: its rows are what is inside it (columnKind.ts). Mapping
+  // is a view change — the layer's anchor and the entity's placement in it, together (layerMutations
+  // `mapLayerToEntity` / `unmapLayer`) — staged as ONE change carrying exactly the part of the layout
+  // it touched: its Undo (and Redo) puts back that part alone, a later edit stays, and the same
+  // part takes it back after a reload (useStagedDraftPersistence) or with a discarded create it
+  // names (stagedChangesStore).
+  const stageMapping = useCallback((
+    targetId: string, before: NormalizedReferenceLayout, after: NormalizedReferenceLayout,
+    action: 'map' | 'unmap' | 'own-column' | 'clean-up' | 'add-columns' | 'add-to-column', summary: string,
+    /** What else its Undo (and Redo) does on the canvas, after (before) the layout. */
+    also?: { discard: () => void; reapply: () => void },
+  ): string => {
+    const touch = layerOps.touchedBy(before, after)
+    const was = layerOps.layoutPart(before, touch)
+    const now = layerOps.layoutPart(after, touch)
+    persistReferenceLayout(after)
+    // A session record of where an entity was dragged outranks the layout; the layout is the truth now.
+    for (const urn of touch.urns) useReferenceModelStore.getState().removeEntityAssignment(urn)
+    return useStagedChangesStore.getState().stage({
+      type: 'layer_config',
+      targetId,
+      before: { part: was },
+      after: { part: now, action },
+      summary,
+      discard: () => { persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)); also?.discard() },
+      reapply: () => { also?.reapply(); persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)) },
+    })
+  }, [currentLayout, persistReferenceLayout])
+
+  // What the mapping gestures read at the moment they run (a ref: their identities stay put, and
+  // with them LayerColumn's memo).
+  const mapStateRef = useRef({ nodeLayerMap, parentMap })
+  useEffect(() => { mapStateRef.current = { nodeLayerMap, parentMap } })
+  /** What is inside `urn` that holds it to the column it is in now (a custom order's placements) —
+   *  it goes with `urn` to the column mapped to it. */
+  const heldWith = useCallback((urn: string, layout: NormalizedReferenceLayout, into: string): string[] => {
+    const from = mapStateRef.current.nodeLayerMap.get(urn) ?? layout.assignments[urn]?.layerId
+    if (!from || from === into) return []
+    return explicitDescendants(urn, mapStateRef.current.parentMap, layout.assignments).filter((d) => layout.assignments[d]?.layerId === from)
+  }, [])
+
+  /** Map a column to an entity — or to another one. */
+  const mapColumn = useCallback((layerId: string, urn: string) => {
+    if (traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const layer = before.layers.find((l) => l.id === layerId)
+    if (!layer) return
+    const name = nameNow(urn)
+    const after = layerOps.mapLayerToEntity(before, layerId, urn, { name, clearDescendants: heldWith(urn, before, layerId) })
+    if (after === before) return
+    const column = columnName(layer)
+    // The entity it was mapped to keeps its placement in it: drawn there now, as a row.
+    const was = layer.anchorUrn && layer.anchorUrn !== urn && after.assignments[layer.anchorUrn]?.layerId === layerId ? layer.anchorUrn : null
+    const id = stageMapping(`layer:${layerId}`, before, after, 'map', `Mapped “${column}” to ${name}`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Mapped “${column}” to ${name} — its rows are what’s inside ${name}.${was ? ` ${nameNow(was)} stays in it as a row.` : ''}`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [currentLayout, stageMapping, heldWith])
+
+  /** Show the entity a column is mapped to as a row in it again. */
+  const unmapColumn = useCallback((layerId: string) => {
+    if (traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const layer = before.layers.find((l) => l.id === layerId)
+    if (!layer?.anchorUrn) return
+    // Its entity gone, there is no row to show: the column keeps the name it has, hand-picked now.
+    if (goneAnchorOf(layer)) {
+      const id = stageMapping(`layer:${layerId}`, before, layerOps.unmapLayer(before, layerId), 'unmap', `Made “${layer.name}” a hand-picked column`)
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: viewNotice(`“${layer.name}” is a hand-picked column now.`),
+        action: discardAction(id),
+        durationMs: MOVE_NOTICE_MS,
+      })
+      return
+    }
+    const name = nameNow(layer.anchorUrn)
+    const after = layerOps.unmapLayer(before, layerId, { name })
+    const id = stageMapping(`layer:${layerId}`, before, after, 'unmap', `Showed ${name} as a row in “${columnName(layer)}”`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`${name} shows as a row now — the column is no longer mapped to it.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [currentLayout, stageMapping])
+
+  /** A top-level entity's own column, mapped to it, right after the column it is drawn in. */
+  const giveOwnColumn = useCallback((urn: string) => {
+    if (traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const ordered = [...before.layers].sort((a, b) => a.order - b.order)
+    const index = ordered.findIndex((l) => l.id === mapStateRef.current.nodeLayerMap.get(urn))
+    if (index < 0) return
+    const name = nameNow(urn)
+    const id = `layer-${Date.now()}`
+    // Named by nobody: it takes the entity's name, and follows it.
+    const fresh = { id, name: '', description: '', icon: 'Layers', color: freshLayerColor(ordered, index + 1), entityTypes: [], order: index + 1 }
+    const withColumn = { ...before, layers: layerOps.insertLayer(ordered, fresh, index + 1) }
+    const after = layerOps.mapLayerToEntity(withColumn, id, urn, { name, clearDescendants: heldWith(urn, before, id) })
+    const changeId = stageMapping(`layer:${id}`, before, after, 'own-column', `Gave ${name} its own column`)
+    setNewLayerId(id)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`${name} has its own column now, next to ${columnName(ordered[index])}.`),
+      action: discardAction(changeId),
+      durationMs: MOVE_NOTICE_MS,
+    })
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-layer-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' })
+    })
+  }, [currentLayout, stageMapping, heldWith])
 
   const sortModeLabel = (mode: LayerNodeSortMode) => SORT_MODE_LABELS[mode] ?? mode
 
@@ -5087,6 +5316,117 @@ export function ContextViewCanvas({
     return out
   }, [sortedLayers, anchorIssueByLayer, nodeMap, urnToIdMap, creationChildTypes, personaMode])
 
+  // A column named after its entity shows the entity's live name, in the reader's view, until
+  // someone names the column (ViewLayerConfig.nameFromAnchor) — on every surface that names it.
+  // Keyed on the names themselves, so a node update elsewhere changes nothing here.
+  const anchorNamesKey = sortedLayers.map((l) => {
+    if (!l.nameFromAnchor || !l.anchorUrn || anchorIssueByLayer.has(l.id)) return ''
+    const n = nodeMap.get(l.anchorUrn) ?? nodeMap.get(urnToIdMap.get(l.anchorUrn) ?? '')
+    return n ? resolveEntityName(n.data, personaMode, l.name) : ''
+  }).join('\u0000')
+  const shownLayers = useMemo(() => {
+    const names = anchorNamesKey.split('\u0000')
+    const out = sortedLayers.map((l, i) => (names[i] && names[i] !== l.name ? { ...l, name: names[i] } : l))
+    return out.some((l, i) => l !== sortedLayers[i]) ? out : sortedLayers
+  }, [sortedLayers, anchorNamesKey])
+  // Layer Strip chips — stable identity so the strip's scroll-measure
+  // effect doesn't re-attach on unrelated canvas re-renders.
+  const stripLayers = useMemo(
+    () => shownLayers.map(l => ({ id: l.id, name: l.name, color: l.color || '#6366f1' })),
+    [shownLayers],
+  )
+
+  // What mapping each column to an entity offers (columnKind.ts `mapOffer`) — in a draft that changes
+  // its layers (as the layer menu's edits: no trace, and not a view whose layers or placements come
+  // from elsewhere).
+  const mappingEditable = isDraft && !traceActive && !serverPlaced
+  const [mapDialogFor, setMapDialogFor] = useState<string | null>(null)
+  // Keyed on the offers themselves: they change with a column's kind or contents, not per node.
+  const mapOffersKey = mappingEditable ? JSON.stringify(sortedLayers.map((layer) => {
+    const issue = anchorIssueByLayer.get(layer.id)
+    const resolved = !!layer.anchorUrn && !!(nodeMap.get(layer.anchorUrn) ?? nodeMap.get(urnToIdMap.get(layer.anchorUrn) ?? ''))
+    const roots = (nodesByLayer.get(layer.id) ?? []).filter((n) => !n.isLogical).length
+    return [layer.id, mapOffer(layer, { kind: columnKind(layer, { resolved, issue }), roots })]
+  })) : '[]'
+  const mapOffers = useMemo(() => new Map((JSON.parse(mapOffersKey) as Array<[string, MapOffer | null]>)
+    .filter((entry): entry is [string, MapOffer] => !!entry[1])), [mapOffersKey])
+
+  // The picker's choices: every top-level entity the view holds, the column's own first.
+  const mapCandidates = useMemo((): MapCandidate[] => {
+    const layer = mapDialogFor ? sortedLayers.find((l) => l.id === mapDialogFor) : undefined
+    if (!layer) return []
+    const columnNames = new Map(shownLayers.map((l) => [l.id, l.name]))
+    const ownColumn = new Map(shownLayers.filter((l) => l.anchorUrn && !anchorIssueByLayer.has(l.id)).map((l) => [l.anchorUrn!, l]))
+    const typeName = (id: unknown) => schemaEntityTypes.find((t) => t.id === id)?.name ?? (typeof id === 'string' ? id : '')
+    const out: Array<MapCandidate & { here: boolean }> = []
+    for (const n of nodes) {
+      if (n.id.startsWith('logical:') || parentMap.has(n.id) || n.data?.isPending === 'delete') continue
+      const urn = (n.data?.urn as string) || n.id
+      if (urn === layer.anchorUrn) continue
+      const own = ownColumn.get(urn)
+      const at = nodeLayerMap.get(n.id)
+      const where = own ? `Has its own column — moves here from “${own.name}”`
+        : at === layer.id ? 'In this column'
+          : at ? `In ${columnNames.get(at) ?? 'another column'}` : 'Not shown in this view yet'
+      out.push({ id: urn, name: resolveEntityName(n.data, personaMode, n.id), type: typeName(n.data?.type), where, here: at === layer.id })
+    }
+    return out
+      .sort((a, b) => Number(b.here) - Number(a.here) || a.name.localeCompare(b.name))
+      .map(({ here: _here, ...c }) => c)
+  }, [mapDialogFor, sortedLayers, shownLayers, anchorIssueByLayer, schemaEntityTypes, nodes, parentMap, nodeLayerMap, personaMode])
+  const mapDialogColumn = useMemo(() => {
+    const layer = mapDialogFor ? shownLayers.find((l) => l.id === mapDialogFor) : undefined
+    return layer ? { name: layer.name, mapped: !!layer.anchorUrn } : null
+  }, [mapDialogFor, shownLayers])
+
+  // "Give ‹it› its own column", from a top-level entity's row — drawn in a column, not its own.
+  const ownColumnFor = useCallback((nodeId: string) => {
+    if (!mappingEditable || nodeId.startsWith('logical:') || parentMap.has(nodeId)) return null
+    const node = nodeMap.get(nodeId)
+    const from = nodeLayerMap.get(nodeId)
+    if (!node || node.data?.isPending === 'delete' || !from) return null
+    if (sortedLayers.some((l) => l.id === from && l.anchorUrn === nodeId)) return null
+    return { name: resolveEntityName(node.data, personaMode, nodeId), onGive: () => giveOwnColumn(nodeId) }
+  }, [mappingEditable, parentMap, nodeMap, nodeLayerMap, sortedLayers, personaMode, giveOwnColumn])
+
+  // The first entity added to an EMPTY hand-picked column may BE the column — offered, one click,
+  // never done for the reader. A batch adds several at once: offered only when, once it has
+  // settled, this one entity is all the column holds.
+  const offerColumnFor = useCallback((urn: string, layerId: string) => {
+    const layer = currentLayout().layers.find((l) => l.id === layerId)
+    if (!mappingEditable || !layer || layer.anchorUrn || (layer.entityTypes?.length ?? 0) > 0 || (layer.rules?.length ?? 0) > 0
+      || (layer.logicalNodes?.length ?? 0) > 0 || (nodesByLayerRef.current.get(layerId)?.length ?? 0) > 0) return
+    queueMicrotask(() => {
+      const placed = Object.entries(currentLayout().assignments).filter(([, a]) => a.layerId === layerId)
+      if (placed.length !== 1 || placed[0][0] !== urn) return
+      const name = nameNow(urn)
+      const column = columnName(layer)
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: `Added ${name} to ${column} — the column can be ${name} itself, showing what’s inside it.`,
+        detail: viewNotice('').trim(),
+        action: {
+          label: `Make this column ${name}`,
+          onClick: () => {
+            // Only while it is still all the column holds: mapping a column of several is never offered.
+            const others = (nodesByLayerRef.current.get(layerId) ?? []).filter((n) => n.id !== urn)
+            if (others.length > 0) {
+              useNotificationStore.getState().add({
+                type: 'info',
+                message: `${column} holds more than ${name} now — mapping isn’t offered for a column of several entities.`,
+              })
+              return
+            }
+            mapColumn(layerId, urn)
+          },
+        },
+        // The other answer, said as plainly: nothing changes.
+        secondaryAction: { label: 'Keep it a row', onClick: () => {} },
+        durationMs: MOVE_NOTICE_MS,
+      })
+    })
+  }, [mappingEditable, currentLayout, mapColumn])
+
   // Move to Layer, guided: each column, with what choosing it changes for the entity right-clicked
   // — a column mapped to an entity offers a move inside it (the data) beside showing it there (the
   // view). The mapped entity is the one the column's header resolves (loaded, not missing, not
@@ -5098,7 +5438,7 @@ export function ContextViewCanvas({
       name: resolveEntityName(nodeMap.get(nodeId)?.data, personaMode, entity.name),
       reach: dataReach,
       footer: moveFooter(dataReach),
-      choices: columnChoices(sortedLayers, {
+      choices: columnChoices(shownLayers, {
         entityId: nodeId,
         shownIn: nodeLayerMap.get(nodeId),
         anchorOf: (layer) => {
@@ -5593,8 +5933,10 @@ export function ContextViewCanvas({
     // discarded before this Save — see assignmentMutations).
     remapEntityIds: (ids) => {
       remapEntityIds(ids)
-      persistReferenceLayout(assignmentOps.pruneTempAssignments(
-        assignmentOps.remapAssignmentUrns(currentLayout(), ids)))
+      // A column mapped to a new entity follows it to its urn too; one still mapped to a temp urn
+      // names a create discarded before this Save.
+      persistReferenceLayout(layerOps.pruneTempAnchors(layerOps.remapLayerAnchors(assignmentOps.pruneTempAssignments(
+        assignmentOps.remapAssignmentUrns(currentLayout(), ids)), ids)))
       // An entity open before the save stays open after it: its expanded state was
       // keyed by the temp urn, so a saved parent came back collapsed ("my children
       // vanished").
@@ -5603,7 +5945,7 @@ export function ContextViewCanvas({
     // A save that created nothing still drops any placement keyed by a temp urn — a create
     // that was staged (writing its placement) then discarded before this Save.
     pruneTempAssignments: () => {
-      persistReferenceLayout(assignmentOps.pruneTempAssignments(currentLayout()))
+      persistReferenceLayout(layerOps.pruneTempAnchors(assignmentOps.pruneTempAssignments(currentLayout())))
     },
     flushLayoutSave,
     onOpenDraft: canManage && versioningEnabled && canEnterEdit && editModeEnabled ? handleEnterEdit : undefined,
@@ -6653,31 +6995,194 @@ export function ContextViewCanvas({
     interactions.openContextMenu(e, { type: 'layer', layerId })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactions.openContextMenu])
-  const deleteLayerWithUndo = useCallback((layerId: string) => {
-    const before = currentLayout()
-    const target = before.layers.find((l) => l.id === layerId)
-    if (!target) return
-    const ordered = [...before.layers].sort((a, b) => a.order - b.order)
-    const heir = ordered.find((l) => l.id !== layerId)
-    const placed = Object.values(before.assignments).filter((a) => a.layerId === layerId).length
-    deleteLayer(layerId)
+  // ── Delete layer…: what happens to what the column shows, said first (DeleteColumnDialog) ────────
+  // Where each entity goes without it is read off the placement preview above, run on the layout
+  // with the column gone. Deleting them from the data too needs a draft that takes data edits.
+  const deleteColumnPlan = useMemo((): (DeleteColumnPlan & { gone: string[]; targets: string[] }) | null => {
+    const layer = deleteColumnFor ? sortedLayers.find((l) => l.id === deleteColumnFor) : undefined
+    if (!layer) return null
+    const nameOf = (id: string) => resolveEntityName(nodeMap.get(id)?.data, personaMode, id)
+    const columnOf = (layerId: string) => { const l = sortedLayers.find((x) => x.id === layerId); return l ? columnName(l) : layerId }
+    const shownIn = (id: string) => nodeLayerMap.get(id) ?? promotedAnchors.get(id)
+    // What it shows at its top level, through its groups. A column that IS an entity stands for it.
+    const anchor = layer.anchorUrn && nodeMap.has(layer.anchorUrn) ? layer.anchorUrn : undefined
+    const roots: string[] = []
+    const walk = (list: readonly HierarchyNode[]) => list.forEach((n) => (n.isLogical ? walk(n.children) : roots.push(n.id)))
+    walk(nodesByLayer.get(layer.id) ?? [])
+    const items = anchor ? [anchor, ...roots.filter((id) => id !== anchor && parentMap.get(id) !== anchor)] : roots
+    const after: PlacementAfter = { layerOf: placedAfter.nodeLayerMap, promoted: placedAfter.promotedAnchors }
+    const holdsType = (layerId: string, id: string) =>
+      (sortedLayers.find((l) => l.id === layerId)?.entityTypes ?? []).includes(String(nodeMap.get(id)?.data?.type ?? ''))
+    const fates = items.map((id) => ({ id, fate: fateOf(id, after, (x) => parentMap.get(x), holdsType) }))
+    // Its entity's own placement is the mapping, not a hand placement — even when that entity is gone.
+    const placed = Object.entries(activeReferenceLayout.assignments).filter(([urn, a]) => a.layerId === layer.id && urn !== layer.anchorUrn).length
+    const groups = layerOps.listGroups(sortedLayers, layer.id).map((g) => g.name)
+    const targets = anchor ? [anchor] : outermostOf(items, (x) => parentMap.get(x))
+    const fresh = targets.filter(assignmentOps.isTempUrn)
+    // What is loaded inside them: counted for the new ones (no impact read knows them), and named
+    // where another column draws it — it goes too.
+    let freshInside = 0
+    const also: Array<{ name: string; column: string }> = []
+    const seen = new Set(targets)
+    for (const target of targets) {
+      const stack = [target]
+      while (stack.length > 0) {
+        const id = stack.pop()!
+        for (const child of childMap.get(id) ?? []) {
+          if (seen.has(child)) continue
+          seen.add(child)
+          stack.push(child)
+          if (assignmentOps.isTempUrn(target)) freshInside++
+          const at = shownIn(child)
+          if (at && at !== layer.id && at !== shownIn(id)) also.push({ name: nameOf(child), column: columnOf(at) })
+        }
+      }
+    }
+    const blocked = !editModeEnabled ? 'Editing is turned off for this workspace, so nothing can be deleted from the data.'
+      : !draftWritable ? 'This draft is read-only for you, so nothing can be deleted from the data.'
+        : targets.length === 0 ? 'Nothing it shows is loaded, so nothing here can be deleted from the data.' : undefined
+    return {
+      layerId: layer.id,
+      name: columnName(layer),
+      mapped: anchor ? nameOf(anchor) : undefined,
+      count: items.length,
+      empty: items.length === 0 && placed === 0,
+      keep: [...fateLines(fates, nameOf, columnOf), ...placedLine(placed), ...groupsLine(groups)],
+      data: blocked ? { blocked } : { saved: targets.filter((t) => !assignmentOps.isTempUrn(t)), fresh: { count: fresh.length, inside: freshInside }, also },
+      gone: fates.filter((f) => f.fate.kind === 'gone').map((f) => nameOf(f.id)),
+      targets,
+    }
+  }, [deleteColumnFor, sortedLayers, nodeMap, personaMode, nodeLayerMap, promotedAnchors, nodesByLayer, parentMap, childMap,
+    placedAfter, activeReferenceLayout.assignments, editModeEnabled, draftWritable])
+
+  /** Delete entities from the data, staged as ONE action: a saved one's delete (carrying its impact,
+   *  when already read), a new one's create discarded instead — and `along`, staged with them. One
+   *  Undo takes it all back, the new ones included. */
+  const stageDataDeletes = useCallback((ids: readonly string[], impacts?: ReadonlyMap<string, DeleteImpact>, along?: () => string | undefined) => {
+    const store = useStagedChangesStore.getState()
+    const createOf = new Map<string, string>()
+    for (const c of store.changes) if (c.type === 'create_entity') createOf.set(c.targetId, c.id)
+    const creates = ids.flatMap((id) => (createOf.has(id) ? [createOf.get(id)!] : []))
+    const staged: string[] = []
+    const step = store.asOneStep(() => {
+      if (creates.length > 0) store.discardMany(creates, { undoable: true })
+      staged.push(...interactions.stageDeletes(ids.filter((id) => !createOf.has(id)), impacts))
+      const more = along?.()
+      if (more) staged.push(more)
+    })
+    return { step, staged }
+  }, [interactions])
+
+  const confirmRemoveColumn = useCallback(() => {
+    const plan = deleteColumnPlan
+    const id = plan && removeColumn(plan.layerId)
+    if (!plan || !id) return
+    const gone = plan.gone.length > 0 ? ` ${namesOf(plan.gone)} ${plan.gone.length === 1 ? 'is' : 'are'} no longer in this view.` : ''
+    useNotificationStore.getState().add({
+      type: 'success', message: viewNotice(`Removed the ${plan.name} column.${gone}`), action: discardAction(id), durationMs: MOVE_NOTICE_MS,
+    })
+  }, [deleteColumnPlan, removeColumn])
+
+  // A plain function: the dialog keeps no memo for it to break, and the reach is per render.
+  const confirmDeleteColumnData = (impacts: ReadonlyMap<string, DeleteImpact>) => {
+    const plan = deleteColumnPlan
+    if (!plan) return
+    // Its entities first: a new one's discarded create takes back a mapping to it, and only then
+    // does the column go — so nothing brings the column back but this action's own Undo.
+    const { step, staged } = stageDataDeletes(plan.targets, impacts, () => removeColumn(plan.layerId))
+    const n = plan.targets.length
+    const what = plan.mapped ?? `its ${n.toLocaleString()} ${n === 1 ? 'entity' : 'entities'}`
     useNotificationStore.getState().add({
       type: 'success',
-      message: placed > 0 && heir
-        ? `Deleted layer “${target.name}” — its ${placed.toLocaleString()} placed ${placed === 1 ? 'entity moves' : 'entities move'} to “${heir.name}”.`
-        : `Deleted layer “${target.name}”.`,
-      action: {
-        label: 'Undo',
-        onClick: () => {
-          const staged = useStagedChangesStore.getState()
-          const changes = staged.getChangesForTarget(`layer:${layerId}`)
-          const last = changes[changes.length - 1]
-          if (last) staged.discard(last.id)
-        },
-      },
-      durationMs: 8000,
+      message: `Removed the ${plan.name} column and staged deleting ${what}, with everything inside ${plan.mapped || n === 1 ? 'it' : 'them'}. ${dataNoticeTail(dataReach)}`,
+      detail: reachNote(dataReach, personaMode),
+      action: discardAction(staged, step),
+      secondaryAction: { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() },
+      durationMs: MOVE_NOTICE_MS,
     })
-  }, [currentLayout, deleteLayer])
+  }
+
+  // ── An entity's two ways out, from its menu ─────────────────────────────────────────────────────
+  // Out of this view (a view change: its placement goes), or out of the data (a data change: its
+  // delete staged) — for it, or the selection it is part of, with one notice. Only a real removal is
+  // offered as one: where its parent or a column's type would show it all the same, the menu says so.
+  const typeName = (type: string) => schema?.entityTypes?.find((t) => t.id.toLowerCase() === type.toLowerCase())?.name ?? type
+  const shownBecause = (id: string, after: PlacementAfter): string => {
+    const to = columnAfter(id, after)
+    const parent = parentMap.get(id)
+    if (parent && to && columnAfter(parent, after) === to) return `Shown because it’s inside ${shownName(nodeMap.get(parent)?.data, parent)}`
+    const layer = sortedLayers.find((l) => l.id === to)
+    const type = String(nodeMap.get(id)?.data?.type ?? '')
+    if (layer && (layer.entityTypes ?? []).includes(type)) return `Shown because ${columnName(layer)} holds every ${typeName(type)}`
+    return `Shown because this view places it in ${layer ? columnName(layer) : 'a column'}`
+  }
+  const removeEntitiesFromView = (ids: readonly string[], stays: readonly string[]) => {
+    const before = currentLayout()
+    const after = assignmentOps.unassignEntities(before, ids.filter((id) => before.assignments[id]))
+    persistReferenceLayout(after)
+    for (const id of ids) useReferenceModelStore.getState().removeEntityAssignment(id)
+    const at = Date.now()
+    // One change per entity, each taking back only its own placement — staged together: one Undo.
+    const changes = ids.filter((id) => before.assignments[id]).map((id): StagedChange => {
+      const touch = { layerIds: [], urns: [id] }
+      const was = layerOps.layoutPart(before, touch)
+      const now = layerOps.layoutPart(after, touch)
+      return {
+        id: generateId('staged'), timestamp: at, type: 'layer_config', targetId: id, targetUrn: id,
+        before: { part: was }, after: { part: now, action: 'remove' },
+        summary: `Remove '${nameNow(id)}' from this view`,
+        discard: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), was)),
+        reapply: () => persistReferenceLayout(layerOps.restoreLayoutPart(currentLayout(), now)),
+      }
+    })
+    useStagedChangesStore.getState().stageMany(changes)
+    const done = ids.length === 1 ? `${nameNow(ids[0])} is no longer in this view.` : `${ids.length.toLocaleString()} entities are no longer in this view.`
+    const kept = stays.length === 0 ? ''
+      : ` ${namesOf(stays.map(nameNow))} still ${stays.length === 1 ? 'shows' : 'show'}, where this view puts ${stays.length === 1 ? 'it' : 'them'}.`
+    useNotificationStore.getState().add({
+      type: 'success', message: viewNotice(`${done}${kept}`), action: discardAction(changes.map((c) => c.id)), durationMs: MOVE_NOTICE_MS,
+    })
+  }
+  const removeFromView = (nodeId: string): EntityExit | null => {
+    if (traceActive || serverPlaced || nodeId.startsWith('logical:')) return null
+    if (!isDraft) return canEnterEdit ? { label: 'Remove from this view', blocked: 'Start editing to change this view', onSelect: () => {} } : null
+    const ids = removalIds.includes(nodeId) ? removalIds : [nodeId]
+    const after: PlacementAfter = placementPreview
+      ? { layerOf: placedAfter.nodeLayerMap, promoted: placedAfter.promotedAnchors }
+      : { layerOf: nodeLayerMap, promoted: promotedAnchors }
+    const out = ids.filter((id) => !columnAfter(id, after))
+    const label = ids.length > 1 ? `Remove ${ids.length.toLocaleString()} from this view` : 'Remove from this view'
+    if (out.length === 0) {
+      return { label, blocked: ids.length === 1 ? shownBecause(ids[0], after) : 'Each is shown by its parent or a column’s type', onSelect: () => {} }
+    }
+    return { label, onSelect: () => removeEntitiesFromView(out, ids.filter((id) => !out.includes(id))) }
+  }
+  const deleteEntitiesFromData = (ids: readonly string[]) => {
+    // Named before: a new one's discarded create takes it off the canvas.
+    const one = ids.length === 1 ? nameNow(ids[0]) : undefined
+    const { step, staged } = stageDataDeletes(ids)
+    const discarded = staged.length === 0
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: discarded
+        ? one ? `${one} was new in this draft — it’s discarded.` : `${ids.length.toLocaleString()} entities new in this draft are discarded.`
+        : `${one ?? `${ids.length.toLocaleString()} entities`} will be deleted from the data, with everything inside ${one ? 'it' : 'them'}. ${dataNoticeTail(dataReach)}`,
+      detail: discarded ? undefined : reachNote(dataReach, personaMode),
+      action: discardAction(staged, step),
+      ...(discarded ? {} : { secondaryAction: { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() } }),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }
+  const deleteFromData = (nodeId: string): EntityExit | null => {
+    if (traceActive || nodeId.startsWith('logical:')) return null
+    const ids = menuSelection(nodeId, selectedNodeIds).filter((id) => nodeMap.has(id) && !id.startsWith('logical:'))
+    const label = ids.length > 1 ? `Delete ${ids.length.toLocaleString()} from data` : 'Delete from data'
+    const blocked = !isDraft ? (canEnterEdit ? 'Start editing to change the data' : null)
+      : !editModeEnabled ? 'Editing is turned off'
+        : !draftWritable ? 'This draft is read-only for you' : undefined
+    if (blocked === null) return null
+    return { label, blocked, reach: dataReach, onSelect: () => deleteEntitiesFromData(ids) }
+  }
   // SELECT ALL IN A LAYER — one rule (layerSelection.ts) behind the layer's
   // menu, an empty column's menu and ⌘A in a column: what the layer shows, as
   // the search and the narrowing leave it (not a narrowing during a trace,
@@ -6718,8 +7223,10 @@ export function ContextViewCanvas({
     if (!layer) return null
     const neighbour = (dir: -1 | 1) => sortedLayers[index + dir]
     const selectable = selectableInLayer(layer.id)
+    const offer = mapOffers.get(layer.id)
+    const anchorName = layer.anchorUrn ? nameNow(layer.anchorUrn) : undefined
     return {
-      name: layer.name,
+      name: shownLayers[index]?.name ?? layer.name,
       color: layer.color ?? '#6366f1',
       index,
       count: sortedLayers.length,
@@ -6735,7 +7242,7 @@ export function ContextViewCanvas({
       onToggleFold: layerFoldOffered && foldLayersEnabled
         ? () => layerFold.setLayerFolded(layer.id, !layerFold.folded.has(layer.id))
         : undefined,
-      onDelete: () => deleteLayerWithUndo(layer.id),
+      onDelete: () => setDeleteColumnFor(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
       onOpenSettings: () => takeRail(() => setLayerSettingsFor(layer.id)),
       // The header's own actions, in both views: the Business header keeps to the essentials,
@@ -6757,12 +7264,19 @@ export function ContextViewCanvas({
         : undefined,
       // Everything the layer shows, in one selection — then the selection bar's bulk actions.
       selectAll: { count: selectable.length, onSelect: () => setSelection(selectable) },
+      // Mapping it to an entity, a view change — or why not.
+      mapping: !offer ? undefined : offer.kind === 'refused' ? { refused: offer.reason } : {
+        onMap: () => setMapDialogFor(layer.id),
+        mapped: !!layer.anchorUrn,
+        unmap: offer.kind === 'mapped' && offer.canUnmap && anchorName
+          ? { name: anchorName, onUnmap: () => unmapColumn(layer.id) } : undefined,
+      },
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
-    recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
+    recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, canEditGraph, subsetView,
     openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setLayerSettingsFor, canvasWritable,
-    selectableInLayer, setSelection, addInsideNameByLayer])
+    selectableInLayer, setSelection, addInsideNameByLayer, shownLayers, mapOffers, unmapColumn])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7127,16 +7641,240 @@ export function ContextViewCanvas({
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   // Placements that point at nothing here (recorded by the load: see useGraphHydration). Only
   // what the load asked for and didn't get, still placed, and still absent: an entity that has
-  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported.
+  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported. Never a temp
+  // urn (a save drops a discarded create's), nor a column's own entity: that column says so itself.
   const placementsCheck = useCanvasStore((s) => s.placementsNotFound)
   const notFoundPlacements = useMemo(() => {
     if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || traceActive) return []
     const assignments = activeReferenceLayout.assignments
     const layerNames = new Map(sortedLayers.map((l) => [l.id, l.name]))
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
     return placementsCheck.urns
-      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
+      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn) && !assignmentOps.isTempUrn(urn) && !anchors.has(urn))
       .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
   }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
+  // Outside a draft, a repair offers the way into one — to someone who can open it.
+  const openDraftOffer = !isDraft && canManage && versioningEnabled && canEnterEdit && editModeEnabled ? handleEnterEdit : undefined
+  // Clean them up: their placements go, as ONE change — its Undo puts back only them.
+  const cleanUpNotFound = useCallback(() => {
+    if (traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const urns = notFoundPlacements.map((p) => p.urn).filter((urn) => before.assignments[urn])
+    if (urns.length === 0) return
+    const what = `${urns.length.toLocaleString()} ${urns.length === 1 ? 'placement that pointed at an entity' : 'placements that pointed at entities'} no longer in this source`
+    const id = stageMapping('view:placements-not-found', before, assignmentOps.unassignEntities(before, urns), 'clean-up', `Removed ${what}`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Removed ${what}.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [notFoundPlacements, currentLayout, stageMapping])
+  // A column whose entity is gone says so in its own body — and here, while that body can't be
+  // seen: folded, or scrolled out of sight. "Show" brings it into view.
+  const goneColumnIds = useMemo(
+    () => (traceActive ? [] : sortedLayers.filter((l) => anchorIssueByLayer.get(l.id) === 'missing').map((l) => l.id)),
+    [traceActive, sortedLayers, anchorIssueByLayer],
+  )
+  const goneOutOfSight = useColumnsOutOfSight(horizontalScrollRef, goneColumnIds)
+  const goneColumns = useMemo(() => {
+    const names = new Map(shownLayers.map((l) => [l.id, l.name]))
+    return goneColumnIds
+      .filter((id) => layerFold.folded.has(id) || goneOutOfSight.has(id))
+      .map((id) => ({ id, name: names.get(id) ?? id }))
+  }, [goneColumnIds, goneOutOfSight, layerFold.folded, shownLayers])
+  const { folded: foldedLayers, focusLayer } = layerFold
+  const showColumn = useCallback((layerId: string) => {
+    if (foldedLayers.has(layerId)) focusLayer(layerId)
+    horizontalScrollRef.current?.querySelector(`[data-layer-id="${CSS.escape(layerId)}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+  }, [foldedLayers, focusLayer])
+
+  // ── Top-level entities this view doesn't place (UnplacedRootsChip) ──
+  // ONE read per load — keyed on the load's own record (placementsCheck), so no render, edit or
+  // poll asks again — of the root types the view is about, sending what it places of them. An open
+  // view's type layers load their types anyway: those are never asked about. A view placed by the
+  // server (a subset, one that follows another) has nothing of its own to add them to.
+  // Only a view meant to show everything (coverage 'complete') is offered them. A specialised one —
+  // some domains, one domain, part of one — never is, so nothing is asked. A view that says neither
+  // (every view made before views said) is read for only by someone who can edit it, and only to
+  // ask, once, whether to keep it complete (below); a reader is never asked or offered anything.
+  const coverage = activeView?.coverage
+  const rootsRead = coverage === 'complete' || (coverage === undefined && viewCaps.canEdit)
+  const rootsAsk = useMemo(() => {
+    if (!rootsRead || !placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || serverPlaced) return null
+    const assignments = activeReferenceLayout.assignments
+    const typeOf = (urn: string) => nodeMap.get(urn)?.data?.type as string | undefined
+    const entityTypes = rootTypesToCheck({
+      rootTypes: creationRootTypes,
+      layers: sortedLayers,
+      placedTypes: Object.keys(assignments).map(typeOf).filter((t): t is string => !!t),
+      fedTypes: activeEntityScope === 'curated' ? [] : claimedFeedTypes(sortedLayers, schemaEntityTypes),
+    })
+    if (entityTypes.length === 0) return null
+    return { token: placementsCheck, entityTypes, placedUrns: placedOfTypes(assignments, typeOf, entityTypes) }
+  }, [rootsRead, placementsCheck, activeViewId, hydrationStatus, serverPlaced, activeReferenceLayout, nodeMap, creationRootTypes, sortedLayers, activeEntityScope, schemaEntityTypes])
+  const rootsAskRef = useRef(rootsAsk)
+  useEffect(() => { rootsAskRef.current = rootsAsk })
+  const [unplaced, setUnplaced] = useState<{ token: object; result: UnplacedTopLevelResult } | null>(null)
+  const rootsToken = rootsAsk ? rootsAsk.token : null
+  useEffect(() => {
+    const ask = rootsAskRef.current
+    if (!rootsToken || !ask || !provider.getUnplacedTopLevel) return
+    const controller = new AbortController()
+    provider.getUnplacedTopLevel(
+      { entityTypes: ask.entityTypes, placedUrns: ask.placedUrns, limit: ENTITY_COLUMNS_MAX },
+      { signal: controller.signal },
+    ).then((result) => {
+      if (!controller.signal.aborted) setUnplaced({ token: rootsToken, result })
+    }).catch((err) => {
+      // A check that could not run says nothing: it is an offer, never a verdict.
+      if (!controller.signal.aborted) console.warn('[ContextViewCanvas] the unplaced top-level check failed', err)
+    })
+    return () => controller.abort()
+  }, [rootsToken, provider])
+  const dismissedRoots = usePreferencesStore((s) => (activeViewId ? s.unplacedRootsDismissed[activeViewId] : undefined))
+  // What it found, less what has been placed since — said once the load is complete, outside a trace.
+  // Offered to a complete view only: a view that never said is not offered what it leaves out.
+  const rootsFound = useMemo(() => {
+    if (coverage !== 'complete' || !unplaced || unplaced.token !== placementsCheck || hydrationStatus !== 'ready' || traceActive || serverPlaced) return null
+    if (dismissedRoots === unplaced.result.totalCount) return null
+    const assignments = activeReferenceLayout.assignments
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
+    const placedNow = (urn: string) => !!assignments[urn]?.layerId || anchors.has(urn)
+    const counts = { ...unplaced.result.byType }
+    for (const n of unplaced.result.nodes) if (placedNow(n.urn)) counts[n.entityType] = (counts[n.entityType] ?? 1) - 1
+    const typeDef = (id: string) => schemaEntityTypes.find((t) => t.id === id)
+    const byType = Object.entries(counts).filter(([, n]) => n > 0).map(([type, count]) => ({
+      type, count, one: typeDef(type)?.name ?? type, many: typeDef(type)?.pluralName ?? `${typeDef(type)?.name ?? type}s`,
+    }))
+    if (byType.length === 0) return null
+    const nodes = unplaced.result.nodes.filter((n) => !placedNow(n.urn))
+    return { byType, atLeast: !unplaced.result.complete, nodes, total: unplaced.result.totalCount }
+  }, [coverage, unplaced, placementsCheck, hydrationStatus, traceActive, serverPlaced, dismissedRoots, activeReferenceLayout, sortedLayers, schemaEntityTypes])
+  // The columns they can be placed in: any that isn't an entity's own, those for their types first.
+  const rootsColumns = useMemo(() => {
+    if (!rootsFound) return []
+    const types = new Set(rootsFound.byType.map((t) => t.type.toLowerCase()))
+    const open = shownLayers.filter((l) => !l.anchorUrn)
+    const forThem = (l: ViewLayerConfig) => (l.entityTypes ?? []).some((t) => types.has(String(t).toLowerCase()))
+    return [...open.filter(forThem), ...open.filter((l) => !forThem(l))].map((l) => ({ id: l.id, name: l.name }))
+  }, [rootsFound, shownLayers])
+  /** Add them to the canvas, and take them off again with the change's Undo when nothing holds them. */
+  const stageRoots = useCallback((
+    nodesToAdd: GraphNode[], before: NormalizedReferenceLayout, after: NormalizedReferenceLayout,
+    action: 'add-columns' | 'add-to-column', summary: string,
+  ) => {
+    const add = () => useCanvasStore.getState().addGraph(nodesToAdd.map((n) => toCanvasNode(n)), [])
+    add()
+    return stageMapping('view:unplaced-roots', before, after, action, summary, {
+      discard: () => {
+        const placed = currentLayout().assignments
+        for (const n of nodesToAdd) if (!placed[n.urn]) useCanvasStore.getState().removeNode(n.urn)
+      },
+      reapply: add,
+    })
+  }, [stageMapping, currentLayout])
+  const addRootsAsColumns = useCallback(() => {
+    if (!rootsFound || traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    let after = before
+    rootsFound.nodes.forEach((n, i) => {
+      const ordered = [...after.layers].sort((a, b) => a.order - b.order)
+      const id = `layer-${Date.now()}-${i}`
+      // Named by nobody: each takes its entity's name, and follows it.
+      const fresh = { id, name: '', description: '', icon: 'Layers', color: freshLayerColor(ordered, ordered.length), entityTypes: [], order: ordered.length }
+      after = layerOps.mapLayerToEntity({ ...after, layers: layerOps.appendLayer(after.layers, fresh) }, id, n.urn, { name: n.displayName || n.urn })
+    })
+    const what = rootsWhat(rootsFound, rootsFound.nodes.length)
+    const id = stageRoots(rootsFound.nodes, before, after, 'add-columns', `Added ${what} as columns`)
+    // Each column is what is inside its entity: its first page, as a load gives a mapped column.
+    void loadChildrenBatch(rootsFound.nodes.filter((n) => (n.childCount ?? 0) > 0).map((n) => n.urn))
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Added ${what} as columns — each shows what’s inside it.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [rootsFound, currentLayout, stageRoots, loadChildrenBatch])
+  const addRootsToColumn = useCallback((layerId: string) => {
+    if (!rootsFound || traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const layer = before.layers.find((l) => l.id === layerId)
+    if (!layer) return
+    const what = rootsWhat(rootsFound, rootsFound.nodes.length)
+    const after = assignmentOps.assignEntities(before, rootsFound.nodes.map((n) => n.urn), layerId)
+    const id = stageRoots(rootsFound.nodes, before, after, 'add-to-column', `Added ${what} to “${columnName(layer)}”`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Added ${what} to “${columnName(layer)}”.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [rootsFound, currentLayout, stageRoots])
+  const notNowRoots = useCallback(() => {
+    if (activeViewId && unplaced) usePreferencesStore.getState().dismissUnplacedRoots(activeViewId, unplaced.result.totalCount)
+  }, [activeViewId, unplaced])
+  const unplacedRoots = useMemo(() => {
+    if (!rootsFound) return null
+    // Outside a draft it says so only to someone who can open one.
+    const editable = layerEditsAllowed && !subsetFollows
+    if (!editable && !openDraftOffer) return null
+    const typeName = (id: string) => rootsFound.byType.find((t) => t.type === id)?.one ?? id
+    return {
+      byType: rootsFound.byType,
+      atLeast: rootsFound.atLeast,
+      listed: rootsFound.nodes.map((n) => ({ urn: n.urn, name: n.displayName || n.urn, typeName: typeName(n.entityType) })),
+      columns: editable ? rootsColumns : undefined,
+      onAddAsColumns: editable ? addRootsAsColumns : undefined,
+      onAddToColumn: editable && rootsColumns.length > 0 ? addRootsToColumn : undefined,
+      onOpenDraft: editable ? undefined : openDraftOffer,
+      onNotNow: notNowRoots,
+    }
+  }, [rootsFound, layerEditsAllowed, subsetFollows, openDraftOffer, rootsColumns, addRootsAsColumns, addRootsToColumn, notNowRoots])
+  // ── Keep this view complete? (KeepCompleteChip) ──
+  // A view that never said, whose read found none it doesn't place: it holds every top-level entity
+  // of its types today. Whether on purpose can't be told from that, so its editor is asked, in the
+  // offer's place — once in this browser: marked when it is shown, answered or not, and never asked
+  // here again. It stays for as long as the page is open, so what was asked when it opened decides.
+  // Nothing is written to the view until an answer is chosen. A read that found some it doesn't
+  // place says nothing: such a view is a lens, specialised.
+  const [askedBefore] = useState(() => usePreferencesStore.getState().viewCoverageAsked)
+  const [answering, setAnswering] = useState<string | null>(null)
+  // None left out, counted as the offer counts them: a column's own entity is shown by its column
+  // even when it is held as the column's anchor alone.
+  const holdsEveryRoot = useMemo(() => {
+    if (!unplaced || unplaced.token !== placementsCheck) return false
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
+    const assignments = activeReferenceLayout.assignments
+    const shownNow = unplaced.result.nodes.filter((n) => !!assignments[n.urn]?.layerId || anchors.has(n.urn)).length
+    return unplaced.result.totalCount - shownNow === 0
+  }, [unplaced, placementsCheck, sortedLayers, activeReferenceLayout])
+  const askCoverage = coverage === undefined && viewCaps.canEdit && !!activeViewId && !askedBefore[activeViewId]
+    && answering !== activeViewId && holdsEveryRoot
+    && hydrationStatus === 'ready' && !traceActive && !serverPlaced
+  useEffect(() => {
+    if (askCoverage && activeViewId && !usePreferencesStore.getState().viewCoverageAsked[activeViewId]) {
+      usePreferencesStore.getState().markViewCoverageAsked(activeViewId)
+    }
+  }, [askCoverage, activeViewId])
+  // Saved on the view on its own (its settings, not its layout: never a draft's change).
+  const answerCoverage = useCallback((next: 'complete' | 'specialised') => {
+    if (!activeViewId) return
+    setAnswering(activeViewId)
+    updateView(activeViewId, { coverage: next })
+      .then(() => useSchemaStore.getState().updateView(activeViewId, { coverage: next }))
+      .catch((err) => {
+        notify('error', `Couldn’t save that: ${err instanceof Error ? err.message : 'the view could not be saved'}`)
+      })
+      // Saved, the view says; not saved, the question is back, to answer again.
+      .finally(() => setAnswering(null))
+  }, [activeViewId, notify])
+  const keepComplete = useMemo(() => (askCoverage ? {
+    sourceName: exportDataSourceName,
+    onKeep: () => answerCoverage('complete'),
+    onOnlyHere: () => answerCoverage('specialised'),
+  } : null), [askCoverage, exportDataSourceName, answerCoverage])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -8442,6 +9180,13 @@ export function ContextViewCanvas({
           unresolvedEdgeCount={!overlay.active && showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           notFoundPlacements={notFoundPlacements}
+          // A repair is a layout change: offered in a draft, and outside one the way into a draft.
+          onCleanUpNotFound={layerEditsAllowed && !subsetFollows ? cleanUpNotFound : undefined}
+          onOpenDraft={openDraftOffer}
+          goneColumns={goneColumns}
+          onShowColumn={showColumn}
+          unplacedRoots={unplacedRoots}
+          keepComplete={keepComplete}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}
@@ -8836,7 +9581,7 @@ export function ContextViewCanvas({
               height: zoomScalesPercentages() ? `calc(100% / ${canvasZoom})` : '100%',
             }}
           >
-            {sortedLayers.map((layer) => (
+            {shownLayers.map((layer) => (
               <LayerColumn
                 key={layer.id}
                 layer={layer}
@@ -8844,6 +9589,9 @@ export function ContextViewCanvas({
                 anchorMore={anchorMoreByLayer.get(layer.id)}
                 anchorIssue={anchorIssueByLayer.get(layer.id)}
                 handPlaced={handPlacedByLayer.get(layer.id)}
+                mapOffer={mapOffers.get(layer.id)}
+                onMapLayer={setMapDialogFor}
+                onUnmapLayer={unmapColumn}
                 schema={schema}
                 // An empty column means something different in each: in a Context View the
                 // entities exist and just aren't assigned here; in a blank model nothing has
@@ -8913,7 +9661,8 @@ export function ContextViewCanvas({
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
                 // A subset that follows its base takes its layers from there.
                 onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}
-                onDeleteLayer={isDraft && !subsetFollows ? deleteLayer : undefined}
+                onDeleteLayer={isDraft && !subsetFollows ? setDeleteColumnFor : undefined}
+                onDeleteWithUndo={isDraft && !subsetFollows ? setDeleteColumnFor : undefined}
                 onReorderLayer={isDraft && !subsetFollows ? reorderLayer : undefined}
                 // The layer menu (right-click the header), and inserting a layer right here.
                 onHeaderContextMenu={openLayerMenu}
@@ -9027,6 +9776,8 @@ export function ContextViewCanvas({
               if (layer) {
                 assignEntityToLayer(tempUrn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [tempUrn], layer))
+                // The first entity in an empty hand-picked column may be the column itself: asked.
+                if (!parentUrn && layer === builderLayerId) offerColumnFor(tempUrn, layer)
               }
               if (parentUrn) {
                 setExpandedNodes(prev => new Set([...prev, parentUrn]))
@@ -9100,7 +9851,7 @@ export function ContextViewCanvas({
             // A layer's settings are the view's layout: a draft's, never during a trace.
             canEdit={layerEditsAllowed && !subsetFollows}
             onSave={(patch) => editLayer(layerSettingsFor, patch)}
-            onDelete={isDraft && !subsetFollows ? () => { setLayerSettingsFor(null); deleteLayerWithUndo(layerSettingsFor) } : undefined}
+            onDelete={isDraft && !subsetFollows ? () => { setLayerSettingsFor(null); setDeleteColumnFor(layerSettingsFor) } : undefined}
             onStartEditing={!isDraft && canEnterEdit ? handleEnterEdit : undefined}
             onClose={() => setLayerSettingsFor(null)}
           />
@@ -9175,7 +9926,8 @@ export function ContextViewCanvas({
           : undefined}
         onDuplicateNode={canvasWritable ? interactions.duplicateNode : undefined}
         onDuplicateWithOptions={canvasWritable ? (id) => setDuplicateFor(id) : undefined}
-        onDeleteNode={canvasWritable ? interactions.deleteNode : undefined}
+        removeFromView={removeFromView}
+        deleteFromData={deleteFromData}
         onCreateChild={canvasWritable ? interactions.createChild : undefined}
         onConnect={canvasWritable ? (id) => armConnectGuarded(id, interactions.state.contextMenu.position) : undefined}
         onLinkNode={canvasWritable ? (id) => {
@@ -9215,6 +9967,7 @@ export function ContextViewCanvas({
         moveChoices={sortedLayers.length > 0 ? moveChoices : undefined}
         onMoveToLayer={layerEditsAllowed ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         onMoveInside={(nodeId, parentId) => reparent(nodeId, parentId)}
+        ownColumnFor={ownColumnFor}
         // A data edit: offered where the canvas takes them (as a drop's move is), for an entity.
         onMoveToParent={canvasWritable && !serverPlaced && contextTarget?.type === 'node' && !contextTarget.id.startsWith('logical:')
           ? setMoveParentFor : undefined}
@@ -9269,6 +10022,23 @@ export function ContextViewCanvas({
 
       {/* Move to another parent… — what a move changes, said before a parent is picked. */}
       <MoveParentDialog nodeId={moveParentFor} reach={dataReach} onClose={() => setMoveParentFor(null)} />
+
+      {/* Map this column to… — what mapping means, said before an entity is picked. */}
+      <MapColumnDialog
+        column={mapDialogColumn}
+        candidates={mapCandidates}
+        onPick={(urn) => { if (mapDialogFor) mapColumn(mapDialogFor, urn) }}
+        onClose={() => setMapDialogFor(null)}
+      />
+
+      {/* Delete layer… — what happens to what the column shows, said before anything does. */}
+      <DeleteColumnDialog
+        plan={deleteColumnPlan}
+        reach={dataReach}
+        onRemove={confirmRemoveColumn}
+        onDeleteData={confirmDeleteColumnData}
+        onClose={() => setDeleteColumnFor(null)}
+      />
 
       {/* Duplicate… — what comes with the copy, counted before anything is staged. */}
       {duplicateFor && canvasWritable && (

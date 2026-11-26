@@ -69,6 +69,14 @@ export interface LayerMenuModel {
     /** Select everything the layer shows (layerSelection.ts) — in both views, and
      *  during a trace too: selecting writes nothing. */
     selectAll?: { count: number; onSelect: () => void }
+    /** Mapping the column to an entity — a view change (columnKind.ts `mapOffer`): map it (or map
+     *  it to another, `mapped`), show the entity it is mapped to as a row, or why it can't be. */
+    mapping?: {
+        onMap?: () => void
+        mapped?: boolean
+        unmap?: { name: string; onUnmap: () => void }
+        refused?: string
+    }
 }
 
 /** Move to Layer, guided: where the entity could go, and what each choice changes. */
@@ -82,6 +90,20 @@ export interface MoveChoices {
     footer: string
 }
 
+/**
+ * One of an entity's two ways out (Context View), for the entity right-clicked or the selection it
+ * is part of: "Remove from this view" (a view change) or "Delete from data" (a data change). Offered
+ * disabled, saying why, where it can't be done — never a removal it would not make.
+ */
+export interface EntityExit {
+    label: string
+    /** Why it can't be done here: the item is disabled, and says this. */
+    blocked?: string
+    /** Who a data change reaches. */
+    reach?: DataReach
+    onSelect: () => void
+}
+
 export interface ContextMenuAction {
     id: string
     label: string
@@ -90,6 +112,10 @@ export interface ContextMenuAction {
     disabled?: boolean
     /** A quieter second line — for a disabled item, why. */
     hint?: string
+    /** The kind of change it makes, as a tag under its label (changeKind.ts). */
+    change?: 'data' | 'view'
+    /** Who a data change reaches, said in its tag. */
+    reach?: DataReach
     /** A switch on the item's own row, changing what the item does (its label
      *  says what it does now). Flipping it keeps the menu open. */
     toggle?: { label: string; checked: boolean; onChange: (checked: boolean) => void }
@@ -150,8 +176,15 @@ export interface CanvasContextMenuProps {
     onMoveToLayer?: (nodeId: string, layerId: string) => void
     /** A data choice: move the entity inside the one a column is mapped to. */
     onMoveInside?: (nodeId: string, parentId: string) => void
+    /** "Give ‹it› its own column": a top-level entity's own column, mapped to it, right after the
+     *  one it is in — none where it can't have one. */
+    ownColumnFor?: (nodeId: string) => { name: string; onGive: () => void } | null
     /** Move to another parent… — a data change, chosen in a dialog. */
     onMoveToParent?: (nodeId: string) => void
+    /** "Remove from this view" — none where it isn't offered at all. */
+    removeFromView?: (nodeId: string) => EntityExit | null
+    /** "Delete from data", in place of `onDeleteNode`'s plain Delete — none where it isn't offered. */
+    deleteFromData?: (nodeId: string) => EntityExit | null
     /** What it changes, under its label. */
     moveToParentHint?: string
     /** The right-clicked layer's menu (target type `layer`). */
@@ -213,8 +246,11 @@ export function CanvasContextMenu({
     moveChoices,
     onMoveToLayer,
     onMoveInside,
+    ownColumnFor,
     onMoveToParent,
     moveToParentHint,
+    removeFromView,
+    deleteFromData,
     layerMenu = null,
     narrowActions = [],
     viewOnly = false,
@@ -453,6 +489,16 @@ export function CanvasContextMenu({
                     onClick: () => setSubmenu('layer')
                 })
             }
+            const own = ownColumnFor?.(target.id)
+            if (own) {
+                result.push({
+                    id: 'own-column',
+                    label: `Give ${own.name} its own column`,
+                    icon: 'Columns3',
+                    change: 'view',
+                    onClick: () => { own.onGive(); onClose() }
+                })
+            }
             if (onMoveToParent) {
                 result.push({
                     id: 'move-to-parent',
@@ -463,9 +509,24 @@ export function CanvasContextMenu({
                 })
             }
             const last = result[result.length - 1]
-            if (last && (last.id === 'move-to-layer' || last.id === 'move-to-parent')) result[result.length - 1] = { ...last, dividerAfter: true }
+            if (last && (last.id === 'move-to-layer' || last.id === 'own-column' || last.id === 'move-to-parent')) result[result.length - 1] = { ...last, dividerAfter: true }
 
-            if (onDeleteNode) {
+            // Out of this view (a view change), or out of the data (a data change) — side by side.
+            const exit = (id: string, kind: 'view' | 'data', icon: ContextMenuAction['icon'], e: EntityExit): ContextMenuAction => ({
+                id, label: e.label, icon, change: kind, reach: e.reach, danger: kind === 'data',
+                disabled: !!e.blocked, hint: e.blocked,
+                ...(kind === 'data' ? { shortcut: '⌫' } : {}),
+                onClick: () => { if (!e.blocked) { e.onSelect(); onClose() } },
+            })
+            const remove = removeFromView?.(target.id)
+            const del = deleteFromData?.(target.id)
+            const before = result[result.length - 1]
+            if ((remove || del) && before && !before.dividerAfter) result[result.length - 1] = { ...before, dividerAfter: true }
+            if (remove) result.push(exit('remove-from-view', 'view', 'EyeOff', remove))
+            if (del) {
+                // A group of their own, whatever the canvas adds after them.
+                result.push({ ...exit('delete', 'data', 'Trash2', del), dividerAfter: true })
+            } else if (onDeleteNode && !deleteFromData) {
                 result.push({
                     id: 'delete',
                     label: 'Delete',
@@ -562,6 +623,20 @@ export function CanvasContextMenu({
                 if (m.onBuild) adds.push({ id: 'layer-build', label: 'Build a lot at once', icon: 'LayoutGrid', onClick: () => { m.onBuild?.(); onClose() } })
                 if (adds.length > 0) adds[adds.length - 1] = { ...adds[adds.length - 1], dividerAfter: true }
                 result.push(...adds)
+                const map = m.mapping
+                const maps: ContextMenuAction[] = []
+                if (map?.unmap) {
+                    const { onUnmap } = map.unmap
+                    maps.push({ id: 'unmap-layer', label: `Show ${map.unmap.name} as a row`, icon: 'Rows3', change: 'view', onClick: () => { onUnmap(); onClose() } })
+                }
+                if (map?.onMap) {
+                    const { onMap } = map
+                    maps.push({ id: 'map-layer', label: map.mapped ? 'Map to another entity…' : 'Map this column to…', icon: 'Link2', change: 'view', onClick: () => { onMap(); onClose() } })
+                } else if (map?.refused) {
+                    maps.push({ id: 'map-layer', label: 'Map this column to…', icon: 'Link2', disabled: true, hint: map.refused, onClick: () => {} })
+                }
+                if (maps.length > 0) maps[maps.length - 1] = { ...maps[maps.length - 1], dividerAfter: true }
+                result.push(...maps)
             }
             if (m.onNarrow) {
                 result.push({
@@ -631,7 +706,7 @@ export function CanvasContextMenu({
             if (m.canEdit) {
                 result.push({
                     id: 'delete-layer',
-                    label: 'Delete layer',
+                    label: 'Delete layer…',
                     icon: 'Trash2',
                     danger: true,
                     onClick: () => { m.onDelete(); onClose() },
@@ -652,7 +727,7 @@ export function CanvasContextMenu({
         return result
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections, onAskAboutNode, onExportNode,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, createNodeInside, onPaste,
-        onSelectAll, customActions, queryActions, guide, onMoveToParent, moveToParentHint, layerMenu, onClose, narrowActions.length, technical,
+        onSelectAll, customActions, queryActions, guide, ownColumnFor, onMoveToParent, moveToParentHint, removeFromView, deleteFromData, layerMenu, onClose, narrowActions.length, technical,
         viewOnly, trace, selectLayer, selectAllIn, expandActions])
 
     // Get icon component
@@ -882,6 +957,7 @@ export function CanvasContextMenu({
                                                 {action.hint && (
                                                     <span className="block max-w-[15rem] text-[11px] leading-snug text-ink-muted">{action.hint}</span>
                                                 )}
+                                                {action.change && <ChangeKindTag kind={action.change} reach={action.reach} className={cn("mt-1", action.disabled && "opacity-60")} />}
                                             </span>
                                         </span>
                                         {action.shortcut && (
