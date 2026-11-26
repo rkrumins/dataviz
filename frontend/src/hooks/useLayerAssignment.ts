@@ -380,7 +380,10 @@ export function useLayerAssignment({
         const rawNodeLayer = nodeMap.get(nodeId)?.data?.layerAssignment as string | undefined
         const nodeLayerId = rawNodeLayer && validLayerIds.has(rawNodeLayer) ? rawNodeLayer : undefined
         const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
-        const backendAssignment = effectiveAssignments.get(nodeId)
+        // Validated the same way: the backend's answer is computed once per view, so after a column
+        // is deleted it can still name it — the entity then falls to the rules, not out of the view.
+        const rawBackend = effectiveAssignments.get(nodeId)?.layerId
+        const backendLayerId = rawBackend && (validLayerIds.has(rawBackend) || rawBackend === '__UNASSIGNED__') ? rawBackend : undefined
         myLayerId = resolveRootLayer({
           nodeId,
           nodeUrn,
@@ -392,7 +395,7 @@ export function useLayerAssignment({
           explicitAssignment: undefined,
           viewIsCurated,
           branchCreated: branchCreatedDelta.has(nodeUrn),
-          backendAssignment: backendAssignment?.layerId,
+          backendAssignment: backendLayerId,
           ruleAssignment: ruleAssignments.get(nodeId),
           inheritedLayerId,
           unassignedFallbackLayerId,

@@ -4,7 +4,7 @@ import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import {
   appendLayer, insertLayer, recolorLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode,
   clearLayerOrderKeys, updateLayer, isAutoLayerName, mapLayerToEntity, unmapLayer, unmapMovedAnchors, touchedBy, layoutPart,
-  restoreLayoutPart, remapLayerAnchors, pruneTempAnchors,
+  restoreLayoutPart, remapLayerAnchors, pruneTempAnchors, deleteColumn,
 } from './layerMutations'
 import { assignEntities } from './assignmentMutations'
 
@@ -445,5 +445,38 @@ describe('remapLayerAnchors / pruneTempAnchors — a column mapped to an entity 
     expect(pruneTempAnchors(draft()).layers.map((l) => l.anchorUrn)).toEqual([undefined, 'sales'])
     const clean = pruneTempAnchors(draft())
     expect(pruneTempAnchors(clean)).toBe(clean)
+  })
+})
+
+describe('deleteColumn — a column taken out of the view, with the placements in it', () => {
+  const start = () => layoutOf(
+    [L('a', 'Domains', 0), { ...L('b', 'Picked', 1), logicalNodes: [{ id: 'g', name: 'Shelf', type: 'group', children: [{ id: 'g2', name: 'Deep', type: 'group' }] }] }, L('c', 'Apps', 2)],
+    { sales: placed('a'), ops: placed('b'), archive: { ...placed('b'), logicalNodeId: 'g2' }, quotes: placed('c') },
+  )
+
+  it('removes the layer, its groups, and every placement in it — the rest stays as it was', () => {
+    const before = start()
+    const after = deleteColumn(before, 'b')
+    expect(after.layers.map((l) => [l.id, l.order])).toEqual([['a', 0], ['c', 1]])
+    expect(Object.keys(after.assignments).sort()).toEqual(['quotes', 'sales'])
+    expect(after.assignments.sales).toBe(before.assignments.sales)
+  })
+
+  it('is taken back whole — the layer where it stood, its groups and placements — and a later edit stays', () => {
+    const before = start()
+    const after = deleteColumn(before, 'b')
+    const touch = touchedBy(before, after)
+    expect(touch).toEqual({ layerIds: ['b'], urns: ['ops', 'archive'] })
+    const later = assignEntities(after, ['sales'], 'c')
+    const back = restoreLayoutPart(later, layoutPart(before, touch))
+    expect(back.layers.map((l) => l.id)).toEqual(['a', 'b', 'c'])
+    expect(back.layers[1].logicalNodes).toEqual(before.layers[1].logicalNodes)
+    expect(back.assignments.archive).toEqual(before.assignments.archive)
+    expect(back.assignments.sales.layerId).toBe('c')
+  })
+
+  it('returns the SAME layout for a layer that is not there', () => {
+    const before = start()
+    expect(deleteColumn(before, 'nope')).toBe(before)
   })
 })

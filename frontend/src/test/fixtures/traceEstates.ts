@@ -266,6 +266,54 @@ export function movesEstate() {
 }
 
 /**
+ * A draft's columns, to take one out — each holding its entities a different way, so each says a
+ * different thing about where they show without it:
+ *
+ *   Finance   ⊃ Billing ⊃ invoices     ← column "Finance", mapped to it
+ *             ⊃ Ledger
+ *   Sales     ⊃ CRM ⊃ leads            ← column "Domains" (of the domain type)
+ *             ⊃ Quotes                 ← placed by hand in "Apps" (of the app type)
+ *   Marketing ⊃ Campaigns              ← "Domains"
+ *   Ops, Lab                           ← placed by hand in "Picked"
+ *   Archive, Vault                     ← "Shelf": Archive in its group Shelf, Vault in Deep inside it
+ *                                        ← "Spare", empty
+ */
+export function columnsEstate() {
+  const nodes = [
+    wn('Finance', 'domain', 2), wn('Billing', 'app', 1), wn('invoices', 'dataset'), wn('Ledger', 'app'),
+    wn('Sales', 'domain', 2), wn('CRM', 'app', 1), wn('leads', 'dataset'), wn('Quotes', 'app'),
+    wn('Marketing', 'domain', 1), wn('Campaigns', 'app'),
+    wn('Ops', 'domain'), wn('Lab', 'domain'), wn('Archive', 'domain'), wn('Vault', 'domain'),
+  ]
+  const containmentEdges = [
+    has('Finance', 'Billing'), has('Billing', 'invoices'), has('Finance', 'Ledger'),
+    has('Sales', 'CRM'), has('CRM', 'leads'), has('Sales', 'Quotes'), has('Marketing', 'Campaigns'),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'Ops', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'fin', name: 'Finance', order: 0, entityTypes: [], anchorUrn: 'Finance', nameFromAnchor: true },
+    { id: 'domains', name: 'Domains', order: 1, entityTypes: ['domain'] },
+    { id: 'apps', name: 'Apps', order: 2, entityTypes: ['app'] },
+    { id: 'picked', name: 'Picked', order: 3, entityTypes: [] },
+    {
+      id: 'shelf', name: 'Shelf', order: 4, entityTypes: [],
+      logicalNodes: [{ id: 'g-shelf', name: 'Shelf', type: 'group', children: [{ id: 'g-deep', name: 'Deep', type: 'group' }] }],
+    },
+    { id: 'spare', name: 'Spare', order: 5, entityTypes: [] },
+  ]
+  const assignments: Record<string, { layerId: string; logicalNodeId?: string }> = {
+    Finance: { layerId: 'fin' }, Sales: { layerId: 'domains' }, Marketing: { layerId: 'domains' }, Quotes: { layerId: 'apps' },
+    Ops: { layerId: 'picked' }, Lab: { layerId: 'picked' },
+    Archive: { layerId: 'shelf', logicalNodeId: 'g-shelf' }, Vault: { layerId: 'shelf', logicalNodeId: 'g-deep' },
+  }
+  return { model, layers, assignments }
+}
+
+/**
  * An anchored view where every card has its own lineage story: what each
  * card's lineage ports must say on open.
  *
