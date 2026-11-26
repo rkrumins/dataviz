@@ -110,7 +110,7 @@ def test_a_fold_reads_what_the_commits_wrote_and_the_draft_as_it_was():
         head = (await svc.overlay_version(graph_id=gid, branch_id=draft))[0]
         window = await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
                                                since_seq=seq, limit=10)
-        assert window == {"seq": seq + 1, "nodes": ["c1"], "edges": False}
+        assert window == {"seq": seq + 1, "nodes": ["c1"], "edges": False, "renamed": False}
         assert (await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
                                               since_seq=seq, limit=0))["nodes"] is None
         everything = await svc.draft_search_window(graph_id=gid, branch_id=draft,
@@ -190,7 +190,7 @@ def test_a_commit_writing_a_relationship_that_moves_nothing_is_folded_in():
         head = (await svc.overlay_version(graph_id=gid, branch_id=draft))[0]
         moved = await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
                                               since_seq=seq, limit=10, containment_types=CONT)
-        assert moved == {"seq": seq + 1, "nodes": [], "edges": False}
+        assert moved == {"seq": seq + 1, "nodes": [], "edges": False, "renamed": False}
         assert (await svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
                                               since_seq=seq, limit=10))["edges"] is True
 
@@ -209,6 +209,97 @@ def test_a_commit_writing_a_relationship_that_moves_nothing_is_folded_in():
         assert await _counts(await _overlay(svc, gid, main, draft), items) == \
             await _truth(svc, gid, draft, items)
         assert folded == [["c1"]], "folded in, the relationship moving nothing"
+    _run(case)
+
+
+def _lineage(src, tgt, op="create", **props):
+    return {"op": op, "entity_kind": "edge", "entity_id": f"e:{src}>{tgt}",
+            "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": src, "targetEntityId": tgt,
+                        "properties": props}}
+
+
+async def _head_seq(svc, gid, draft):
+    head = (await svc.overlay_version(graph_id=gid, branch_id=draft))[0]
+    return head, (await svc.draft_search_window(graph_id=gid, branch_id=draft,
+                                                commit_id=head))["seq"]
+
+
+def test_a_window_names_the_relationships_it_wrote_and_what_would_move_a_fold():
+    """The edges a window wrote, by id, for a fold of relationship counts; and what a fold can't
+    read past: an edge retyped out of the hierarchy (its new type moves nothing, its old one did),
+    and a node given another urn (where it sits and its edges' ends move with it)."""
+    async def case(svc):
+        gid, main, draft = await _seeded(svc)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="lineage",
+                            containment_edge_types=CONT, ops=[_lineage("c1", "c2", weight=1)])
+        _, seq = await _head_seq(svc, gid, draft)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="weight",
+                            containment_edge_types=CONT,
+                            ops=[_lineage("c1", "c2", op="update", weight=2)])
+        head, _ = await _head_seq(svc, gid, draft)
+
+        def window(since, head=head, limit=10):
+            return svc.draft_search_window(graph_id=gid, branch_id=draft, commit_id=head,
+                                           since_seq=since, limit=limit, containment_types=CONT,
+                                           edge_ids=True)
+
+        assert await window(seq) == {"seq": seq + 1, "nodes": [], "edges": False,
+                                     "renamed": False, "edgeIds": ["e:c1>c2"]}
+        assert (await window(seq, limit=0))["edgeIds"] is None
+
+        _, seq = await _head_seq(svc, gid, draft)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="retype",
+                            containment_edge_types=CONT, ops=[{
+                                "op": "update", "entity_kind": "edge", "entity_id": "e:t1>c2",
+                                "payload": {"edgeType": "FLOWS_TO", "sourceEntityId": "t1",
+                                            "targetEntityId": "c2"}}])
+        head, _ = await _head_seq(svc, gid, draft)
+        retyped = await window(seq, head)
+        assert retyped["edges"] is True and retyped["edgeIds"] == ["e:t1>c2"]
+
+        _, seq = await _head_seq(svc, gid, draft)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="rename",
+                            containment_edge_types=CONT, ops=[{
+                                "op": "update", "entity_kind": "node", "entity_id": "c1",
+                                "payload": {"urn": "c1-renamed"}}])
+        head, _ = await _head_seq(svc, gid, draft)
+        renamed = await window(seq, head)
+        assert renamed["nodes"] == ["c1"] and renamed["edges"] is False
+        assert renamed["renamed"] is True
+    _run(case)
+
+
+def test_the_draft_as_it_was_holds_its_relationships_as_it_wrote_them():
+    """Each edge the draft held apart at a seq, as it held it — one it deleted as None, one it
+    read as main's absent — and one main changed after the draft branched as main held it then
+    (None when main didn't hold it yet)."""
+    async def case(svc):
+        gid, main, draft = await _seeded(svc)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="lineage",
+                            containment_edge_types=CONT, ops=[_lineage("c1", "c2", weight=1)])
+        _, seq = await _head_seq(svc, gid, draft)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="weight",
+                            containment_edge_types=CONT,
+                            ops=[_lineage("c1", "c2", op="update", weight=2)])
+        before = await svc.draft_edges_as_of(graph_id=gid, branch_id=draft, seq=seq,
+                                             entity_ids=["e:c1>c2", "e:t2>c3", "e:t1>c1", "nope"])
+        assert set(before) == {"e:c1>c2", "e:t2>c3"}
+        held = before["e:c1>c2"]
+        assert (held["sourceUrn"], held["targetUrn"], held["edgeType"], held["properties"]) == \
+            ("c1", "c2", "FLOWS_TO", {"weight": 1})
+        assert before["e:t2>c3"] is None
+
+        await svc.apply_ops(graph_id=gid, actor="bob", message="main moves",
+                            containment_edge_types=CONT, ops=[
+                                {**_contains("t1", "c1"), "op": "update",
+                                 "payload": {**_contains("t1", "c1")["payload"],
+                                             "properties": {"note": "later"}}},
+                                _lineage("c3", "c1", rows=1)])
+        moved = await svc.draft_edges_as_of(graph_id=gid, branch_id=draft, seq=seq,
+                                            entity_ids=["e:t1>c1", "e:c3>c1"])
+        assert moved["e:t1>c1"]["properties"] == {}
+        assert (moved["e:t1>c1"]["sourceUrn"], moved["e:t1>c1"]["targetUrn"]) == ("t1", "c1")
+        assert moved["e:c3>c1"] is None
     _run(case)
 
 
