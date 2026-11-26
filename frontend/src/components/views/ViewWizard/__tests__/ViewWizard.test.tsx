@@ -20,6 +20,9 @@ const createViewMock = vi.fn()
 const updateViewMock = vi.fn()
 const updateViewLayoutMock = vi.fn()
 const navigateMock = vi.fn()
+const provisionMock = vi.fn()
+const openDraftMock = vi.fn()
+const graphChangesMock = vi.fn()
 // The layout template new views in ws1 start from, when a case gives it one.
 const wizardWs = vi.hoisted(() => ({ defaultLayoutTemplateId: null as string | null }))
 
@@ -40,6 +43,25 @@ vi.mock('@/services/viewApiService', async (importOriginal) => {
     updateViewLayout: (...args: unknown[]) => updateViewLayoutMock(...args),
   }
 })
+
+// A brand-new model: provisioned, then its top-level entities made in its draft.
+vi.mock('@/services/versioningApiService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/versioningApiService')>()
+  return {
+    ...actual,
+    provisionBlankGraph: (...args: unknown[]) => provisionMock(...args),
+    resolveAndOpenDraft: (...args: unknown[]) => openDraftMock(...args),
+    applyGraphChanges: (...args: unknown[]) => graphChangesMock(...args),
+  }
+})
+vi.mock('../useBlankScopeOptions', () => ({
+  useBlankScopeOptions: () => ({
+    providers: [{ provider: { id: 'p1', name: 'Graph store' }, graphCount: 0, inUseCount: 0, blankSupported: true }],
+    ontologies: [{ id: 'onto1', name: 'Lineage', schemaId: 'onto1', version: 1, entityTypeDefinitions: {}, relationshipTypeDefinitions: {}, rootEntityTypes: ['Domain'] }],
+    isLoading: false,
+    isError: false,
+  }),
+}))
 
 vi.mock('@/components/schema/SchemaScope', () => ({
   SchemaScope: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -122,6 +144,19 @@ vi.mock('../steps/LayoutStep', async () => {
         <button onClick={() => updateFormData({ ...toEntity(formData, formData.layers[0].id, 'urn:dom:mkt', 'Marketing') })}>
           stub-map-first-layer-to-marketing
         </button>
+        {/* A brand-new model: two columns mapped to new Domains, named on the Layout step. */}
+        <button onClick={() => updateFormData({
+          layoutTemplateId: 'per-root-type',
+          layers: [
+            { id: 'fin', name: 'Finance', entityTypes: [], order: 0, nameFromAnchor: true },
+            { id: 'mkt', name: 'Layer 2', entityTypes: [], order: 1 },
+            { id: 'teams', name: 'Teams', entityTypes: ['Team'], order: 2 },
+          ],
+          newRoots: { fin: { type: 'Domain', name: 'Finance' }, mkt: { type: 'Domain', name: 'Marketing ' } },
+        })}>stub-name-two-roots</button>
+        <button onClick={() => updateFormData({ newRoots: { fin: { type: 'Domain', name: 'Marketing' }, mkt: { type: 'Domain', name: 'marketing' } } })}>
+          stub-name-a-root-twice
+        </button>
       </div>
     ),
   }
@@ -129,7 +164,13 @@ vi.mock('../steps/LayoutStep', async () => {
 vi.mock('../steps/EntitiesStep', () => ({ EntitiesStep: () => <div data-testid="entities-step" /> }))
 vi.mock('../steps/PreviewStep', () => ({ PreviewStep: () => <div data-testid="preview-step" /> }))
 vi.mock('../steps/AssignmentStep', () => ({ AssignmentStep: () => <div data-testid="assignment-step" /> }))
-vi.mock('../steps/ScopeStep', () => ({ ScopeStep: () => <div data-testid="scope-step" /> }))
+vi.mock('../steps/ScopeStep', () => ({
+  ScopeStep: ({ onSelectOntology }: { onSelectOntology?: (id: string) => void }) => (
+    <div data-testid="scope-step">
+      <button onClick={() => onSelectOntology?.('onto1')}>stub-pick-ontology</button>
+    </div>
+  ),
+}))
 
 import { ViewWizard } from '../ViewWizard'
 
@@ -748,6 +789,119 @@ describe('ViewWizard — submit (create path) retry', () => {
  * wizard: installing fake timers around a React tree wedges React's own scheduler
  * and silently breaks every test that follows it in the file.
  */
+describe('ViewWizard — a brand-new model with its top-level entities named', () => {
+  const URNS = ['urn:dom:finance', 'urn:dom:marketing']
+  /** The save's answer: each create's ref, the urn it was given. */
+  const made = (_ws: string, _ds: string, _branch: string, ops: Array<{ ref: string }>) =>
+    Promise.resolve({ commitId: 'c1', assigned: Object.fromEntries(ops.map((op, i) => [op.ref, URNS[i]])) })
+
+  function renderBlank() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard mode="create" journey="blank" initialProviderId="p1" initialWorkspaceId="ws1" isOpen onClose={vi.fn()} onComplete={vi.fn()} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+  }
+
+  const next = async () => {
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+  }
+
+  /** Scope → Basics → Layout, the roots named there. */
+  async function nameRoots() {
+    renderBlank()
+    fireEvent.click(screen.getByRole('button', { name: 'stub-pick-ontology' }))
+    await next()
+    await screen.findByTestId('basics-step')
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: 'stub-name-two-roots' }))
+  }
+
+  beforeEach(() => {
+    provisionMock.mockResolvedValue({ dataSourceId: 'ds_new', graphId: 'g1', mainBranchId: 'main', graphName: 'new_view', label: 'New View' })
+    openDraftMock.mockResolvedValue({ graphId: 'g1', mainBranchId: 'main', mainHeadCommitSeq: 1, myDraft: { branchId: 'br_1' } })
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+  })
+
+  it('makes them in the new model’s draft in one save, then maps each column to the one made for it', async () => {
+    graphChangesMock.mockImplementation(made)
+    await nameRoots()
+    await next()
+    await screen.findByTestId('preview-step')
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await screen.findByText('Finance and Marketing are in your draft, each with its column mapped to it — ready to fill.')
+    expect(provisionMock).toHaveBeenCalledTimes(1)
+    expect(openDraftMock).toHaveBeenCalledWith('ws1', { dataSourceId: 'ds_new', originatingViewId: 'v1' })
+    expect(graphChangesMock).toHaveBeenCalledTimes(1)
+    const [ws, ds, branch, ops, , key] = graphChangesMock.mock.calls[0]
+    expect([ws, ds, branch]).toEqual(['ws1', 'ds_new', 'br_1'])
+    expect(ops).toEqual([
+      { op: 'create', kind: 'node', ref: expect.any(String), payload: { entityType: 'Domain', displayName: 'Finance' } },
+      { op: 'create', kind: 'node', ref: expect.any(String), payload: { entityType: 'Domain', displayName: 'Marketing' } },
+    ])
+    expect(key).toEqual(expect.any(String))
+
+    // The view's own layout: its columns hand-picked, until their entities exist.
+    expect(updateViewLayoutMock).toHaveBeenCalledTimes(2)
+    const [, live, liveBranch] = updateViewLayoutMock.mock.calls[0]
+    expect(liveBranch).toBeUndefined()
+    expect(live.referenceLayout.layers.map((l: ViewLayerConfig) => l.anchorUrn)).toEqual([undefined, undefined, undefined])
+    // The draft's: each column mapped to the entity made for it, the others as they were.
+    const [viewId, draft, draftBranch] = updateViewLayoutMock.mock.calls[1]
+    expect([viewId, draftBranch]).toEqual(['v1', 'br_1'])
+    const { layers, assignments } = draft.referenceLayout
+    expect(layers.map((l: ViewLayerConfig) => l.anchorUrn)).toEqual([...URNS, undefined])
+    expect(layers.map((l: ViewLayerConfig) => l.name)).toEqual(['Finance', 'Marketing', 'Teams'])
+    expect(layers[1].nameFromAnchor).toBe(true)
+    expect(layers[2].entityTypes).toEqual(['Team'])
+    expect(assignments['urn:dom:finance']).toMatchObject({ layerId: 'fin', inheritsChildren: true })
+    expect(assignments['urn:dom:marketing']).toMatchObject({ layerId: 'mkt', inheritsChildren: true })
+
+    // The person lands in that draft, ready to fill the columns.
+    fireEvent.click(screen.getByRole('button', { name: /open view now/i }))
+    expect(navigateMock).toHaveBeenCalledWith('/views/v1?branch=br_1')
+  })
+
+  it('will not go on while a new entity is unnamed, or its name is another of its type’s', async () => {
+    await nameRoots()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'stub-name-a-root-twice' }))
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  })
+
+  it('an entity that cannot be made leaves its column hand-picked, and the landing says so, with a retry', async () => {
+    graphChangesMock.mockRejectedValueOnce(new Error('The semantic layer refused it.'))
+    await nameRoots()
+    await next()
+    await screen.findByTestId('preview-step')
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    expect(await screen.findByText('Couldn’t make Finance and Marketing yet')).toBeInTheDocument()
+    expect(screen.getByText(/The view is saved\. Their columns stay hand-picked until they’re made\./)).toBeInTheDocument()
+    expect(screen.getByText('The semantic layer refused it.')).toBeInTheDocument()
+    // Only the view's own layout was written: hand-picked columns. Nothing opens by itself.
+    expect(updateViewLayoutMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Open it whenever you’re ready')).toBeInTheDocument()
+
+    graphChangesMock.mockImplementation(made)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await screen.findByText('Finance and Marketing are in your draft, each with its column mapped to it — ready to fill.')
+    // The same save, under the same key, in the same draft.
+    expect(graphChangesMock).toHaveBeenCalledTimes(2)
+    expect(graphChangesMock.mock.calls[1][3]).toEqual(graphChangesMock.mock.calls[0][3])
+    expect(graphChangesMock.mock.calls[1][5]).toBe(graphChangesMock.mock.calls[0][5])
+    expect(openDraftMock).toHaveBeenCalledTimes(1)
+    expect(createViewMock).toHaveBeenCalledTimes(1)
+    expect(updateViewLayoutMock.mock.calls[1][2]).toBe('br_1')
+    expect(updateViewLayoutMock.mock.calls[1][1].referenceLayout.layers.map((l: ViewLayerConfig) => l.anchorUrn)).toEqual([...URNS, undefined])
+  })
+})
+
 describe('useAutoOpenCountdown', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())

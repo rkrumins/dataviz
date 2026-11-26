@@ -5,10 +5,12 @@
  *
  * A switch that drops something (its types, its mapping) is made at once and says what it
  * dropped, with an Undo — as the canvas's own column gestures do. Mapping waits for an entity to
- * be picked, and says before then what it will drop and why. The kinds and their wording are the
- * canvas's (`columnKind`); what each switch writes is `layerSource`.
+ * be picked, and says before then what it will drop and why. On a brand-new model there is no
+ * entity to pick: the column is mapped to a new one, of a root type and named here, made with the
+ * model. The kinds and their wording are the canvas's (`columnKind`); what each switch writes is
+ * `layerSource`.
  */
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { AlertTriangle, Check, Link2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { caseFold } from '@/features/ontology/lib/caseFold'
@@ -19,7 +21,8 @@ import { EntitySearchPicker, type PickerOption } from '@/components/panels/entit
 import type { TopLevelEntity } from '../autoLayers'
 import { ENTITY_COLUMNS_MAX } from '../useTopLevelEntities'
 import {
-    layerSourceOf, toByType, toEntity, toHandPicked, type LayerFillState, type LayerSource,
+    layerSourceOf, listOf, newRootProblemText, toByType, toEntity, toHandPicked, toNewRoot,
+    type LayerFillState, type LayerSource, type NewRoot, type NewRootProblem,
 } from '../layerSource'
 
 const SOURCES: Array<{ id: LayerSource; label: string }> = [
@@ -27,11 +30,6 @@ const SOURCES: Array<{ id: LayerSource; label: string }> = [
     { id: 'handPicked', label: 'Hand-picked' },
     { id: 'mapped', label: 'Mapped to an entity' },
 ]
-
-/** "Domains", "Domains and Teams", "Apps, Services and Jobs" — joined with `word`. */
-function listOf(names: readonly string[], word: 'and' | 'or'): string {
-    return names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} ${word} ${names[names.length - 1]}`
-}
 
 const typeOf = (typesByFold: Map<string, EntityTypeSchema>, id: string) => typesByFold.get(caseFold(id))
 
@@ -51,10 +49,25 @@ function pullReason(layer: ViewLayerConfig, typesByFold: Map<string, EntityTypeS
         : 'its rules would pull what they pick out into the column'
 }
 
+/** Named for the types it fills with ("Domains"): a name for its fill, not one someone gave it. */
+function namedForTypes(layer: ViewLayerConfig, typesByFold: Map<string, EntityTypeSchema>): boolean {
+    const name = caseFold(layer.name.trim())
+    return !!name && (layer.entityTypes ?? []).some(t => {
+        const et = typeOf(typesByFold, t)
+        return [t, et?.name, et?.pluralName].some(n => !!n && caseFold(n) === name)
+    })
+}
+
 const unmappedNotice = (name: string) => `${name} shows as a row now — the column is no longer mapped to it.`
+const droppedRootNotice = (typeName: string, name: string) => name.trim()
+    ? `The new ${typeName} “${name.trim()}” won’t be made.`
+    : `No new ${typeName} will be made for it.`
+
+const FIELD = 'h-8 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-800 dark:text-slate-100'
 
 export function LayerSourceField({
     layer, fill, onChange, entityTypes, typesByFold, entities, entitiesLoading, entitiesCapped, nameOf, persona, placedWhere,
+    rootTypes, problem,
 }: {
     layer: ViewLayerConfig
     fill: LayerFillState
@@ -72,19 +85,30 @@ export function LayerSourceField({
     persona: PersonaMode
     /** Where a hand-picked layer's entities are placed. */
     placedWhere: string
+    /** A brand-new model (no entities yet): the root types a new entity of its own can be. */
+    rootTypes?: ReadonlyArray<{ id: string; name: string }>
+    /** Why its new entity cannot be made as it is. */
+    problem?: NewRootProblem
 }) {
+    const problemId = useId()
+    // An unnamed new entity is said so once its name has been left empty, not before it is typed.
+    const [nameTouched, setNameTouched] = useState(false)
     const [picking, setPicking] = useState(false)
     // "By type" chosen for a layer nothing fills yet: its types come next.
     const [byTypeChosen, setByTypeChosen] = useState(false)
     // What the last switch dropped: undone while nothing else has changed since.
     const [notice, setNotice] = useState<{ text: string; before: LayerFillState; after: LayerFillState } | null>(null)
     const undoable = !!notice && notice.after.layers === fill.layers && notice.after.assignments === fill.assignments
+        && notice.after.newRoots === fill.newRoots
 
-    const current = layerSourceOf(layer)
+    const newRoot: NewRoot | undefined = fill.newRoots?.[layer.id]
+    const current = layerSourceOf(layer, newRoot)
     const shown: LayerSource = picking ? 'mapped' : byTypeChosen && current === 'handPicked' ? 'byType' : current
     const anchorName = layer.anchorUrn ? nameOf(layer.anchorUrn) : null
     const what = fillsWith(layer, typesByFold)
     const typeName = (id: string) => typeOf(typesByFold, id)?.name ?? id
+    /** What a switch away from mapped says it dropped. */
+    const unmapping = anchorName ? unmappedNotice(anchorName) : newRoot ? droppedRootNotice(typeName(newRoot.type), newRoot.name) : null
 
     const commit = (next: LayerFillState, text: string | null) => {
         setNotice(text ? { text, before: fill, after: next } : null)
@@ -95,6 +119,13 @@ export function LayerSourceField({
         if (to === shown) return
         setPicking(false)
         setByTypeChosen(false)
+        if (to === 'mapped' && rootTypes) {
+            // Its own root type when it fills with one, else the ontology's first.
+            const own = rootTypes.find(t => (layer.entityTypes ?? []).some(id => caseFold(id) === caseFold(t.id)))
+            commit(toNewRoot(fill, layer.id, { type: (own ?? rootTypes[0]).id, name: '' }, { takeName: namedForTypes(layer, typesByFold) }),
+                what ? `No longer fills with ${what}: ${pullReason(layer, typesByFold)}.` : null)
+            return
+        }
         if (to === 'mapped') {
             setNotice(null)
             setPicking(true)
@@ -102,17 +133,17 @@ export function LayerSourceField({
         }
         if (to === 'byType') {
             setByTypeChosen(true)
-            if (anchorName) commit(toByType(fill, layer.id, anchorName), unmappedNotice(anchorName))
+            if (unmapping) commit(toByType(fill, layer.id, anchorName ?? undefined), unmapping)
             return
         }
         if (current === 'handPicked') return
         commit(toHandPicked(fill, layer.id, anchorName ?? undefined),
-            anchorName ? unmappedNotice(anchorName) : `No longer fills with ${what} — it holds only what’s placed in it.`)
+            unmapping ?? `No longer fills with ${what} — it holds only what’s placed in it.`)
     }
 
     const pick = (urn: string) => {
         const name = nameOf(urn)
-        const next = toEntity(fill, layer.id, urn, name)
+        const next = toEntity(fill, layer.id, urn, name, { takeName: namedForTypes(layer, typesByFold) })
         const was = layer.anchorUrn && layer.anchorUrn !== urn && next.assignments[layer.anchorUrn]?.layerId === layer.id
             ? nameOf(layer.anchorUrn) : null
         setPicking(false)
@@ -158,7 +189,8 @@ export function LayerSourceField({
             : 'Choose the types whose entities fill it.')
         : shown === 'handPicked'
             ? `Holds only what you place in it, ${placedWhere}.`
-            : picking
+            // Mapped, the row above says what the column is.
+            : picking || (newRoot && !newRoot.name.trim())
                 ? 'The column becomes that entity: its rows are what’s inside it, and adding or dropping there puts things inside it — which changes the data.'
                 : null
 
@@ -173,18 +205,23 @@ export function LayerSourceField({
                 {SOURCES.map(s => {
                     const Icon = COLUMN_KIND_ICON[s.id]
                     const on = shown === s.id
+                    // A brand-new model whose ontology names no top-level type has nothing to map to.
+                    const off = s.id === 'mapped' && !!rootTypes && rootTypes.length === 0
                     return (
                         <button
                             key={s.id}
                             type="button"
                             role="radio"
                             aria-checked={on}
+                            disabled={off}
+                            title={off ? 'Your semantic layer names no top-level type to make one of' : undefined}
                             onClick={() => choose(s.id)}
                             className={cn(
                                 'flex-1 min-w-0 inline-flex items-center justify-center gap-1.5 h-8 px-2 rounded-lg text-xs font-medium transition-colors',
                                 on
                                     ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm ring-1 ring-slate-200/80 dark:ring-slate-600/80'
                                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800/50',
+                                off && 'opacity-50 cursor-not-allowed',
                             )}
                         >
                             <Icon className={cn('w-3.5 h-3.5 shrink-0', on ? 'text-indigo-600 dark:text-indigo-400' : 'opacity-70')} aria-hidden />
@@ -228,6 +265,51 @@ export function LayerSourceField({
                 </div>
             )}
 
+            {shown === 'mapped' && newRoot && rootTypes && (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/40 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300">A new</span>
+                        {rootTypes.length > 1 ? (
+                            <select
+                                aria-label="Type of the new entity"
+                                value={newRoot.type}
+                                onChange={e => onChange(toNewRoot(fill, layer.id, { ...newRoot, type: e.target.value }))}
+                                className={cn(FIELD, 'px-2 pr-7')}
+                            >
+                                {rootTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                            </select>
+                        ) : (
+                            <span className="inline-flex items-center h-8 px-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-sm text-slate-800 dark:text-slate-100">
+                                {typeName(newRoot.type)}
+                            </span>
+                        )}
+                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300">named</span>
+                        <input
+                            type="text"
+                            aria-label={`Name of the new ${typeName(newRoot.type)}`}
+                            aria-invalid={!!problem}
+                            aria-describedby={problem ? problemId : undefined}
+                            value={newRoot.name}
+                            onChange={e => onChange(toNewRoot(fill, layer.id, { ...newRoot, name: e.target.value }))}
+                            onBlur={() => setNameTouched(true)}
+                            placeholder="e.g. Finance"
+                            autoFocus
+                            className={cn(FIELD, 'flex-1 min-w-[10rem] px-2.5',
+                                problem && 'border-amber-400 dark:border-amber-600 focus:outline-amber-500')}
+                        />
+                    </div>
+                    {problem && (problem === 'taken' || nameTouched) && (
+                        <p id={problemId} className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                            {newRootProblemText(problem, typeName(newRoot.type), newRoot.name)}
+                        </p>
+                    )}
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                        Made in the new model’s draft when you create it, with this column mapped to it.
+                    </p>
+                </div>
+            )}
+
             {shown === 'mapped' && picking && (
                 <div className="space-y-2">
                     {what && (
@@ -241,16 +323,18 @@ export function LayerSourceField({
                             {[0, 1, 2].map(i => <div key={i} className="h-3 rounded bg-slate-100 dark:bg-slate-700/60" style={{ width: `${70 - i * 15}%` }} />)}
                         </div>
                     ) : (
-                        <EntitySearchPicker
-                            options={options}
-                            onPick={pick}
-                            onCancel={() => setPicking(false)}
-                            searchLabel="Search for an entity to map it to"
-                            listLabel="Top-level entities"
-                            placeholder={`Search ${options.length.toLocaleString()} top-level entities…`}
-                            emptyText="Your data has no top-level entities to map it to yet."
-                            autoFocus
-                        />
+                        <div className="rounded-xl bg-white dark:bg-slate-900 ring-1 ring-slate-200 dark:ring-slate-700">
+                            <EntitySearchPicker
+                                options={options}
+                                onPick={pick}
+                                onCancel={() => setPicking(false)}
+                                searchLabel="Search for an entity to map it to"
+                                listLabel="Top-level entities"
+                                placeholder={`Search ${options.length.toLocaleString()} top-level entities…`}
+                                emptyText="Your data has no top-level entities to map it to yet."
+                                autoFocus
+                            />
+                        </div>
                     )}
                     {entitiesCapped && !entitiesLoading && (
                         <p className="text-[11px] text-slate-400">Lists the first {ENTITY_COLUMNS_MAX} of each type.</p>

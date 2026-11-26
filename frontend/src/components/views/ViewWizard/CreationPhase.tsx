@@ -17,13 +17,14 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
-import { AlertCircle, ArrowRight, Check, Compass, Database, Loader2, RefreshCw, Sparkles } from 'lucide-react'
+import { AlertCircle, ArrowRight, Check, Compass, Database, Link2, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/lib/viewUtils'
+import { listOf } from './layerSource'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type CreationStageId = 'provision' | 'create' | 'layout' | 'import' | 'publication'
+export type CreationStageId = 'provision' | 'create' | 'layout' | 'roots' | 'import' | 'publication'
 export type CreationStageState = 'pending' | 'active' | 'done' | 'failed'
 
 export interface CreationStage {
@@ -327,6 +328,7 @@ export function CreationSuccessBody({
     icon,
     graphName,
     stats,
+    note,
 }: {
     viewName: string
     scopeLabel?: string
@@ -336,6 +338,8 @@ export function CreationSuccessBody({
     /** Blank models: the physical graph key the model now owns. */
     graphName?: string
     stats: CreationSummaryStat[]
+    /** What else the view was made with, under the summary (`NewRootsNote`). */
+    note?: ReactNode
 }) {
     return (
         <div className="relative min-h-[440px] flex flex-col items-center justify-center text-center px-2">
@@ -422,6 +426,12 @@ export function CreationSuccessBody({
                 </motion.div>
             )}
 
+            {note && (
+                <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="mt-5 w-full max-w-2xl">
+                    {note}
+                </motion.div>
+            )}
+
             <motion.p
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -431,6 +441,53 @@ export function CreationSuccessBody({
                 <Compass className="w-3.5 h-3.5" />
                 Saved — you’ll always find it in Explorer
             </motion.p>
+        </div>
+    )
+}
+
+/**
+ * A brand-new model's top-level entities, on the success step: made in its draft with their
+ * columns mapped to them — or not yet, with why and a retry. The view is saved either way.
+ */
+export function NewRootsNote({ names, error, busy, onRetry }: {
+    names: readonly string[]
+    error?: string
+    busy?: boolean
+    onRetry: () => void
+}) {
+    const one = names.length === 1
+    const list = listOf(names)
+    if (!error && !busy) {
+        return (
+            <div role="status" className="flex items-start gap-3 rounded-xl border border-emerald-200 dark:border-emerald-900/70 bg-emerald-50/70 dark:bg-emerald-950/20 px-4 py-3 text-left">
+                <Link2 className="w-4 h-4 mt-0.5 text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden />
+                <p className="text-sm text-slate-700 dark:text-slate-200">
+                    {one
+                        ? `${list} is in your draft, its column mapped to it — ready to fill.`
+                        : `${list} are in your draft, each with its column mapped to it — ready to fill.`}
+                </p>
+            </div>
+        )
+    }
+    return (
+        <div role="alert" className="flex items-start gap-3 rounded-xl border border-amber-200 dark:border-amber-900/70 bg-amber-50/70 dark:bg-amber-950/20 px-4 py-3 text-left">
+            <AlertCircle className="w-4 h-4 mt-0.5 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden />
+            <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Couldn’t make {list} yet</p>
+                <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                    The view is saved. {one ? 'Its column stays hand-picked until it’s made.' : 'Their columns stay hand-picked until they’re made.'}
+                </p>
+                {error && <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 break-words">{error}</p>}
+            </div>
+            <button
+                type="button"
+                onClick={onRetry}
+                disabled={busy}
+                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-60 transition-colors"
+            >
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden /> : <RefreshCw className="w-3.5 h-3.5" aria-hidden />}
+                {busy ? 'Retrying…' : 'Retry'}
+            </button>
         </div>
     )
 }

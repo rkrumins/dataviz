@@ -583,12 +583,25 @@ describe('LayoutStep — what fills each layer', () => {
     fireEvent.mouseDown(within(list).getByRole('option', { name: /Finance/ }))
 
     const call = spy.mock.calls.at(-1)![0]
-    expect(call.layers[0]).toMatchObject({ id: 'l1', name: 'Domains', anchorUrn: 'urn:Domain:Finance', entityTypes: [] })
+    // Its name said what filled it: it takes its entity's now, and follows it.
+    expect(call.layers[0]).toMatchObject({ id: 'l1', name: 'Finance', nameFromAnchor: true, anchorUrn: 'urn:Domain:Finance', entityTypes: [] })
     expect(call.assignments['urn:Domain:Finance']).toMatchObject({ layerId: 'l1', inheritsChildren: true })
-    expect(within(sourceOf('Domains')).getByRole('radio', { name: 'Mapped to an entity' })).toHaveAttribute('aria-checked', 'true')
-    expect(within(layerRow('Domains')).getByRole('status')).toHaveTextContent(
+    expect(within(sourceOf('Finance')).getByRole('radio', { name: 'Mapped to an entity' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(layerRow('Finance')).getByRole('status')).toHaveTextContent(
       'Mapped to Finance. No longer fills with Domains: a type rule would pull every Domain into the column.')
-    expect(within(layerRow('Domains')).getAllByText(MAPPED_LINE).length).toBeGreaterThan(0)
+    expect(within(layerRow('Finance')).getAllByText(MAPPED_LINE).length).toBeGreaterThan(0)
+  })
+
+  it('a column someone named keeps its name when it is mapped', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" initial={{ layers: [{ ...DOMAINS, name: 'Money' }], assignments: {} }} />)
+    open('Money')
+    fireEvent.click(within(sourceOf('Money')).getByRole('radio', { name: 'Mapped to an entity' }))
+    fireEvent.mouseDown(within(layerRow('Money')).getByRole('option', { name: /Finance/ }))
+    expect(spy.mock.calls.at(-1)![0].layers[0]).toMatchObject({ name: 'Money', anchorUrn: 'urn:Domain:Finance' })
+    expect(spy.mock.calls.at(-1)![0].layers[0].nameFromAnchor).toBeUndefined()
   })
 
   it('a mapped layer (an edit of a view mapped on the canvas) shows as mapped, and maps to another entity or none', () => {
@@ -626,6 +639,68 @@ describe('LayoutStep — what fills each layer', () => {
     expect(call.assignments['urn:Domain:Marketing']).toMatchObject({ layerId: 'l1' })
     expect(within(layerRow('Marketing')).getByRole('status')).toHaveTextContent(
       'Marketing shows as a row now — the column is no longer mapped to it.')
+  })
+
+  it('on a brand-new model, a layer is mapped to a new top-level entity, named here, one name per type', () => {
+    useSchemaStore.setState({
+      schema: {
+        id: 'ont', name: 'Ontology', version: '1', views: [], defaultViewId: '',
+        entityTypes: [...DSD, TEAM], relationshipTypes: [], containmentEdgeTypes: [], lineageEdgeTypes: [],
+        rootEntityTypes: ['domain', 'team'],
+      } as unknown as WorkspaceSchema,
+    })
+    const spy = vi.fn()
+    render(<Harness spy={spy} blank initial={{
+      layoutTemplateId: 'per-root-type', assignments: {},
+      layers: [DOMAINS, { id: 'l2', name: 'Layer 2', color: '#2563eb', description: '', entityTypes: [], order: 1 }],
+    }} />)
+    open('Domains')
+    fireEvent.click(within(sourceOf('Domains')).getByRole('radio', { name: 'Mapped to an entity' }))
+
+    // No entities yet: the column's entity is one to make with the model — its type the layer's own.
+    let call = spy.mock.calls.at(-1)![0]
+    expect(call.layers[0].entityTypes).toEqual([])
+    expect(call.newRoots).toEqual({ l1: { type: 'Domain', name: '' } })
+    expect(within(layerRow('Domains')).getByRole('status')).toHaveTextContent(
+      'No longer fills with Domains: a type rule would pull every Domain into the column.')
+    expect(within(layerRow('Domains')).queryByRole('listbox')).not.toBeInTheDocument()
+    expect(within(layerRow('Domains')).getByText('Made in the new model’s draft when you create it, with this column mapped to it.')).toBeInTheDocument()
+    // Left unnamed, it says what it needs.
+    const nameBox = within(layerRow('Domains')).getByRole('textbox', { name: 'Name of the new Domain' })
+    expect(within(layerRow('Domains')).queryByText('Name the new Domain.')).not.toBeInTheDocument()
+    fireEvent.blur(nameBox)
+    expect(within(layerRow('Domains')).getByText('Name the new Domain.')).toBeInTheDocument()
+
+    fireEvent.change(nameBox, { target: { value: 'Finance' } })
+    call = spy.mock.calls.at(-1)![0]
+    expect(call.newRoots).toEqual({ l1: { type: 'Domain', name: 'Finance' } })
+    // Named for what filled it, the column takes its entity's name.
+    expect(call.layers[0]).toMatchObject({ name: 'Finance', nameFromAnchor: true })
+    expect(within(layerRow('Finance')).queryByText('Name the new Domain.')).not.toBeInTheDocument()
+    expect(within(layerRow('Finance')).getAllByText(MAPPED_LINE).length).toBeGreaterThan(0)
+
+    // A second Finance of the same type is refused; of another type, it is not.
+    open('Layer 2')
+    fireEvent.click(within(sourceOf('Layer 2')).getByRole('radio', { name: 'Mapped to an entity' }))
+    fireEvent.change(within(layerRow('Layer 2')).getByRole('combobox', { name: 'Type of the new entity' }), { target: { value: 'Domain' } })
+    fireEvent.change(within(layerRow('Layer 2')).getByRole('textbox', { name: 'Name of the new Domain' }), { target: { value: ' finance' } })
+    const TAKEN = 'Another column makes a Domain named “finance” — each needs its own name.'
+    expect(within(layerRow('finance')).getByText(TAKEN)).toBeInTheDocument()
+    // A column nobody named takes its entity's name.
+    expect(spy.mock.calls.at(-1)![0].layers[1]).toMatchObject({ name: 'finance', nameFromAnchor: true })
+    // Collapsed, its row says what stops its entity being made.
+    open('Finance')
+    expect(within(layerRow('finance')).getAllByText(TAKEN).length).toBeGreaterThan(0)
+    open('finance')
+    fireEvent.change(within(layerRow('finance')).getByRole('combobox', { name: 'Type of the new entity' }), { target: { value: 'Team' } })
+    expect(spy.mock.calls.at(-1)![0].newRoots.l2).toEqual({ type: 'Team', name: ' finance' })
+    expect(within(layerRow('finance')).queryByText(/each needs its own name/)).not.toBeInTheDocument()
+
+    // Not mapped any more: it is not made.
+    open('Finance')
+    fireEvent.click(within(sourceOf('Finance')).getByRole('radio', { name: 'Hand-picked' }))
+    expect(spy.mock.calls.at(-1)![0].newRoots).toEqual({ l2: { type: 'Team', name: ' finance' } })
+    expect(within(layerRow('Finance')).getByRole('status')).toHaveTextContent('The new Domain “Finance” won’t be made.')
   })
 
   it('a column named here stops following its entity, and an undo is offered only until the next edit', () => {

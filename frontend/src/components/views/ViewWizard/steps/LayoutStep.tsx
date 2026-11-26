@@ -23,6 +23,7 @@ import {
     Home,
     MousePointerClick,
     Link2,
+    AlertTriangle,
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
@@ -49,6 +50,7 @@ import { columnKindCopy } from '@/components/canvas/context-view/columnKind'
 import { renameLayer } from '@/components/canvas/context-view/layerMutations'
 import { usePersonaMode } from '@/store/persona'
 import { LayerSourceField } from './LayerSourceField'
+import { newRootProblemText, newRootProblems } from '../layerSource'
 
 // ============================================
 // Types
@@ -480,8 +482,9 @@ function LayerFillRow({ layer, suggestion, offer, typesByFold, placed, canChoose
     typesByFold: Map<string, EntityTypeSchema>
     placed: boolean
     canChoose: boolean
-    /** The entity the column is mapped to: its name, its type, and what that means on the canvas. */
-    mapped?: { name: string; type?: string; line: string }
+    /** The entity the column is mapped to: its name, its type, and what that means on the canvas —
+     *  or, for a new one to make with the model, what to do before it can be. */
+    mapped?: { name: string; type?: string; line?: string; isNew?: boolean; problem?: string }
     onKeep: () => void
     onChoose: () => void
     onTakeOffer: () => void
@@ -494,11 +497,25 @@ function LayerFillRow({ layer, suggestion, offer, typesByFold, placed, canChoose
                     <span className="text-[11px] text-slate-400 dark:text-slate-500 mr-0.5">Mapped to</span>
                     <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full border border-indigo-200 dark:border-indigo-800/70 bg-indigo-50/70 dark:bg-indigo-500/10 text-[11px] font-medium text-indigo-700 dark:text-indigo-200">
                         <Link2 className="w-3 h-3 shrink-0" aria-hidden />
-                        {mapped.name}
-                        {mapped.type && <span className="opacity-70">· {mapped.type}</span>}
+                        {mapped.name || `A new ${mapped.type}`}
+                        {mapped.name && mapped.type && <span className="opacity-70">· {mapped.type}</span>}
                     </span>
+                    {mapped.isNew && (
+                        <HoverTip label="Made with the model" detail="In its draft, when you create it — this column is mapped to it then.">
+                            <span className="inline-flex items-center h-5 px-1.5 rounded-md bg-emerald-50 dark:bg-emerald-500/10 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                                New
+                            </span>
+                        </HoverTip>
+                    )}
                 </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">{mapped.line}</p>
+                {mapped.problem ? (
+                    <p className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300 leading-snug">
+                        <AlertTriangle className="w-3 h-3 shrink-0" aria-hidden />
+                        {mapped.problem}
+                    </p>
+                ) : mapped.line && (
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">{mapped.line}</p>
+                )}
             </div>
         )
     }
@@ -803,8 +820,25 @@ export function LayoutStep({
     const nameOf = useCallback((urn: string) => topEntities.find(e => e.urn === urn)?.name
         ?? formData.layers.find(l => l.anchorUrn === urn && l.nameFromAnchor)?.name
         ?? fallbackNameFromUrn(urn), [topEntities, formData.layers])
+    // A brand-new model: the root types a column's own new entity can be, and what stops one being made.
+    const rootTypes = useMemo(() => (blank
+        ? rootTypeCandidates.map(c => ({ id: c.typeId, name: typesByFold.get(caseFold(c.typeId))?.name ?? c.typeId }))
+        : undefined), [blank, rootTypeCandidates, typesByFold])
+    const rootProblems = useMemo(() => newRootProblems(formData.layers, formData.newRoots), [formData.layers, formData.newRoots])
     /** The entity a mapped layer is, as its row says it. */
     const mappedOf = (layer: ViewLayerConfig) => {
+        const root = formData.newRoots?.[layer.id]
+        if (root) {
+            const name = root.name.trim()
+            const type = typesByFold.get(caseFold(root.type))?.name ?? root.type
+            // Open, its editor says what stops it being made.
+            const problem = expandedLayerId === layer.id ? undefined : rootProblems[layer.id]
+            return {
+                name, type, isNew: true,
+                line: name ? columnKindCopy('mapped', { persona, anchorName: name, where: 'there' }).detail : undefined,
+                problem: problem ? newRootProblemText(problem, type, root.name) : undefined,
+            }
+        }
         if (!layer.anchorUrn) return undefined
         const name = nameOf(layer.anchorUrn)
         const type = topEntities.find(e => e.urn === layer.anchorUrn)?.type
@@ -869,6 +903,7 @@ export function LayoutStep({
             contextModelId: undefined,
             contextModelVersion: undefined,
             suggestedFills: undefined,
+            newRoots: undefined,
             entityScope: template.entityScope,
         })
         setGalleryOpen(false)
@@ -888,6 +923,7 @@ export function LayoutStep({
             contextModelId: template.id,
             contextModelVersion: template.version,
             suggestedFills: undefined,
+            newRoots: undefined,
             // Layers that place by rule resolve only in open scope (see GalleryTemplate.entityScope).
             entityScope: layers.some(l => l.entityTypes.length > 0 || (l.rules?.length ?? 0) > 0) ? 'all' : undefined,
         }
@@ -929,6 +965,7 @@ export function LayoutStep({
         updateFormData({
             layers: [], assignments: {}, layoutTemplateId: undefined,
             contextModelId: undefined, contextModelVersion: undefined, suggestedFills: undefined, entityScope: undefined,
+            newRoots: undefined,
         })
     }, [updateFormData])
 
@@ -944,9 +981,10 @@ export function LayoutStep({
     const offers = useMemo(() => {
         const hintsOf = (layer: ViewLayerConfig) =>
             appliedTemplate?.layers.find(t => t.id === layer.templateLayerId)?.entityTypes ?? []
-        const open = new Set(formData.layers.filter(l => !placedOtherwise(l, formData.assignments)).map(l => l.id))
+        const open = new Set(formData.layers
+            .filter(l => !placedOtherwise(l, formData.assignments) && !formData.newRoots?.[l.id]).map(l => l.id))
         return Object.fromEntries(Object.entries(suggestFills(formData.layers, fitTarget, hintsOf)).filter(([id]) => open.has(id)))
-    }, [formData.layers, formData.assignments, fitTarget, appliedTemplate])
+    }, [formData.layers, formData.assignments, formData.newRoots, fitTarget, appliedTemplate])
     /** The layers ticked in "Suggest from your graph"; null while it is closed. */
     const [reviewing, setReviewing] = useState<Set<string> | null>(null)
 
@@ -997,11 +1035,14 @@ export function LayoutStep({
     }, [formData.layers, updateFormData])
 
     const handleRemoveLayer = useCallback((id: string) => {
+        const newRoots = formData.newRoots && { ...formData.newRoots }
+        delete newRoots?.[id]
         updateFormData({
-            layers: formData.layers.filter(l => l.id !== id)
+            layers: formData.layers.filter(l => l.id !== id),
+            newRoots,
         })
         if (expandedLayerId === id) setExpandedLayerId(null)
-    }, [formData.layers, expandedLayerId, updateFormData])
+    }, [formData.layers, formData.newRoots, expandedLayerId, updateFormData])
 
     const handleReorderLayers = useCallback((reordered: ViewLayerConfig[]) => {
         updateFormData({
@@ -1445,7 +1486,7 @@ export function LayoutStep({
                                                         </div>
                                                         <LayerSourceField
                                                             layer={layer}
-                                                            fill={{ layers: formData.layers, assignments: formData.assignments }}
+                                                            fill={{ layers: formData.layers, assignments: formData.assignments, newRoots: formData.newRoots }}
                                                             onChange={updateFormData}
                                                             entityTypes={availableEntityTypes}
                                                             typesByFold={typesByFold}
@@ -1455,6 +1496,8 @@ export function LayoutStep({
                                                             nameOf={nameOf}
                                                             persona={persona}
                                                             placedWhere={blank ? 'on the canvas' : 'on the next step or on the canvas'}
+                                                            rootTypes={rootTypes}
+                                                            problem={rootProblems[layer.id]}
                                                         />
                                                     </div>
                                                 </motion.div>
