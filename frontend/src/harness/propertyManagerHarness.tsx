@@ -27,11 +27,13 @@ import { PropertyManagerDrawer } from '../components/canvas/property-manager/Pro
 import { PropertyOpHost } from '../components/canvas/property-manager/PropertyOpHost'
 import { ProviderOverride } from '../providers/GraphProviderContext'
 import { RemoteGraphProvider } from '../providers/RemoteGraphProvider'
+import { useAuthStore } from '../store/auth'
 import { useBranchStore } from '../store/branchStore'
 import { DEFAULT_FEATURES, useFeaturesStore } from '../store/features'
 import { usePreferencesStore } from '../store/preferences'
 import { useSchemaStore } from '../store/schema'
 import { useViewLibraryStore } from '../store/viewLibraryStore'
+import { useWorkspacesStore } from '../store/workspaces'
 import type { SearchCatalogProperty, SearchCatalogRequest, SearchCatalogResult } from '../types/search'
 
 
@@ -163,7 +165,13 @@ useViewLibraryStore.setState({ viewId: VIEW, branchId: 'harness-draft', status: 
     savedQueries: [], reusableChanges: [] } as never)
 
 // A draft is open on a versioned data source: every change is offered.
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, editModeEnabled: true, versioningEnabled: true } } as never)
+useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, editModeEnabled: true, versioningEnabled: true,
+    semanticLayerEditMode: true } } as never)
+// Who may edit the semantic layer, on a data source that has one: "Make it a field…" is offered.
+useAuthStore.setState({ permissions: { sid: 'harness', global: ['system:admin'], ws: {} } } as never)
+useWorkspacesStore.setState({ activeWorkspaceId: 'harness-ws', activeDataSourceId: 'harness-ds',
+    workspaces: [{ id: 'harness-ws', name: 'Harness', dataSources: [{ id: 'harness-ds', label: 'Enterprise lineage',
+        ontologyId: 'harness-layer', isPrimary: true }] }] } as never)
 useBranchStore.setState({ workspaceId: 'harness-ws', dataSourceId: null, viewId: VIEW, graphId: 'harness-graph', currentBranchId: 'harness-draft' } as never)
 useSchemaStore.setState({
     activeViewId: VIEW,
@@ -182,6 +190,12 @@ useSchemaStore.setState({
 } as never)
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+// The data source's semantic layer, a draft version: a field is added to it in place.
+queryClient.setQueryData(['ontology-def', 'harness-layer'], {
+    id: 'harness-layer', name: 'Enterprise lineage', version: 4, isPublished: false, isSystem: false, deletedAt: null,
+    entityTypeDefinitions: Object.fromEntries(['Dataset', 'Table', 'Column'].map((t) => [t, { name: t, fields: [] }])),
+    relationshipTypeDefinitions: Object.fromEntries(RELATIONSHIP_TYPES.map((t) => [t.id, { name: t.name, fields: [] }])),
+})
 
 
 function Harness() {
