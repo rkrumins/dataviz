@@ -55,7 +55,9 @@ from backend.common.models.graph import ChildrenBatchParent, TraceClosureResult,
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError, children_batch_by_query
-from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.derived_artifacts import (
+    DERIVED_EDGE_TYPES, is_derived_edge_type, is_derived_label,
+)
 from backend.common.moments import from_cell
 from backend.common.property_patch import apply_properties_patch
 from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
@@ -2205,6 +2207,10 @@ def _node_from_props(
 #: A relationship's envelope, never one of its properties: its id, its confidence, the
 #: platform's JSON bag of properties (``r.properties``) and the projector's fingerprint.
 _EDGE_ENVELOPE_KEYS = frozenset({"id", "confidence", "properties", "gvHash"})
+
+#: Relationships ``relationships_at`` reads a statement: no more than a reply holds on the stock
+#: image (``RESULTSET_SIZE``, 10,000), which cuts one there without saying so.
+_EDGES_AT_PAGE = 10_000
 
 
 def _json_object(value: Any) -> Optional[Dict[str, Any]]:
@@ -7183,6 +7189,87 @@ class FalkorDBProvider(GraphDataProvider):
             for s, t, rel_type, props in rows:
                 out.setdefault((s, t), []).append((str(rel_type), dict(props or {})))
         return out
+
+    async def relationships_at(self, urns: Sequence[str], *,
+                               edge_types: Optional[Sequence[str]] = None,
+                               except_types: Sequence[str] = (), limit: int
+                               ) -> Optional[List[GraphEdge]]:
+        """Every relationship stored from or to any of ``urns``, each once — or None when there are
+        more than ``limit``: of ``edge_types`` (as named; None: every type but ``except_types``),
+        never a roll-up. Each urn is seeked by its label's URN index, both directions, and an urn
+        the graph doesn't hold has none (as :meth:`relationships_between`): never an unlabeled scan.
+
+        What it costs is bounded by ``limit``, never by how many relationships an entity holds:
+        each direction is counted first, by a statement that stops at ``limit + 1``. Past ``limit``
+        in either, there are more than ``limit`` and none is read; within it, each is read a page
+        at a time."""
+        await self._ensure_connected()
+        if limit < 0:
+            return None
+        types: List[str] = []
+        if edge_types is not None:
+            types = [t for t in self._alias_rel_types(list(edge_types))
+                     if t and not is_derived_edge_type(t)]
+            if not types:
+                return []
+        rel = f"[r:{'|'.join(_sanitize_label(t) for t in types)}]" if types else "[r]"
+        skip = sorted({str(t).upper() for t in (*DERIVED_EDGE_TYPES, *except_types)})
+        where = "" if types else " AND NOT toUpper(type(r)) IN $_skip"
+
+        def pattern(label: str, outgoing: bool) -> str:
+            return (f"MATCH (a:{label})-{rel}->(b) WHERE a.urn IN $_urns{where}" if outgoing
+                    else f"MATCH (a)-{rel}->(b:{label}) WHERE b.urn IN $_urns{where}")
+
+        async def held(label: str, bucket: List[str], outgoing: bool) -> int:
+            # ``LIMIT`` ends the traversal there: an entity past ``limit`` costs ``limit + 1``.
+            res = await self._ro_query(
+                f"{pattern(label, outgoing)} WITH r LIMIT $_n RETURN count(r)",
+                params={"_urns": bucket, "_skip": skip, "_n": limit + 1}, op="edges.at.count")
+            got = res.result_set or []
+            return int(got[0][0]) if got else 0
+
+        async def read(label: str, bucket: List[str], outgoing: bool) -> Optional[list]:
+            # A page at a time in relationship-ID order: FalkorDB cuts a reply at its
+            # ``RESULTSET_SIZE`` rows without saying so. Each page walks every relationship this
+            # way, at most ``limit`` of them once counted.
+            page = min(limit + 1, _EDGES_AT_PAGE)
+            rows: list = []
+            after = -1
+            while True:
+                res = await self._ro_query(
+                    f"{pattern(label, outgoing)} AND ID(r) > $_after WITH a, b, r ORDER BY ID(r) "
+                    "LIMIT $_page RETURN ID(r), a.urn, b.urn, type(r), properties(r)",
+                    params={"_urns": bucket, "_skip": skip, "_after": after, "_page": page},
+                    op="edges.at")
+                got = res.result_set or []
+                rows += [r[1:] for r in got]
+                if len(rows) > limit:
+                    return None                         # more came since they were counted
+                if len(got) < page:
+                    return rows
+                after = got[-1][0]
+
+        ways = [(label, bucket, outgoing)
+                for label, bucket in await self._label_buckets(list(urns))
+                if label                                # an urn not in the graph: none
+                for outgoing in (True, False)]
+        counts = await asyncio.gather(*(held(*way) for way in ways))
+        # Each relationship is counted once a direction (by the bucket of its end there): past
+        # ``limit`` either way, there are more than ``limit``.
+        for outgoing in (True, False):
+            if sum(n for (_, _, o), n in zip(ways, counts) if o is outgoing) > limit:
+                return None
+        answers = await asyncio.gather(*(read(*way) for way, n in zip(ways, counts) if n))
+        if any(rows is None for rows in answers):
+            return None
+        # One between two of ``urns`` (or from one to itself) is read from both ends: once.
+        out: Dict[Tuple[str, str, str, str], GraphEdge] = {}
+        for rows in answers:
+            for s, t, rel_type, props in rows:
+                props = dict(props or {})
+                out.setdefault((s, t, str(rel_type), str(props.get("id"))),
+                               _edge_from_row(s, t, str(rel_type), props))
+        return None if len(out) > limit else list(out.values())
 
     async def _edges_between_pairs(
         self,

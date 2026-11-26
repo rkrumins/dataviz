@@ -55,7 +55,7 @@ import { type RecentQueryEntry, useSearchStore } from '@/store/searchStore'
 import { useLibraryCanEdit, useSavedViewQueries, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { Predicate } from '@/types/search'
 
-import { NO_RULE_FOR_CONNECTIONS, asDraft, queryLabel } from './findMode'
+import { asDraft, queryLabel } from './findMode'
 import type { Recipe } from './recipes/recipes'
 import { ViewRecipes } from './recipes/ViewRecipes'
 
@@ -641,7 +641,7 @@ function MineRow({
                     </button>
                 )}
                 <KeepActions label={displayLabel} onKeep={onKeep} onMakeRule={onMakeRule}
-                             refusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined} />
+                             relationships={connections} />
                 {isNamed && canShare && (
                     <button
                         type="button"
@@ -809,7 +809,7 @@ function SavedRow({
                 confirming ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100 focus-within:opacity-100',
             )}>
                 {!confirming && <KeepActions label={query.name} onKeep={onKeep} onMakeRule={onMakeRule}
-                                             refusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined} />}
+                                             relationships={connections} />}
                 {canEdit && (confirming ? (
                         <button
                             type="button"
@@ -849,13 +849,14 @@ function ConnectionsBadge() {
 
 
 /** Download a saved query as a file, and — for someone who can edit the
- *  view — make a display rule of it, unless it can make none (``refusal``
- *  says why). */
-function KeepActions({ label, onKeep, onMakeRule, refusal }: {
+ *  view — make a display rule of it: one that tags the entities it matches,
+ *  or, a Connections search (``relationships``), styles the relationships it
+ *  finds. */
+function KeepActions({ label, onKeep, onMakeRule, relationships = false }: {
     label: string
     onKeep: () => void
     onMakeRule?: () => void
-    refusal?: string
+    relationships?: boolean
 }) {
     const action = cn(
         'inline-flex items-center justify-center w-7',
@@ -865,8 +866,9 @@ function KeepActions({ label, onKeep, onMakeRule, refusal }: {
     return (
         <>
             {onMakeRule && (
-                <button type="button" onClick={onMakeRule} className={action} disabled={!!refusal}
-                        title={refusal ?? 'Make a display rule of it — tag every entity it matches'}
+                <button type="button" onClick={onMakeRule} className={action}
+                        title={relationships ? 'Make a display rule of it — style every relationship it finds'
+                            : 'Make a display rule of it — tag every entity it matches'}
                         aria-label={`Make a display rule of “${label}”`}>
                     <Tags className="w-3.5 h-3.5" />
                 </button>
@@ -1068,7 +1070,7 @@ function OtherRow({ query, from, mine = false, onLoad, onKeep, onMakeRule }: {
                     </button>
                 )}
                 <KeepActions label={query.name} onKeep={onKeep} onMakeRule={onMakeRule}
-                             refusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined} />
+                             relationships={connections} />
             </div>
         </div>
     )

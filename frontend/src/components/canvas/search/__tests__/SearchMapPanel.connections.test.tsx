@@ -5,7 +5,7 @@
  * display rule can't be made of it; and a question asked beside it takes
  * its place — a connection is the whole query, never added to.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,7 +18,6 @@ import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { EdgesPredicate, Predicate } from '@/types/search'
 import { stubAdvanced, stubSession } from '@/test/stubSearchSession'
 
-import { NO_RULE_FOR_CONNECTIONS } from '../panel/findMode'
 import { SearchMapPanel } from '../SearchMapPanel'
 
 
@@ -110,8 +109,8 @@ describe('SearchMapPanel — Connections', () => {
         expect(screen.queryByText(/Left out:/)).not.toBeInTheDocument()
     })
 
-    it('answers with the edges, counted as connections, and makes no display rule of them', () => {
-        // Someone who could make a rule of an entity search.
+    it('answers with the edges, counted as connections, and makes a rule that styles them', () => {
+        // Someone who may add rules to the view.
         useViewLibraryStore.setState({ viewId: 'view-1', branchId: null, canEdit: true })
         useSearchStore.getState().commitDraft(EDGES)
         renderPanel({ view: CONNECTIONS })
@@ -119,8 +118,12 @@ describe('SearchMapPanel — Connections', () => {
         expect(screen.getByText('amount_usd')).toBeInTheDocument()
         expect(screen.getByText('1 connection')).toBeInTheDocument()
         const rule = screen.getByRole('button', { name: 'Create display rule' })
-        expect(rule).toBeDisabled()
-        expect(rule).toHaveAttribute('title', NO_RULE_FOR_CONNECTIONS)
+        expect(rule).toBeEnabled()
+        fireEvent.click(rule)
+        // The rule editor opens on relationships, its condition this search.
+        const dialog = screen.getByRole('dialog', { name: 'Create display rule' })
+        expect(within(dialog).getByText(/Style every relationship this search finds/)).toBeInTheDocument()
+        expect(within(dialog).getByRole('radio', { name: /Relationships/ })).toHaveAttribute('aria-checked', 'true')
     })
 
     it('states the connections with the builder folded, and a question there takes their place', () => {

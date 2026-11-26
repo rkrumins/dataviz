@@ -72,7 +72,7 @@ import { CodeMode } from './dsl/CodeMode'
 import type { DslVocabulary } from './dsl/dslLanguage'
 import { useEdgeTypeOptions } from './edgeTypeOptions'
 import { namePathFor, searchEntitiesByName } from './entityNames'
-import { findModeOf, NO_RULE_FOR_CONNECTIONS, queryLabel, toConnections, toEntities, type FindMode } from './findMode'
+import { findModeOf, queryLabel, toConnections, toEntities, type FindMode } from './findMode'
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
@@ -432,8 +432,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 onClear={handleClearAll}
                 canSave={runnable !== null}
                 onSave={handleOpenSave}
-                canCreateRule={runnable !== null && !connections}
-                ruleRefusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined}
+                canCreateRule={runnable !== null}
                 onCreateRule={handleOpenCreateRule}
                 runMode={runMode}
                 onRunModeChange={setRunMode}

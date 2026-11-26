@@ -7,7 +7,8 @@
  * query the user just built. Because both surfaces now build their
  * criteria with the same ``VisualQueryBuilder``, the seeded predicate
  * drops straight into the editor — fully editable — and the user just
- * adds a name / colour / icon and hits Create.
+ * adds a name / colour / icon and hits Create. A Connections search seeds a
+ * rule applied to relationships: it styles the lines it finds.
  *
  * ``CreateRuleFromQuery`` does the same for a query from the library —
  * this view's, another view's or the user's own — with the view's types
@@ -33,6 +34,7 @@ import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
 import { useDiscovery } from '../builder/useDiscovery'
+import { asDraft } from './findMode'
 
 import { useViewLayerOptions } from './layerOptions'
 
@@ -56,15 +58,20 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
     const saveRule = useViewLibraryStore((s) => s.saveRule)
     const { notify } = useAppNotifications()
 
+    // A Connections search finds relationships: its rule styles their lines.
+    const relationships = asDraft(seedPredicate).kind === 'edges'
+
     // Saved to the view's library; a refusal (a taken name, no right to
     // edit the view) stays in the editor with its reason.
     const handleSave = useCallback(async (rule: DisplayRuleConfig) => {
         await saveRule(rule)
         onClose()
         // The rule engine recomputes the match set asynchronously, so we
-        // reassure the user the tag is now live (matching the Property
+        // reassure the user the rule is now live (matching the Property
         // Manager drawer's wording).
-        notify('success', `“${rule.name}” applied — tagging matched entities`)
+        notify('success', rule.target === 'relationships'
+            ? `“${rule.name}” applied — styling matched relationships`
+            : `“${rule.name}” applied — tagging matched entities`)
     }, [saveRule, onClose, notify])
 
     // Seed the editor with the current query as a brand-new (id-less)
@@ -73,7 +80,8 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
         id: '',
         name: seedName,
         color: '#6366f1',
-        predicate: seedPredicate,
+        predicate: relationships ? asDraft(seedPredicate) : seedPredicate,
+        ...(relationships ? { target: 'relationships' as const } : {}),
         enabled: true,
         createdAt: new Date().toISOString(),
     }
@@ -117,7 +125,9 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
                             Create display rule
                         </h3>
                         <p className="text-[11.5px] text-ink-muted mt-0.5">
-                            Tag every entity matched by this query with a colored chip on the canvas.
+                            {relationships
+                                ? 'Style every relationship this search finds — its line’s colour, dash and width on the canvas.'
+                                : 'Tag every entity matched by this query with a colored chip on the canvas.'}
                         </p>
                     </div>
                     <button
