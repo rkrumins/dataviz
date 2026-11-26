@@ -76,6 +76,9 @@ describe('SaveAsViewSheet', () => {
     await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout.kind).toBe('auto'))
     fireEvent.click(screen.getByRole('radio', { name: /From a template/ }))
     expect(await screen.findByText(/Choose a template/)).toBeInTheDocument()
+    // Each template is offered as it is: no claim about how it fits this data.
+    expect(screen.getByRole('radio', { name: /Medallion/ })).toHaveTextContent('1 layer')
+    expect(screen.queryByText(/Fits \d+ of/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('radio', { name: /Medallion/ }))
     await waitFor(() => expect(planMembers.mock.calls.at(-1)![1].layout).toMatchObject({ kind: 'template', templateId: 'tpl' }))
     expect(planMembers.mock.calls.at(-1)![1].layers).toHaveLength(1)

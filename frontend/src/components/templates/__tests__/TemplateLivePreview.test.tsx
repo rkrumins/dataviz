@@ -1,8 +1,8 @@
 /**
  * "Preview with real data": nothing is read until it is opened; then a few
  * real entities land in the layers a view built from the template would put
- * them in, with how many there are in all, and what the data doesn't declare
- * is said.
+ * them in, with how many there are in all. The template is applied as a view
+ * applies it, and nothing says it "doesn't match".
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -83,8 +83,8 @@ describe('TemplateLivePreview', () => {
 
         expect(getNodesPage).toHaveBeenCalledWith({ entityTypes: ['Table'], limit: 6 })
         expect(getNodesPage).not.toHaveBeenCalledWith(expect.objectContaining({ entityTypes: ['Chart'] }))
-        expect(screen.getByText(/matches 2 of 2 layers/)).toBeInTheDocument()
-        expect(screen.getByText(/Not in Finance's semantic layer: Chart/)).toBeInTheDocument()
+        expect(screen.queryByText(/matches \d+ of \d+ layers/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/Not in Finance's semantic layer/)).not.toBeInTheDocument()
     })
 
     it('says so when the data cannot be read, and keeps the template', async () => {

@@ -244,6 +244,11 @@ describe('layersForTopLevelEntities', () => {
         expect(layers.map(l => l.anchorUrn)).toEqual(['urn:a', 'urn:b'])
     })
 
+    it('names each column after its entity until someone renames it', () => {
+        const { layers } = layersForTopLevelEntities(entities)
+        expect(layers.map(l => l.nameFromAnchor)).toEqual([true, true])
+    })
+
     it('still writes the assignment, so a client without anchors renders the old shape', () => {
         const { layers, assignments } = layersForTopLevelEntities(entities)
         expect(assignments['urn:a'].layerId).toBe(layers[0].id)

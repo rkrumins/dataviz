@@ -512,6 +512,20 @@ class TopLevelNodesResult(BaseModel):
         populate_by_name = True
 
 
+class UnplacedTopLevelResult(BaseModel):
+    """The top-level entities of some types that a view does not place
+    (``POST /nodes/top-level/unplaced``): how many, by type, and the first of
+    them by name. ``complete`` is False when the read stopped at its ceiling,
+    so the counts are a lower bound."""
+    nodes: List[GraphNode]
+    by_type: Dict[str, int] = Field(default_factory=dict, alias="byType")
+    total_count: int = Field(0, alias="totalCount")
+    complete: bool = True
+
+    class Config:
+        populate_by_name = True
+
+
 # ============================================
 # Introspection Models
 # ============================================

@@ -126,10 +126,10 @@ describe('LayerColumn — an anchored column that can never fill', () => {
     // Both render as an ordinary empty column otherwise, and "No assigned
     // entities yet" is untrue in both: the column was built around an entity,
     // and why it is empty has nothing to do with assignment.
-    it('says so when the entity was deleted at source', () => {
+    it('says so when this source no longer holds the entity', () => {
         renderColumn(undefined, { nodes: [], anchorIssue: 'missing' })
         expect(screen.getByText(/entity is gone/i)).toBeInTheDocument()
-        expect(screen.getByText(/removed from the source/i)).toBeInTheDocument()
+        expect(screen.getByText(/This source doesn’t hold it now/i)).toBeInTheDocument()
         expect(screen.queryByText(/No assigned entities yet/i)).not.toBeInTheDocument()
     })
 

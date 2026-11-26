@@ -3,7 +3,30 @@
  * and not claimed by another column), by type or rule, or hand-picked — and how each is explained.
  */
 import { describe, expect, it } from 'vitest'
-import { columnKind, columnKindCopy } from '../columnKind'
+import { MAP_REFUSED_GROUPS, MAP_REFUSED_SEVERAL, columnKind, columnKindCopy, mapOffer } from '../columnKind'
+
+describe('mapOffer — what mapping a column offers', () => {
+  it('a hand-picked column holding at most one entity can be mapped to one', () => {
+    expect(mapOffer({ entityTypes: [] }, { kind: 'handPicked', roots: 0 })).toEqual({ kind: 'map' })
+    expect(mapOffer({ entityTypes: [] }, { kind: 'handPicked', roots: 1 })).toEqual({ kind: 'map' })
+  })
+
+  it('never a column of several roots, or of groups: its "+" and drops would turn into data changes unasked', () => {
+    expect(mapOffer({ entityTypes: [] }, { kind: 'handPicked', roots: 2 })).toEqual({ kind: 'refused', reason: MAP_REFUSED_SEVERAL })
+    expect(mapOffer({ entityTypes: [], logicalNodes: [{ id: 'g', name: 'G', type: 'group' }] }, { kind: 'handPicked', roots: 0 }))
+      .toEqual({ kind: 'refused', reason: MAP_REFUSED_GROUPS })
+    expect(MAP_REFUSED_SEVERAL).toBe('Holds several top-level entities')
+  })
+
+  it('a mapped column: shown as a row, or mapped to another — and only re-mapped while its entity is gone or another column\'s', () => {
+    expect(mapOffer({ entityTypes: [], anchorUrn: 'Finance' }, { kind: 'mapped', roots: 4 })).toEqual({ kind: 'mapped', canUnmap: true })
+    expect(mapOffer({ entityTypes: [], anchorUrn: 'Gone' }, { kind: 'handPicked', roots: 0 })).toEqual({ kind: 'mapped', canUnmap: false })
+  })
+
+  it('a column of types is not offered: its type would keep pulling every entity of it in', () => {
+    expect(mapOffer({ entityTypes: ['domain'] }, { kind: 'byType', roots: 1 })).toBeNull()
+  })
+})
 
 const ok = { resolved: true }
 
@@ -55,6 +78,13 @@ describe('columnKindCopy', () => {
       technical: 'types: app, service · 2 rules',
     })
     expect(columnKindCopy('byType', { persona: 'business', ruleCount: 1 }).label).toBe('By rule')
+  })
+
+  it('said from elsewhere (the wizard), the column is "there" rather than "here"', () => {
+    expect(columnKindCopy('mapped', { persona: 'technical', anchorName: 'Finance', where: 'there' }).detail)
+      .toBe('This column is Finance’s contents. Adding or dropping there puts things inside Finance — changes the data.')
+    expect(columnKindCopy('byType', { persona: 'business', typeNames: ['App'], handPlaced: 2, where: 'there' }).detail)
+      .toBe('A column for Apps — adding there creates an App. And 2 placed there by hand. Dropping on its header only changes this view.')
   })
 
   it('a hand-picked column: arranging it only changes this view', () => {

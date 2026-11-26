@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import type { ViewLayerConfig } from '@/types/schema'
-import { appendLayer, insertLayer, recolorLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode, clearLayerOrderKeys, updateLayer } from './layerMutations'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import {
+  appendLayer, insertLayer, recolorLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode,
+  clearLayerOrderKeys, updateLayer, isAutoLayerName, mapLayerToEntity, unmapLayer, unmapMovedAnchors, touchedBy, layoutPart,
+  restoreLayoutPart, remapLayerAnchors, pruneTempAnchors, deleteColumn,
+} from './layerMutations'
+import { assignEntities } from './assignmentMutations'
 
 const L = (id: string, name: string, order: number): ViewLayerConfig => ({
   id,
@@ -252,5 +258,225 @@ describe('updateLayer', () => {
     const layers = updateLayer(base(), 'b', { properties: { owner: 'ana' } })
     expect(updateLayer(layers, 'b', { properties: { owner: 'ana' } })).toBe(layers)
     expect(updateLayer(layers, 'zz', { name: 'X' })).toBe(layers)
+  })
+})
+
+describe('renameLayer and updateLayer — a name someone chose', () => {
+  it('a rename stops the name following the entity the column is mapped to', () => {
+    const mapped = [{ ...L('a', 'Finance', 0), anchorUrn: 'fin', nameFromAnchor: true }]
+    expect(renameLayer(mapped, 'a', 'Money')[0]).toEqual({ ...L('a', 'Money', 0), anchorUrn: 'fin' })
+    expect(updateLayer(mapped, 'a', { name: 'Money' })[0]).toEqual({ ...L('a', 'Money', 0), anchorUrn: 'fin' })
+    // Settings that leave the name alone leave it following.
+    expect(updateLayer(mapped, 'a', { color: '#111111' })[0]).toMatchObject({ nameFromAnchor: true })
+  })
+})
+
+// ── Mapping a column to an entity ───────────────────────────────────────────
+// The column IS the entity: `anchorUrn`, and the entity's own placement in that column (inheriting,
+// so what is inside it follows). The two always change together.
+
+const layoutOf = (layers: ViewLayerConfig[], assignments: NormalizedReferenceLayout['assignments'] = {}): NormalizedReferenceLayout =>
+  ({ layers, assignments })
+const placed = (layerId: string) => ({ layerId, inheritsChildren: true, assignedBy: 'user' as const, assignedAt: 't0' })
+
+describe('isAutoLayerName', () => {
+  it('is a name nobody chose: empty, a fresh "New layer", or one that follows its entity', () => {
+    expect(['', '  ', 'New layer', 'New layer 3', 'new layer'].map((name) => isAutoLayerName({ name }))).toEqual([true, true, true, true, true])
+    expect(isAutoLayerName({ name: 'Finance', nameFromAnchor: true })).toBe(true)
+    expect(isAutoLayerName({ name: 'Finance' })).toBe(false)
+    expect(isAutoLayerName({ name: 'New layer of apps' })).toBe(false)
+    // The wizard's "Add Layer" names a layer by its place, too.
+    expect(['Layer 2', 'layer 12'].map((name) => isAutoLayerName({ name }))).toEqual([true, true])
+    expect(isAutoLayerName({ name: 'Layer of apps' })).toBe(false)
+  })
+})
+
+describe('mapLayerToEntity', () => {
+  const start = () => layoutOf(
+    [L('a', 'New layer', 0), L('b', 'Domains', 1), { ...L('c', 'Finance', 2), anchorUrn: 'fin', nameFromAnchor: true }],
+    { fin: placed('c'), sales: placed('b') },
+  )
+
+  it('maps the layer to the entity and moves the entity\'s placement into it, inheriting', () => {
+    const before = start()
+    const out = mapLayerToEntity(before, 'a', 'sales', { name: 'Sales' })
+    expect(out.layers.find((l) => l.id === 'a')).toMatchObject({ anchorUrn: 'sales', nameFromAnchor: true, name: 'Sales' })
+    expect(out.assignments.sales).toMatchObject({ layerId: 'a', inheritsChildren: true })
+    expect(out.assignments.fin).toBe(before.assignments.fin)
+  })
+
+  it('takes the entity from any other column mapped to it', () => {
+    const out = mapLayerToEntity(start(), 'a', 'fin', { name: 'Finance' })
+    expect(out.layers.find((l) => l.id === 'c')?.anchorUrn).toBeUndefined()
+    expect(out.layers.find((l) => l.id === 'a')?.anchorUrn).toBe('fin')
+    expect(out.assignments.fin.layerId).toBe('a')
+  })
+
+  it('keeps a name someone chose; follows the entity only where the name was nobody\'s', () => {
+    const out = mapLayerToEntity(start(), 'b', 'sales', { name: 'Sales' })
+    expect(out.layers.find((l) => l.id === 'b')).toEqual({ ...L('b', 'Domains', 1), anchorUrn: 'sales' })
+    // Re-mapped, a column named after its entity is named after the new one.
+    expect(mapLayerToEntity(start(), 'c', 'sales', { name: 'Sales' }).layers.find((l) => l.id === 'c'))
+      .toMatchObject({ anchorUrn: 'sales', name: 'Sales', nameFromAnchor: true })
+  })
+
+  it('drops the placements of what is inside it that kept it in its old column', () => {
+    const before = layoutOf([L('a', 'New layer', 0), L('b', 'Domains', 1)],
+      { sales: placed('b'), crm: { layerId: 'b', inheritsChildren: true, orderKey: 'a0' } })
+    const out = mapLayerToEntity(before, 'a', 'sales', { clearDescendants: ['crm'] })
+    expect(Object.keys(out.assignments)).toEqual(['sales'])
+  })
+
+  it('returns the SAME layout when it already is so, or the layer is missing', () => {
+    const mapped = start()
+    expect(mapLayerToEntity(mapped, 'c', 'fin')).toBe(mapped)
+    expect(mapLayerToEntity(mapped, 'zz', 'fin')).toBe(mapped)
+  })
+})
+
+describe('unmapLayer', () => {
+  const mapped = () => layoutOf([{ ...L('c', 'Finance', 0), anchorUrn: 'fin', nameFromAnchor: true }], { fin: placed('c') })
+
+  it('clears the mapping; the entity keeps its placement, so it shows as a row in the column', () => {
+    const before = mapped()
+    const out = unmapLayer(before, 'c')
+    expect(out.layers[0].anchorUrn).toBeUndefined()
+    expect(out.assignments).toBe(before.assignments)
+  })
+
+  it('keeps the name the column showed, still free to follow a new mapping', () => {
+    expect(unmapLayer(mapped(), 'c', { name: 'Money' }).layers[0]).toMatchObject({ name: 'Money', nameFromAnchor: true })
+  })
+
+  it('returns the SAME layout for a layer that is not mapped, or missing', () => {
+    const out = unmapLayer(mapped(), 'c')
+    expect(unmapLayer(out, 'c')).toBe(out)
+    expect(unmapLayer(out, 'zz')).toBe(out)
+  })
+})
+
+describe('unmapMovedAnchors', () => {
+  const before = () => layoutOf(
+    [{ ...L('fin', 'Finance', 0), anchorUrn: 'Finance' }, L('domains', 'Domains', 1), { ...L('dup', 'Other', 2), anchorUrn: 'Sales' }],
+    { Finance: placed('fin'), Sales: placed('domains') },
+  )
+
+  it('a column whose entity was placed elsewhere is no longer mapped to it', () => {
+    const b = before()
+    const out = unmapMovedAnchors(b, assignEntities(b, ['Finance'], 'domains'))
+    expect(out.layers.find((l) => l.id === 'fin')?.anchorUrn).toBeUndefined()
+    expect(out.assignments.Finance.layerId).toBe('domains')
+  })
+
+  it('leaves columns the change did not take their entity from — the same layout when there are none', () => {
+    const b = before()
+    const other = assignEntities(b, ['Sales'], 'fin')
+    // `dup` never held Sales (its placement was in Domains): it stays as it was.
+    expect(unmapMovedAnchors(b, other)).toBe(other)
+  })
+})
+
+describe('touchedBy / layoutPart / restoreLayoutPart — one change taken back alone', () => {
+  const start = () => layoutOf([L('a', 'New layer', 0), L('b', 'Domains', 1)], { sales: placed('b'), mkt: placed('b') })
+
+  it('says which layers\' mappings and which placements a change touched — no more', () => {
+    const before = start()
+    const after = mapLayerToEntity(before, 'a', 'sales', { name: 'Sales' })
+    expect(touchedBy(before, after)).toEqual({ layerIds: ['a'], urns: ['sales'] })
+    // A column inserted is touched; the ones it shifted along are not.
+    const inserted = { ...before, layers: insertLayer(before.layers, L('n', 'Sales', 0), 1) }
+    expect(touchedBy(before, inserted)).toEqual({ layerIds: ['n'], urns: [] })
+  })
+
+  it('discard puts back only what the change touched — a later edit stays', () => {
+    const before = start()
+    const after = mapLayerToEntity(before, 'a', 'sales', { name: 'Sales' })
+    const touch = touchedBy(before, after)
+    // Since: Marketing moved, column b recoloured.
+    const later = assignEntities({ ...after, layers: recolorLayer(after.layers, 'b', '#123456') }, ['mkt'], 'a')
+    const back = restoreLayoutPart(later, layoutPart(before, touch))
+    expect(back.layers.find((l) => l.id === 'a')).toEqual(L('a', 'New layer', 0))
+    expect(back.assignments.sales).toBe(before.assignments.sales)
+    expect(back.assignments.mkt.layerId).toBe('a')
+    expect(back.layers.find((l) => l.id === 'b')?.color).toBe('#123456')
+    // Redo puts the change back, alone.
+    const again = restoreLayoutPart(back, layoutPart(after, touch))
+    expect(again.layers.find((l) => l.id === 'a')).toMatchObject({ anchorUrn: 'sales', name: 'Sales' })
+    expect(again.assignments.sales.layerId).toBe('a')
+  })
+
+  it('a column the change added goes on discard, and comes back where it was on redo', () => {
+    const before = start()
+    const added = mapLayerToEntity({ ...before, layers: insertLayer(before.layers, L('n', '', 0), 1) }, 'n', 'sales', { name: 'Sales' })
+    const touch = touchedBy(before, added)
+    const back = restoreLayoutPart(added, layoutPart(before, touch))
+    expect(back.layers.map((l) => [l.id, l.order])).toEqual([['a', 0], ['b', 1]])
+    expect(back.assignments.sales).toBe(before.assignments.sales)
+    const again = restoreLayoutPart(back, layoutPart(added, touch))
+    expect(again.layers.map((l) => l.id)).toEqual(['a', 'n', 'b'])
+    expect(again.layers[1]).toMatchObject({ anchorUrn: 'sales', name: 'Sales', order: 1 })
+  })
+
+  it('is plain data, so it survives a reload as it is', () => {
+    const before = start()
+    const after = mapLayerToEntity(before, 'a', 'sales')
+    const part = layoutPart(before, touchedBy(before, after))
+    expect(restoreLayoutPart(after, JSON.parse(JSON.stringify(part)))).toEqual(restoreLayoutPart(after, part))
+  })
+
+  it('returns the SAME layout when the layout already holds the part', () => {
+    const before = start()
+    expect(restoreLayoutPart(before, layoutPart(before, { layerIds: ['a'], urns: ['sales', 'nobody'] }))).toBe(before)
+  })
+})
+
+describe('remapLayerAnchors / pruneTempAnchors — a column mapped to an entity new in this draft', () => {
+  const temp = 'urn:staged:domain:new-1'
+  const draft = () => layoutOf([{ ...L('a', 'Finance', 0), anchorUrn: temp }, { ...L('b', 'Sales', 1), anchorUrn: 'sales' }])
+
+  it('on save, the column follows its entity to the urn the save gave it', () => {
+    const out = remapLayerAnchors(draft(), new Map([[temp, 'urn:li:domain:finance']]))
+    expect(out.layers.map((l) => l.anchorUrn)).toEqual(['urn:li:domain:finance', 'sales'])
+    const none = draft()
+    expect(remapLayerAnchors(none, new Map([['other', 'x']]))).toBe(none)
+  })
+
+  it('a column still mapped to a temp urn after the save is mapped to nothing — its create was discarded', () => {
+    expect(pruneTempAnchors(draft()).layers.map((l) => l.anchorUrn)).toEqual([undefined, 'sales'])
+    const clean = pruneTempAnchors(draft())
+    expect(pruneTempAnchors(clean)).toBe(clean)
+  })
+})
+
+describe('deleteColumn — a column taken out of the view, with the placements in it', () => {
+  const start = () => layoutOf(
+    [L('a', 'Domains', 0), { ...L('b', 'Picked', 1), logicalNodes: [{ id: 'g', name: 'Shelf', type: 'group', children: [{ id: 'g2', name: 'Deep', type: 'group' }] }] }, L('c', 'Apps', 2)],
+    { sales: placed('a'), ops: placed('b'), archive: { ...placed('b'), logicalNodeId: 'g2' }, quotes: placed('c') },
+  )
+
+  it('removes the layer, its groups, and every placement in it — the rest stays as it was', () => {
+    const before = start()
+    const after = deleteColumn(before, 'b')
+    expect(after.layers.map((l) => [l.id, l.order])).toEqual([['a', 0], ['c', 1]])
+    expect(Object.keys(after.assignments).sort()).toEqual(['quotes', 'sales'])
+    expect(after.assignments.sales).toBe(before.assignments.sales)
+  })
+
+  it('is taken back whole — the layer where it stood, its groups and placements — and a later edit stays', () => {
+    const before = start()
+    const after = deleteColumn(before, 'b')
+    const touch = touchedBy(before, after)
+    expect(touch).toEqual({ layerIds: ['b'], urns: ['ops', 'archive'] })
+    const later = assignEntities(after, ['sales'], 'c')
+    const back = restoreLayoutPart(later, layoutPart(before, touch))
+    expect(back.layers.map((l) => l.id)).toEqual(['a', 'b', 'c'])
+    expect(back.layers[1].logicalNodes).toEqual(before.layers[1].logicalNodes)
+    expect(back.assignments.archive).toEqual(before.assignments.archive)
+    expect(back.assignments.sales.layerId).toBe('c')
+  })
+
+  it('returns the SAME layout for a layer that is not there', () => {
+    const before = start()
+    expect(deleteColumn(before, 'nope')).toBe(before)
   })
 })

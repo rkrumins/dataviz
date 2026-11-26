@@ -33,29 +33,6 @@ const ACTION_META: Record<Exclude<TemplateAction, 'use'>, { label: string; icon:
     delete: { label: 'Delete', icon: Trash2, danger: true },
 }
 
-/** How much of a template's layers find their entity types in some data. */
-export function FitRing({ matched, typed, workspaceName }: { matched: number; typed: number; workspaceName: string }) {
-    if (typed === 0) return null
-    const pct = Math.round((100 * matched) / typed)
-    const r = 9
-    const c = 2 * Math.PI * r
-    const tone = pct >= 80 ? 'stroke-emerald-500' : pct >= 50 ? 'stroke-amber-500' : 'stroke-rose-500'
-    return (
-        <HoverTip label={`Matches ${matched} of ${typed} layer${typed === 1 ? '' : 's'} in ${workspaceName}`}>
-            <span role="img" className="relative inline-flex items-center justify-center w-7 h-7 shrink-0" aria-label={`${pct}% match`}>
-                <svg viewBox="0 0 24 24" className="w-7 h-7 -rotate-90" aria-hidden>
-                    <circle cx="12" cy="12" r={r} fill="none" strokeWidth="3" className="stroke-slate-200 dark:stroke-slate-700" />
-                    <circle
-                        cx="12" cy="12" r={r} fill="none" strokeWidth="3" strokeLinecap="round"
-                        strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} className={tone}
-                    />
-                </svg>
-                <span aria-hidden className="absolute text-[8px] font-bold text-ink tabular-nums">{pct}</span>
-            </span>
-        </HoverTip>
-    )
-}
-
 export function AudienceBadge({ template }: { template: LayoutTemplate }) {
     const audience = audienceOf(template)
     const meta = AUDIENCE[audience]
@@ -137,13 +114,11 @@ function ActionsMenu({ template, onAction, canSetDefault }: {
     )
 }
 
-export function TemplateCard({ template, onOpen, onAction, onToggleFavourite, fit, canSetDefault }: {
+export function TemplateCard({ template, onOpen, onAction, onToggleFavourite, canSetDefault }: {
     template: LayoutTemplate
     onOpen: () => void
     onAction: (action: TemplateAction) => void
     onToggleFavourite?: () => void
-    /** How well it fits the data chosen on the page, when one is. */
-    fit?: { matched: number; typed: number; workspaceName: string } | null
     canSetDefault?: boolean
 }) {
     const usage = template.usageCount
@@ -217,7 +192,6 @@ export function TemplateCard({ template, onOpen, onAction, onToggleFavourite, fi
                 >
                     {template.name}
                 </button>
-                {fit && <FitRing {...fit} />}
             </div>
             <p className={cn(
                 'mt-1 text-xs leading-snug line-clamp-2 min-h-[2rem]',

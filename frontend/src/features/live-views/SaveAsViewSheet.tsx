@@ -273,7 +273,7 @@ export function SaveAsViewSheet({
               {choices.choice === 'template' && (
                 <TemplateList
                   loading={templatesLoading}
-                  templates={templates.map((t) => ({ id: t.id, name: t.name, layers: t.layers.length, fit: fitTemplate(t.layers, declaredIds.length ? declaredIds : null) }))}
+                  templates={templates.map((t) => ({ id: t.id, name: t.name, layers: t.layers.length }))}
                   value={choices.templateId}
                   onChange={(templateId) => setChoices((c) => ({ ...c, templateId }))}
                 />
@@ -414,7 +414,7 @@ function Switch({ checked, onChange, label, labelledBy }: {
 
 function TemplateList({ loading, templates, value, onChange }: {
   loading: boolean
-  templates: Array<{ id: string; name: string; layers: number; fit: ReturnType<typeof fitTemplate> }>
+  templates: Array<{ id: string; name: string; layers: number }>
   value?: string
   onChange: (id: string) => void
 }) {
@@ -432,7 +432,6 @@ function TemplateList({ loading, templates, value, onChange }: {
     <ul role="radiogroup" aria-label="Template" className="max-h-48 overflow-y-auto custom-scrollbar rounded-xl border border-glass-border/70 divide-y divide-glass-border/50">
       {templates.map((t) => {
         const on = t.id === value
-        const partial = t.fit.typedLayers > 0 && t.fit.matchedLayers < t.fit.typedLayers
         return (
           <li key={t.id}>
             <button
@@ -448,8 +447,8 @@ function TemplateList({ loading, templates, value, onChange }: {
                 </span>
                 <span className="truncate text-[13px] text-ink">{t.name}</span>
               </span>
-              <span className={cn('flex-none text-[11.5px] tabular-nums', partial ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted')}>
-                {t.fit.typedLayers > 0 ? `Fits ${t.fit.matchedLayers} of ${t.fit.typedLayers} layers` : `${t.layers} ${t.layers === 1 ? 'layer' : 'layers'}`}
+              <span className="flex-none text-[11.5px] tabular-nums text-ink-muted">
+                {`${t.layers} ${t.layers === 1 ? 'layer' : 'layers'}`}
               </span>
             </button>
           </li>
