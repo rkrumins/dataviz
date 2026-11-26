@@ -7838,8 +7838,17 @@ export function ContextViewCanvas({
   // place says nothing: such a view is a lens, specialised.
   const [askedBefore] = useState(() => usePreferencesStore.getState().viewCoverageAsked)
   const [answering, setAnswering] = useState<string | null>(null)
+  // None left out, counted as the offer counts them: a column's own entity is shown by its column
+  // even when it is held as the column's anchor alone.
+  const holdsEveryRoot = useMemo(() => {
+    if (!unplaced || unplaced.token !== placementsCheck) return false
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
+    const assignments = activeReferenceLayout.assignments
+    const shownNow = unplaced.result.nodes.filter((n) => !!assignments[n.urn]?.layerId || anchors.has(n.urn)).length
+    return unplaced.result.totalCount - shownNow === 0
+  }, [unplaced, placementsCheck, sortedLayers, activeReferenceLayout])
   const askCoverage = coverage === undefined && viewCaps.canEdit && !!activeViewId && !askedBefore[activeViewId]
-    && answering !== activeViewId && !!unplaced && unplaced.token === placementsCheck && unplaced.result.totalCount === 0
+    && answering !== activeViewId && holdsEveryRoot
     && hydrationStatus === 'ready' && !traceActive && !serverPlaced
   useEffect(() => {
     if (askCoverage && activeViewId && !usePreferencesStore.getState().viewCoverageAsked[activeViewId]) {

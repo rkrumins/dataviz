@@ -104,8 +104,12 @@ const answeringSaves = (url: string, init?: RequestInit) => {
            config: { coverage: body.coverage } }
 }
 
-const openView = async (opts: { draft?: boolean; entityScope?: 'all' | 'curated'; coverage?: 'complete' | 'specialised' } = {}) => {
-  const h = await renderCanvasWithTrace(healthEstate(), {
+const openView = async (opts: { draft?: boolean; entityScope?: 'all' | 'curated'; coverage?: 'complete' | 'specialised'; anchorOnly?: boolean } = {}) => {
+  const estate = healthEstate()
+  // A column that holds its entity as its anchor alone, with no placement of its own (as views
+  // mapped before the anchor kept one do).
+  if (opts.anchorOnly) delete estate.assignments.Finance
+  const h = await renderCanvasWithTrace(estate, {
     focus: 'Ops', draft: opts.draft ?? true, deferTrace: true, entityTypes: ONTOLOGY,
     entityScope: opts.entityScope, wrapProvider: answeringUnplaced, answer: answeringSaves,
   })
@@ -474,6 +478,16 @@ describe('whether the view is offered new top-level entities', () => {
     expect(asks).toHaveLength(2)
     expect(question()).toBeNull()
     expect(offer()).toBeNull()
+  }, 30000)
+
+  it('a column’s entity held as its anchor alone is shown too: the view holding every one is still asked', async () => {
+    holdsEveryRoot()
+    asEditor()
+    const h = await open({ anchorOnly: true })
+    await loaded(h)
+    expect(asks).toHaveLength(1)
+    expect(offer()).toBeNull()
+    expect(question()).toBeInTheDocument()
   }, 30000)
 
   it('“No, only what’s here” makes it specialised: never read for again', async () => {
