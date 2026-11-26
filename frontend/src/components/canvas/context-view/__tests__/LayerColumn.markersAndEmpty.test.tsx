@@ -115,6 +115,6 @@ describe('Empty layers', () => {
     usePreferencesStore.setState({ emptyLayerMessage: mode })
     renderColumn({ isTracing: true, anchorIssue: 'missing' })
     expect(screen.getByText(/entity is gone/i)).toBeInTheDocument()
-    expect(screen.getByText(/removed from the source/i)).toBeInTheDocument()
+    expect(screen.getByText(/This source doesn’t hold it now/i)).toBeInTheDocument()
   })
 })

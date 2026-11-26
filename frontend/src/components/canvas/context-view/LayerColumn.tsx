@@ -189,6 +189,8 @@ interface LayerColumnProps {
   onMoveGroupContents?: (layerId: string, fromId: string, toId: string) => void
   onUngroup?: (layerId: string, groupId: string, groupName: string) => void
   onDeleteLayer?: (layerId: string) => void
+  /** Delete in one click, with an Undo in its notice (the header's delete asks first instead). */
+  onDeleteWithUndo?: (layerId: string) => void
   onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
   /** Right-click on the header (folded or not): this layer's menu — insert a layer beside it,
    *  rename, colour, move, delete. Reachable from the Layer Strip too, so no scrolling is needed. */
@@ -438,6 +440,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onMoveGroupContents,
   onUngroup,
   onDeleteLayer,
+  onDeleteWithUndo,
   onReorderLayer,
   onHeaderContextMenu,
   layerMenuOpen = false,
@@ -3300,12 +3303,24 @@ export const LayerColumn = React.memo(function LayerColumn({
                   {anchorIssue && (
                     <p className="text-xs text-ink-muted mt-1 text-center max-w-[220px]">
                       {anchorIssue === 'missing'
-                        ? 'It was removed from the source, so there is nothing left to show here. Delete the column, or map it to another entity.'
+                        ? 'This source doesn’t hold it now, so there is nothing to show here. Map the column to another entity, keep it as a hand-picked column, or delete it.'
                         : 'Two columns are built around the same entity; only the first can show it. Delete this one, or map it to another entity.'}
                     </p>
                   )}
                   {anchorIssue && mapping?.onMap && (
                     <EmptyAction color={layer.color} icon={LucideIcons.Link2} label="Map to another entity…" onClick={mapping.onMap} />
+                  )}
+                  {/* Its entity gone, the column offers the other two ways on, wherever mapping is
+                      offered (a draft that can change its layers). */}
+                  {anchorIssue === 'missing' && mapping && !mapping.refused && (
+                    <>
+                      {onUnmapLayer && (
+                        <EmptyAction color={layer.color} icon={LucideIcons.Pin} label="Show as a hand-picked column" onClick={() => onUnmapLayer(layer.id)} />
+                      )}
+                      {onDeleteWithUndo && (
+                        <EmptyAction color={layer.color} icon={LucideIcons.Trash2} label="Delete the column" onClick={() => onDeleteWithUndo(layer.id)} />
+                      )}
+                    </>
                   )}
                   {emptyInside && (addInsideName ? (
                     onAddToLayer

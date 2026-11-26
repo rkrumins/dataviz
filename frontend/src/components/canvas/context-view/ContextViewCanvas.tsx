@@ -187,6 +187,7 @@ import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { useCanvasProviderPill } from '../canvasProviderPill'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
+import { useColumnsOutOfSight } from './useColumnsOutOfSight'
 import { keepClearOfDrawer, shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -476,6 +477,12 @@ function freshLayerColor(ordered: readonly ViewLayerConfig[], at: number): strin
 
 /** A column's name as it shows: its entity's, while it follows it (ViewLayerConfig.nameFromAnchor). */
 const columnName = (layer: ViewLayerConfig) => (layer.nameFromAnchor && layer.anchorUrn ? nameNow(layer.anchorUrn) : layer.name)
+
+/** The entity a column is mapped to, when a complete load found it gone from this source — now. */
+function goneAnchorOf(layer: ViewLayerConfig): string | null {
+  const { hydrationStatus, nodes } = useCanvasStore.getState()
+  return layer.anchorUrn && hydrationStatus === 'ready' && !nodeIndexOf(nodes).get(layer.anchorUrn) ? layer.anchorUrn : null
+}
 
 /** What a placement said besides where it went: the columns mapped to it that let go of it. */
 function letGo(before: NormalizedReferenceLayout, after: NormalizedReferenceLayout): string {
@@ -4045,11 +4052,13 @@ export function ContextViewCanvas({
     const layers = layerOps.removeLayer(before.layers, id)
     const fallbackId = layers[0]?.id
     // Remap the deleted layer's assignments to the first remaining layer so their entities don't vanish
-    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them.
+    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them. The
+    // entity of a column whose entity is gone goes with it: there is nothing of it to show elsewhere.
+    const gone = goneAnchorOf(target)
     const assignments: NormalizedReferenceLayout['assignments'] = {}
     for (const [urn, entry] of Object.entries(before.assignments)) {
       if (entry.layerId !== id) assignments[urn] = entry
-      else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
+      else if (fallbackId && urn !== gone) assignments[urn] = { ...entry, layerId: fallbackId }
     }
     const after = { ...before, layers, assignments }
     persistReferenceLayout(after)
@@ -4135,6 +4144,17 @@ export function ContextViewCanvas({
     const before = currentLayout()
     const layer = before.layers.find((l) => l.id === layerId)
     if (!layer?.anchorUrn) return
+    // Its entity gone, there is no row to show: the column keeps the name it has, hand-picked now.
+    if (goneAnchorOf(layer)) {
+      const id = stageMapping(`layer:${layerId}`, before, layerOps.unmapLayer(before, layerId), 'unmap', `Made “${layer.name}” a hand-picked column`)
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: viewNotice(`“${layer.name}” is a hand-picked column now.`),
+        action: discardAction(id),
+        durationMs: MOVE_NOTICE_MS,
+      })
+      return
+    }
     const name = nameNow(layer.anchorUrn)
     const after = layerOps.unmapLayer(before, layerId, { name })
     const id = stageMapping(`layer:${layerId}`, before, after, 'unmap', `Showed ${name} as a row in “${columnName(layer)}”`)
@@ -6896,7 +6916,8 @@ export function ContextViewCanvas({
     if (!target) return
     const ordered = [...before.layers].sort((a, b) => a.order - b.order)
     const heir = ordered.find((l) => l.id !== layerId)
-    const placed = Object.values(before.assignments).filter((a) => a.layerId === layerId).length
+    const gone = goneAnchorOf(target)
+    const placed = Object.entries(before.assignments).filter(([urn, a]) => a.layerId === layerId && urn !== gone).length
     deleteLayer(layerId)
     useNotificationStore.getState().add({
       type: 'success',
@@ -7402,6 +7423,25 @@ export function ContextViewCanvas({
       durationMs: MOVE_NOTICE_MS,
     })
   }, [notFoundPlacements, currentLayout, stageMapping])
+  // A column whose entity is gone says so in its own body — and here, while that body can't be
+  // seen: folded, or scrolled out of sight. "Show" brings it into view.
+  const goneColumnIds = useMemo(
+    () => (traceActive ? [] : sortedLayers.filter((l) => anchorIssueByLayer.get(l.id) === 'missing').map((l) => l.id)),
+    [traceActive, sortedLayers, anchorIssueByLayer],
+  )
+  const goneOutOfSight = useColumnsOutOfSight(horizontalScrollRef, goneColumnIds)
+  const goneColumns = useMemo(() => {
+    const names = new Map(shownLayers.map((l) => [l.id, l.name]))
+    return goneColumnIds
+      .filter((id) => layerFold.folded.has(id) || goneOutOfSight.has(id))
+      .map((id) => ({ id, name: names.get(id) ?? id }))
+  }, [goneColumnIds, goneOutOfSight, layerFold.folded, shownLayers])
+  const { folded: foldedLayers, focusLayer } = layerFold
+  const showColumn = useCallback((layerId: string) => {
+    if (foldedLayers.has(layerId)) focusLayer(layerId)
+    horizontalScrollRef.current?.querySelector(`[data-layer-id="${CSS.escape(layerId)}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+  }, [foldedLayers, focusLayer])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -8701,6 +8741,8 @@ export function ContextViewCanvas({
           // A repair is a layout change: offered in a draft, and outside one the way into a draft.
           onCleanUpNotFound={layerEditsAllowed && !subsetFollows ? cleanUpNotFound : undefined}
           onOpenDraft={openDraftOffer}
+          goneColumns={goneColumns}
+          onShowColumn={showColumn}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}
@@ -9175,6 +9217,7 @@ export function ContextViewCanvas({
                 // A subset that follows its base takes its layers from there.
                 onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}
                 onDeleteLayer={isDraft && !subsetFollows ? deleteLayer : undefined}
+                onDeleteWithUndo={isDraft && !subsetFollows ? deleteLayerWithUndo : undefined}
                 onReorderLayer={isDraft && !subsetFollows ? reorderLayer : undefined}
                 // The layer menu (right-click the header), and inserting a layer right here.
                 onHeaderContextMenu={openLayerMenu}

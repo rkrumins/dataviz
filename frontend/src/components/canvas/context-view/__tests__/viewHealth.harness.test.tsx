@@ -5,6 +5,9 @@
  *
  *   • placements that point at entities no longer in this source are listed, and cleaned up as ONE
  *     staged change whose Undo puts back only them;
+ *   • a column whose entity is gone offers exactly three ways on — map it to another entity, keep
+ *     it as a hand-picked column, delete it — and, folded or scrolled out of sight, the status
+ *     chips say so;
  */
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -162,5 +165,90 @@ describe('placements that point at entities no longer in this source', () => {
     await loaded(h)
     await click(h, screen.getByRole('button', { name: chipName }))
     expect(screen.queryByRole('button', { name: 'Clean them up' })).toBeNull()
+  }, 30000)
+})
+
+describe('a column whose entity is no longer in this source', () => {
+  const actions = (layerId: string) => within(bodyOf(layerId)).queryAllByRole('button').map((b) => b.textContent)
+
+  it('says so, and offers exactly: map to another entity, show as a hand-picked column, delete the column', async () => {
+    const h = await open()
+    await loaded(h)
+    const body = within(bodyOf('lost'))
+    expect(body.getByText('This column’s entity is gone')).toBeInTheDocument()
+    expect(body.getByText(
+      'This source doesn’t hold it now, so there is nothing to show here. Map the column to another entity, keep it as a hand-picked column, or delete it.',
+    )).toBeInTheDocument()
+    expect(actions('lost')).toEqual(['Map to another entity…', 'Show as a hand-picked column', 'Delete the column'])
+  }, 30000)
+
+  it('"Show as a hand-picked column" lets go of the entity, keeping the column’s name — one change', async () => {
+    const h = await open()
+    await loaded(h)
+    await click(h, within(bodyOf('lost')).getByRole('button', { name: 'Show as a hand-picked column' }))
+    expect(layerOf('lost')?.anchorUrn).toBeUndefined()
+    expect(layerOf('lost')?.name).toBe('Vanished')
+    // Its entity's placement stays — now listed with the others that point at nothing here.
+    expect(layout().assignments.Vanished).toMatchObject({ layerId: 'lost' })
+    expect(screen.getByRole('button', { name: '3 placements point at entities no longer in this source' })).toBeInTheDocument()
+    expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Made “Vanished” a hand-picked column' })])
+    const done = notice(/^“Vanished” is a hand-picked column now/)!
+    expect(done.message).toBe('“Vanished” is a hand-picked column now. Only this view — the data is unchanged.')
+    await press(h, done, 'Undo')
+    expect(layerOf('lost')?.anchorUrn).toBe('Vanished')
+  }, 30000)
+
+  it('"Delete the column" takes its entity’s placement with it, and undoes', async () => {
+    const h = await open()
+    await loaded(h)
+    await click(h, within(bodyOf('lost')).getByRole('button', { name: 'Delete the column' }))
+    expect(layerOf('lost')).toBeUndefined()
+    // Nothing is left to show of it: its placement is not moved into another column.
+    expect(layout().assignments.Vanished).toBeUndefined()
+    const done = notice(/^Deleted layer “Vanished”/)!
+    expect(done.message).toBe('Deleted layer “Vanished”.')
+    await press(h, done, 'Undo')
+    expect(layerOf('lost')?.anchorUrn).toBe('Vanished')
+    expect(layout().assignments.Vanished).toMatchObject({ layerId: 'lost' })
+  }, 30000)
+
+  it('outside a draft it offers nothing to do', async () => {
+    const h = await open({ draft: false })
+    await loaded(h)
+    expect(within(bodyOf('lost')).getByText('This column’s entity is gone')).toBeInTheDocument()
+    expect(actions('lost')).toEqual([])
+  }, 30000)
+
+  it('scrolled out of sight, the status chips say so — and "Show" brings it into view', async () => {
+    const h = await open()
+    await loaded(h)
+    const chip = () => screen.queryByText('The Vanished column’s entity is gone')
+    // On screen, its own column says it.
+    expect(chip()).toBeNull()
+    // Off to the right of the canvas.
+    const real = Element.prototype.getBoundingClientRect
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      const r = real.call(this)
+      return (this as HTMLElement).dataset?.layerId === 'lost' && this.classList.contains('group/column')
+        ? { ...r, left: 5000, right: 5420, x: 5000, toJSON: () => ({}) } as DOMRect
+        : r
+    }
+    try {
+      const scroller = columnEl('lost').closest<HTMLElement>('.overflow-auto') ?? columnEl('lost').parentElement!
+      await act(async () => { fireEvent.scroll(scroller) })
+      await h.settle()
+      expect(chip()).toBeInTheDocument()
+      let revealed = false
+      const into = Element.prototype.scrollIntoView
+      Element.prototype.scrollIntoView = function (this: Element) { if (this === columnEl('lost')) revealed = true }
+      try {
+        await click(h, screen.getByRole('button', { name: 'Show the Vanished column' }))
+      } finally {
+        Element.prototype.scrollIntoView = into
+      }
+      expect(revealed).toBe(true)
+    } finally {
+      Element.prototype.getBoundingClientRect = real
+    }
   }, 30000)
 })

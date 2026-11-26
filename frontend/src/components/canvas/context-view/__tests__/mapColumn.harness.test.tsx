@@ -398,7 +398,7 @@ describe('an empty mapped column says what is inside its entity, and how to fill
     expect(columnOfCard('Glossary')).toBe(added)
   }, 30000)
 
-  it('a column whose entity is gone says to delete it or map it to another — and maps from there', async () => {
+  it('a column whose entity is gone says to map it to another, keep it hand-picked or delete it — and maps from there', async () => {
     const h = await open()
     // An entity gone is only said once the canvas has finished loading.
     act(() => useCanvasStore.setState({ hydrationStatus: 'ready' }))
@@ -412,7 +412,7 @@ describe('an empty mapped column says what is inside its entity, and how to fill
     await closeCard(h, 'picked')
     const body = within(bodyOf('picked'))
     expect(body.getByText('This column’s entity is gone')).toBeInTheDocument()
-    expect(body.getByText(/Delete the column, or map it to another entity\./)).toBeInTheDocument()
+    expect(body.getByText(/Map the column to another entity, keep it as a hand-picked column, or delete it\./)).toBeInTheDocument()
     await click(h, body.getByRole('button', { name: 'Map to another entity…' }))
     await pick(h, 'Marketing')
     expect(layerOf('picked')?.anchorUrn).toBe('Marketing')

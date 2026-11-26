@@ -88,6 +88,8 @@ export function CanvasStatusChips({
   notFoundPlacements = [],
   onCleanUpNotFound,
   onOpenDraft,
+  goneColumns = [],
+  onShowColumn,
   canEdit = false,
 }: {
   /** Flows from a drawn row whose other end is outside the view: none in a
@@ -131,6 +133,10 @@ export function CanvasStatusChips({
   onCleanUpNotFound?: () => void
   /** Outside a draft, for a reader who can open one: the way into it. */
   onOpenDraft?: () => void
+  /** Columns whose entity is gone, out of sight (folded or scrolled away), in reading order. */
+  goneColumns?: Array<{ id: string; name: string }>
+  /** Bring a column into view. */
+  onShowColumn?: (layerId: string) => void
   /** The viewer can edit the view. Without it the chips state the facts, and
    *  leave out what editing the view would do about them. */
   canEdit?: boolean
@@ -146,8 +152,9 @@ export function CanvasStatusChips({
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
   const showNotFound = notFoundPlacements.length > 0
+  const showGone = goneColumns.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound && !showGone) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -372,6 +379,27 @@ export function CanvasStatusChips({
             </PopoverPrimitive.Content>
           </PopoverPrimitive.Portal>
         </PopoverPrimitive.Root>
+      )}
+
+      {showGone && (
+        <div className={CHIP_CLASS}>
+          <Unlink className="w-3 h-3 text-amber-500" />
+          <span>
+            {goneColumns.length === 1
+              ? `The ${goneColumns[0].name} column\u2019s entity is gone`
+              : `${goneColumns.length.toLocaleString()} columns\u2019 entities are gone`}
+          </span>
+          {onShowColumn && (
+            <button
+              type="button"
+              aria-label={`Show the ${goneColumns[0].name} column`}
+              className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              onClick={() => onShowColumn(goneColumns[0].id)}
+            >
+              Show
+            </button>
+          )}
+        </div>
       )}
 
       {showNotFound && (
