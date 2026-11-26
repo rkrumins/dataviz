@@ -285,6 +285,9 @@ describe('isAutoLayerName', () => {
     expect(isAutoLayerName({ name: 'Finance', nameFromAnchor: true })).toBe(true)
     expect(isAutoLayerName({ name: 'Finance' })).toBe(false)
     expect(isAutoLayerName({ name: 'New layer of apps' })).toBe(false)
+    // The wizard's "Add Layer" names a layer by its place, too.
+    expect(['Layer 2', 'layer 12'].map((name) => isAutoLayerName({ name }))).toEqual([true, true])
+    expect(isAutoLayerName({ name: 'Layer of apps' })).toBe(false)
   })
 })
 

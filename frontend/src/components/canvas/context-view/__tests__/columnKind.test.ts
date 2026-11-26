@@ -80,6 +80,13 @@ describe('columnKindCopy', () => {
     expect(columnKindCopy('byType', { persona: 'business', ruleCount: 1 }).label).toBe('By rule')
   })
 
+  it('said from elsewhere (the wizard), the column is "there" rather than "here"', () => {
+    expect(columnKindCopy('mapped', { persona: 'technical', anchorName: 'Finance', where: 'there' }).detail)
+      .toBe('This column is Finance’s contents. Adding or dropping there puts things inside Finance — changes the data.')
+    expect(columnKindCopy('byType', { persona: 'business', typeNames: ['App'], handPlaced: 2, where: 'there' }).detail)
+      .toBe('A column for Apps — adding there creates an App. And 2 placed there by hand. Dropping on its header only changes this view.')
+  })
+
   it('a hand-picked column: arranging it only changes this view', () => {
     expect(columnKindCopy('handPicked', { persona: 'business' })).toEqual({
       label: 'Hand-picked',
