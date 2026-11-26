@@ -12,6 +12,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import type { View } from '@/services/viewApiService'
+import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 import { useAutoOpenCountdown } from '../CreationPhase'
 
 const getViewMock = vi.fn()
@@ -96,27 +97,35 @@ vi.mock('../steps/BasicsStep', () => ({
 }))
 // The real step pins entityScope when a rule-driven Quick Start is applied; the
 // stub exposes that one gesture so the pin can be traced to the layout write.
-vi.mock('../steps/LayoutStep', () => ({
-  LayoutStep: ({ updateFormData, initialTemplateId, onInitialTemplateApplied, workspaceDefault }: {
-    updateFormData: (u: Record<string, unknown>) => void
-    initialTemplateId?: string
-    onInitialTemplateApplied?: () => void
-    workspaceDefault?: { templateId: string; workspaceName: string }
-  }) => (
-    <div data-testid="layout-step">
-      <span data-testid="layout-initial-template">{initialTemplateId ?? ''}</span>
-      <span data-testid="layout-workspace-default">
-        {workspaceDefault ? `${workspaceDefault.templateId} in ${workspaceDefault.workspaceName}` : ''}
-      </span>
-      <button onClick={() => onInitialTemplateApplied?.()}>stub-initial-template-applied</button>
-      <button onClick={() => updateFormData({ entityScope: 'all' })}>stub-pin-open-scope</button>
-      <button onClick={() => updateFormData({
-        contextModelId: 'tpl_1', contextModelVersion: 3, layoutTemplateId: 'tpl_1',
-        layers: [{ id: 'fresh', name: 'Bronze', entityTypes: [], order: 0 }],
-      })}>stub-apply-library-template</button>
-    </div>
-  ),
-}))
+vi.mock('../steps/LayoutStep', async () => {
+  const { toEntity } = await import('../layerSource')
+  return {
+    LayoutStep: ({ formData, updateFormData, initialTemplateId, onInitialTemplateApplied, workspaceDefault }: {
+      formData: { layers: ViewLayerConfig[]; assignments: Record<string, LayerAssignmentEntry> }
+      updateFormData: (u: Record<string, unknown>) => void
+      initialTemplateId?: string
+      onInitialTemplateApplied?: () => void
+      workspaceDefault?: { templateId: string; workspaceName: string }
+    }) => (
+      <div data-testid="layout-step">
+        <span data-testid="layout-initial-template">{initialTemplateId ?? ''}</span>
+        <span data-testid="layout-workspace-default">
+          {workspaceDefault ? `${workspaceDefault.templateId} in ${workspaceDefault.workspaceName}` : ''}
+        </span>
+        <button onClick={() => onInitialTemplateApplied?.()}>stub-initial-template-applied</button>
+        <button onClick={() => updateFormData({ entityScope: 'all' })}>stub-pin-open-scope</button>
+        <button onClick={() => updateFormData({
+          contextModelId: 'tpl_1', contextModelVersion: 3, layoutTemplateId: 'tpl_1',
+          layers: [{ id: 'fresh', name: 'Bronze', entityTypes: [], order: 0 }],
+        })}>stub-apply-library-template</button>
+        {/* The Source control's "Mapped to an entity", picking Marketing for the first layer. */}
+        <button onClick={() => updateFormData({ ...toEntity(formData, formData.layers[0].id, 'urn:dom:mkt', 'Marketing') })}>
+          stub-map-first-layer-to-marketing
+        </button>
+      </div>
+    ),
+  }
+})
 vi.mock('../steps/EntitiesStep', () => ({ EntitiesStep: () => <div data-testid="entities-step" /> }))
 vi.mock('../steps/PreviewStep', () => ({ PreviewStep: () => <div data-testid="preview-step" /> }))
 vi.mock('../steps/AssignmentStep', () => ({ AssignmentStep: () => <div data-testid="assignment-step" /> }))
@@ -255,6 +264,29 @@ describe('ViewWizard — submit (edit path)', () => {
     expect(body.referenceLayout.layers).toEqual([{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }])
     expect(body.referenceLayout.assignments).toEqual({ 'urn:a': { layerId: 'l1', inheritsChildren: true } })
     expect(body.entityScope).toBe('curated')
+  })
+
+  it('a column mapped on the canvas is mapped to another entity here, and saved by the layout write', async () => {
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Finance', entityTypes: [], order: 0, anchorUrn: 'urn:dom:fin', nameFromAnchor: true }],
+      assignments: { 'urn:dom:fin': { layerId: 'l1', inheritsChildren: true } },
+    })))
+    await screen.findByTestId('basics-step')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'stub-map-first-layer-to-marketing' }))
+    for (const step of ['assignment-step', 'entities-step', 'preview-step']) {
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId(step)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    const { referenceLayout } = updateViewLayoutMock.mock.calls[0][1]
+    expect(referenceLayout.layers[0]).toMatchObject({ id: 'l1', name: 'Marketing', anchorUrn: 'urn:dom:mkt', nameFromAnchor: true })
+    expect(referenceLayout.assignments['urn:dom:mkt']).toMatchObject({ layerId: 'l1', inheritsChildren: true })
+    // The entity it was mapped to stays in it, as a row.
+    expect(referenceLayout.assignments['urn:dom:fin']).toEqual({ layerId: 'l1', inheritsChildren: true })
   })
 
   it('keeps the display rules and anything else the reference layout carries', async () => {

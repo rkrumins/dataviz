@@ -12,7 +12,7 @@
 import { useState } from 'react'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutTemplate } from '@/services/layoutTemplateService'
 
 // The data source's ontology, as useDataSourceSchema reports it — mutable so a
@@ -53,6 +53,7 @@ vi.mock('@/store/workspaces', () => {
 })
 
 import { useSchemaStore } from '@/store/schema'
+import { usePersonaStore } from '@/store/persona'
 import type { WorkspaceSchema } from '@/types/schema'
 import { LayoutStep } from '../LayoutStep'
 import type { WizardFormData } from '../../ViewWizard'
@@ -146,8 +147,12 @@ function makeFormData(overrides: Partial<WizardFormData> = {}): WizardFormData {
 }
 
 /** The step with real form state, so what it applies is what it then renders. */
-function Harness({ spy, ...props }: { spy: (u: Partial<WizardFormData>) => void } & Partial<Parameters<typeof LayoutStep>[0]>) {
-  const [formData, setFormData] = useState(makeFormData())
+function Harness({ spy, initial, ...props }: {
+  spy: (u: Partial<WizardFormData>) => void
+  /** The form as the step opens on it (an edit's view, a template already applied). */
+  initial?: Partial<WizardFormData>
+} & Partial<Parameters<typeof LayoutStep>[0]>) {
+  const [formData, setFormData] = useState(makeFormData(initial))
   return (
     <MemoryRouter>
       <LayoutStep
@@ -515,5 +520,129 @@ describe('LayoutStep — layers from the top of the data', () => {
     expect(card).toHaveTextContent('30 columns make a wide view')
     expect(within(card).queryByRole('checkbox')).not.toBeInTheDocument()
     expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('LayoutStep — what fills each layer', () => {
+  const DOMAINS = { id: 'l1', name: 'Domains', color: '#7c3aed', description: '', entityTypes: ['Domain'], order: 0 }
+  const SOURCE = (name: string) => `What fills ${name}`
+  const MAPPED_LINE = 'This column is Finance’s contents. Adding or dropping there puts things inside Finance — changes the data.'
+  // A mapped layer's row names its entity beside its own name: the header's comes first.
+  const header = (name: string) => screen.getAllByText(name, { selector: 'span' })[0]
+  const open = (name: string) => fireEvent.click(header(name))
+  const layerRow = (name: string) => header(name).closest('li') as HTMLElement
+  const sourceOf = (name: string) => screen.getByRole('radiogroup', { name: SOURCE(name) })
+  const labels = (list: HTMLElement) => within(list).getAllByRole('option').map(o => o.querySelector('[data-option-label]')!.textContent)
+
+  beforeEach(() => usePersonaStore.setState({ mode: 'technical' }))
+  afterEach(() => usePersonaStore.setState({ mode: 'business' }))
+
+  it('says what fills a layer, and switching to hand-picked says what it drops, with an undo', () => {
+    ds.entityTypes = DSD
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" initial={{ layers: [DOMAINS], assignments: {} }} />)
+    open('Domains')
+
+    const source = sourceOf('Domains')
+    expect(within(source).getByRole('radio', { name: 'By type' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(source).getByRole('radio', { name: 'Hand-picked' })).toHaveAttribute('aria-checked', 'false')
+    expect(within(source).getByRole('radio', { name: 'Mapped to an entity' })).toHaveAttribute('aria-checked', 'false')
+    expect(within(layerRow('Domains')).getByText(
+      'A column for Domains — adding there creates a Domain. Dropping on its header only changes this view.')).toBeInTheDocument()
+
+    fireEvent.click(within(source).getByRole('radio', { name: 'Hand-picked' }))
+    expect(spy.mock.calls.at(-1)![0].layers[0].entityTypes).toEqual([])
+    expect(within(source).getByRole('radio', { name: 'Hand-picked' })).toHaveAttribute('aria-checked', 'true')
+    const notice = within(layerRow('Domains')).getByRole('status')
+    expect(notice).toHaveTextContent('No longer fills with Domains — it holds only what’s placed in it.')
+    expect(within(layerRow('Domains')).getByText('Holds only what you place in it, on the next step or on the canvas.')).toBeInTheDocument()
+
+    fireEvent.click(within(notice).getByRole('button', { name: 'Undo' }))
+    expect(spy.mock.calls.at(-1)![0].layers[0].entityTypes).toEqual(['Domain'])
+    expect(within(source).getByRole('radio', { name: 'By type' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(layerRow('Domains')).queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('maps a layer to one of the top-level entities, clearing its types, and says what the column is now', () => {
+    ds.entityTypes = [...DSD, TEAM]
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance', 'Marketing'])], ['Team', ofType('Team', ['Platform'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" initial={{ layers: [DOMAINS], assignments: {} }} />)
+    open('Domains')
+
+    fireEvent.click(within(sourceOf('Domains')).getByRole('radio', { name: 'Mapped to an entity' }))
+    // Nothing changes before an entity is picked — but it says what mapping will drop, and why.
+    expect(spy).not.toHaveBeenCalled()
+    expect(within(layerRow('Domains')).getByText(
+      'Mapping it stops it filling with Domains: a type rule would pull every Domain into the column.')).toBeInTheDocument()
+    const list = within(layerRow('Domains')).getByRole('listbox', { name: 'Top-level entities' })
+    expect(labels(list)).toEqual(['Finance', 'Marketing', 'Platform'])
+    expect(within(list).getByRole('option', { name: /Platform/ })).toHaveTextContent('Team')
+    fireEvent.change(within(layerRow('Domains')).getByRole('combobox', { name: 'Search for an entity to map it to' }), { target: { value: 'fin' } })
+    expect(labels(list)).toEqual(['Finance'])
+    fireEvent.mouseDown(within(list).getByRole('option', { name: /Finance/ }))
+
+    const call = spy.mock.calls.at(-1)![0]
+    expect(call.layers[0]).toMatchObject({ id: 'l1', name: 'Domains', anchorUrn: 'urn:Domain:Finance', entityTypes: [] })
+    expect(call.assignments['urn:Domain:Finance']).toMatchObject({ layerId: 'l1', inheritsChildren: true })
+    expect(within(sourceOf('Domains')).getByRole('radio', { name: 'Mapped to an entity' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(layerRow('Domains')).getByRole('status')).toHaveTextContent(
+      'Mapped to Finance. No longer fills with Domains: a type rule would pull every Domain into the column.')
+    expect(within(layerRow('Domains')).getAllByText(MAPPED_LINE).length).toBeGreaterThan(0)
+  })
+
+  it('a mapped layer (an edit of a view mapped on the canvas) shows as mapped, and maps to another entity or none', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance', 'Marketing'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" initial={{
+      layers: [{ id: 'l1', name: 'Finance', color: '#7c3aed', description: '', entityTypes: [], order: 0, anchorUrn: 'urn:Domain:Finance', nameFromAnchor: true }],
+      assignments: { 'urn:Domain:Finance': { layerId: 'l1', inheritsChildren: true } },
+    }} />)
+
+    // Collapsed, the row says what the column is.
+    expect(within(layerRow('Finance')).getByText(MAPPED_LINE)).toBeInTheDocument()
+    expect(within(layerRow('Finance')).queryByText(TO_FILL)).not.toBeInTheDocument()
+
+    open('Finance')
+    expect(within(sourceOf('Finance')).getByRole('radio', { name: 'Mapped to an entity' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(layerRow('Finance')).getByRole('button', { name: 'Map to another entity…' }))
+    const list = within(layerRow('Finance')).getByRole('listbox', { name: 'Top-level entities' })
+    // The entity it is mapped to is not offered again.
+    expect(labels(list)).toEqual(['Marketing'])
+    fireEvent.mouseDown(within(list).getByRole('option', { name: /Marketing/ }))
+
+    let call = spy.mock.calls.at(-1)![0]
+    // It followed its entity's name, so it takes the new one's.
+    expect(call.layers[0]).toMatchObject({ name: 'Marketing', anchorUrn: 'urn:Domain:Marketing', nameFromAnchor: true })
+    expect(call.assignments['urn:Domain:Marketing']).toMatchObject({ layerId: 'l1', inheritsChildren: true })
+    expect(call.assignments['urn:Domain:Finance']).toMatchObject({ layerId: 'l1' })
+    expect(within(layerRow('Marketing')).getByRole('status')).toHaveTextContent(
+      'Mapped to Marketing — its rows are what’s inside Marketing. Finance stays in it as a row.')
+
+    fireEvent.click(within(sourceOf('Marketing')).getByRole('radio', { name: 'Hand-picked' }))
+    call = spy.mock.calls.at(-1)![0]
+    expect(call.layers[0].anchorUrn).toBeUndefined()
+    expect(call.assignments['urn:Domain:Marketing']).toMatchObject({ layerId: 'l1' })
+    expect(within(layerRow('Marketing')).getByRole('status')).toHaveTextContent(
+      'Marketing shows as a row now — the column is no longer mapped to it.')
+  })
+
+  it('a column named here stops following its entity, and an undo is offered only until the next edit', () => {
+    ds.entityTypes = DSD
+    top.byType = new Map([['Domain', ofType('Domain', ['Finance'])]])
+    const spy = vi.fn()
+    render(<Harness spy={spy} dataSourceId="ds1" initial={{
+      layers: [{ id: 'l1', name: 'Finance', color: '#7c3aed', description: '', entityTypes: [], order: 0, anchorUrn: 'urn:Domain:Finance', nameFromAnchor: true }],
+      assignments: { 'urn:Domain:Finance': { layerId: 'l1', inheritsChildren: true } },
+    }} />)
+    open('Finance')
+    fireEvent.click(within(sourceOf('Finance')).getByRole('radio', { name: 'By type' }))
+    expect(within(layerRow('Finance')).getByRole('status')).toBeInTheDocument()
+
+    fireEvent.change(within(layerRow('Finance')).getByDisplayValue('Finance'), { target: { value: 'Money' } })
+    expect(spy.mock.calls.at(-1)![0].layers[0]).toMatchObject({ name: 'Money' })
+    expect(spy.mock.calls.at(-1)![0].layers[0].nameFromAnchor).toBeUndefined()
+    expect(within(layerRow('Money')).queryByRole('status')).not.toBeInTheDocument()
   })
 })

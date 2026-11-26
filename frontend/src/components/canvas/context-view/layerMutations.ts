@@ -84,10 +84,11 @@ export function renameLayer(layers: ViewLayerConfig[], id: string, name: string)
 const MAPPING_FIELDS = ['anchorUrn', 'nameFromAnchor', 'name'] as const
 type MappingField = typeof MAPPING_FIELDS[number]
 
-/** A name nobody chose: empty, the "New layer" a fresh column gets, or one that follows its entity. */
+/** A name nobody chose: empty, the "New layer" a fresh column gets (the wizard's "Layer 2"), or one
+ *  that follows its entity. */
 export function isAutoLayerName(layer: Pick<ViewLayerConfig, 'name' | 'nameFromAnchor'>): boolean {
   const name = layer.name.trim()
-  return !!layer.nameFromAnchor || name === '' || /^new layer( \d+)?$/i.test(name)
+  return !!layer.nameFromAnchor || name === '' || /^(new )?layer( \d+)?$/i.test(name)
 }
 
 /** `layer` with `fields` set as `from` holds them (absent there: removed). */

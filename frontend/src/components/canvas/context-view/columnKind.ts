@@ -87,15 +87,18 @@ export function columnKindCopy(kind: ColumnKind, ctx: {
   ruleCount?: number
   /** Entities of other types placed in a by-type column by hand. */
   handPlaced?: number
+  /** Said on the column (`here`, the default), or about it from elsewhere — the wizard (`there`). */
+  where?: 'here' | 'there'
 }): ColumnKindCopy {
   const technical = ctx.persona === 'technical'
+  const here = ctx.where ?? 'here'
   if (kind === 'mapped') {
     const name = ctx.anchorName ?? 'its entity'
     return {
       label: `Mapped to ${name}`,
       detail: technical
-        ? `This column is ${name}’s contents. Adding or dropping here puts things inside ${name} — changes the data.`
-        : `This column is what’s inside ${name}. Adding or dropping here puts things inside ${name} — changes the data.`,
+        ? `This column is ${name}’s contents. Adding or dropping ${here} puts things inside ${name} — changes the data.`
+        : `This column is what’s inside ${name}. Adding or dropping ${here} puts things inside ${name} — changes the data.`,
       technical: technical && ctx.anchorUrn ? ctx.anchorUrn : undefined,
     }
   }
@@ -106,9 +109,9 @@ export function columnKindCopy(kind: ColumnKind, ctx: {
     // "A column for" rather than "every": in a curated view a child still follows its parent's column.
     const plurals = ctx.typePlurals ?? names.map((n) => `${n}s`)
     const shows = names.length > 0
-      ? `A column for ${listOf(plurals)} — adding here creates ${names.length === 1 ? aOrAn(names[0]) : `one of them`}.`
+      ? `A column for ${listOf(plurals)} — adding ${here} creates ${names.length === 1 ? aOrAn(names[0]) : `one of them`}.`
       : 'Shows what its rules pick out.'
-    const extra = byHand > 0 ? ` And ${byHand.toLocaleString()} placed here by hand.` : ''
+    const extra = byHand > 0 ? ` And ${byHand.toLocaleString()} placed ${here} by hand.` : ''
     const parts = [
       (ctx.typeIds?.length ?? 0) > 0 ? `types: ${ctx.typeIds!.join(', ')}` : '',
       rules > 0 ? `${rules} rule${rules === 1 ? '' : 's'}` : '',
