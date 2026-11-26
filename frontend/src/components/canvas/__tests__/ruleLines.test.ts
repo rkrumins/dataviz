@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { DisplayRuleTag } from '@/store/displayRuleMatchStore'
 
-import { dashArrayOf, type HeldRelationship, RULE_LINE_WIDTH, ruleLineLooks } from '../ruleLines'
+import { dashArrayOf, type HeldRelationship, type MemberLine, memberRuleLooks, RULE_LINE_WIDTH, ruleLineLooks } from '../ruleLines'
 import type { DrawnGraphLine } from '../searchLines'
 
 
@@ -80,5 +80,55 @@ describe('ruleLineLooks', () => {
         expect(dashArrayOf('dashed', 2)).toBe('6 4')
         expect(dashArrayOf('dotted', 3)).toBe('0 6')
         expect(dashArrayOf(undefined, 3)).toBeUndefined()
+    })
+})
+
+
+// The Context View's lines: each stands for its members — raw relationships by
+// their own ids, roll-ups (aggregated) and a Connections search's stand-ins.
+const member = (id: string, more: Record<string, unknown> = {}) => ({ id, data: { edgeType: 'TRANSFORMS', ...more } })
+const rollup = (id: string) => ({ id, data: { edgeType: 'AGGREGATED', isAggregated: true } })
+const CV_LINES: MemberLine[] = [
+    { id: 'bundle-x->y', data: { members: [member('e-1')] } },
+    { id: 'bundle-A->B', data: { members: [member('e-2'), member('e-3')] } },           // two, one row pair
+    { id: 'bundle-P->Q', data: { members: [rollup('agg-1'), member('e-5')] } },         // a roll-up and a real one
+    { id: 'bundle-R->S', data: { members: [rollup('agg-2')] } },                        // only a roll-up
+    { id: 'bundle-bi-M->N', data: { members: [member('e-6'), member('e-7')] } },        // both directions
+    { id: 'bundle-U->V', data: { members: [{ id: 'search:k', data: {} }] } },           // a search's stand-in
+]
+const memberLooks = (rules: DisplayRuleTag[], matches: Record<string, string[]>, lines = CV_LINES) =>
+    memberRuleLooks(rules, new Map(Object.entries(matches).map(([k, v]) => [k, new Set(v)])), lines)
+
+
+describe('memberRuleLooks', () => {
+    it('paints a line when any relationship it stands for matches, in the rule’s look', () => {
+        const out = memberLooks([rule('r', { style: { dash: 'dotted', width: 3 } })], { r: ['e-3', 'e-7'] })
+        expect([...out.keys()].sort()).toEqual(['bundle-A->B', 'bundle-bi-M->N'])
+        expect(out.get('bundle-A->B')).toMatchObject({ color: '#ef4444', dash: 'dotted', width: 3 })
+    })
+
+    it('paints a line that holds a roll-up for its real relationship, never for the roll-up', () => {
+        expect([...memberLooks([rule('r')], { r: ['e-5'] }).keys()]).toEqual(['bundle-P->Q'])
+        expect(memberLooks([rule('r')], { r: ['agg-1', 'agg-2'] }).size).toBe(0)
+    })
+
+    it('never paints a search’s stand-in', () => {
+        expect(memberLooks([rule('r')], { r: ['search:k'] }).size).toBe(0)
+    })
+
+    it('takes the first rule’s look in the view’s order, and every chip shown', () => {
+        const out = memberLooks([
+            rule('first', { color: '#10b981' }),
+            rule('quiet', { color: '#3b82f6', style: { chip: false } }),
+            rule('second', { color: '#f59e0b', style: { dash: 'dashed' } }),
+        ], { first: ['e-1'], quiet: ['e-1'], second: ['e-1', 'e-2'] })
+        expect(out.get('bundle-x->y')).toMatchObject({ color: '#10b981', width: RULE_LINE_WIDTH })
+        expect(out.get('bundle-x->y')!.chips.map((c) => c.id)).toEqual(['first', 'second'])
+        expect(out.get('bundle-A->B')).toMatchObject({ color: '#f59e0b', dash: 'dashed' })
+    })
+
+    it('leaves lines to the rules that style relationships, and to those with matches', () => {
+        expect(memberLooks([rule('tags', { target: undefined })], { tags: ['e-1'] }).size).toBe(0)
+        expect(memberLooks([rule('r')], { r: [] }).size).toBe(0)
     })
 })

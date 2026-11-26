@@ -8,22 +8,27 @@
  */
 import { HoverTip } from '@/components/ui/HoverTip'
 import { cn } from '@/lib/utils'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { useAnchorCount, useAnchorStore } from './anchorStore'
 import { useDiscussionsDrawer } from './drawerStore'
+import { anchorOf, completeAnchorPath } from './anchorOf'
 
 export function QuestionRowMark({ urn, label, className }: {
     urn: string | null | undefined
-    /** The row's name, for the drawer's filter chip. */
+    /** The row's name, for the drawer's filter chip when the canvas doesn't hold the row's node. */
     label?: string | null
     className?: string
 }) {
     const count = useAnchorCount(urn)
+    const provider = useGraphProviderIfAvailable()
     if (!urn || !count || count.total === 0) return null
     const open = count.open
     const show = () => {
         const viewId = useAnchorStore.getState().viewId
         if (!viewId) return
-        useDiscussionsDrawer.getState().open({ subject: { type: 'view', id: viewId }, entity: { id: urn, label: label || urn } })
+        const entity = anchorOf(urn, { label })
+        useDiscussionsDrawer.getState().open({ subject: { type: 'view', id: viewId }, entity })
+        completeAnchorPath(entity, provider)
     }
     const words = open > 0
         ? `${open.toLocaleString()} open ${open === 1 ? 'question' : 'questions'} about this`

@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertTriangle, Check, Globe, Lock, MapPin, Plus, Search, Share2, Users, X } from 'lucide-react'
+import { AlertTriangle, Check, Globe, Lock, Plus, Search, Share2, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { AvatarStack } from '@/components/ui/AvatarStack'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -28,6 +28,7 @@ import { useAuthStore } from '@/store/auth'
 import type { AskResult, PeopleMap, PersonRole, SubjectKey, Visibility } from '@/services/discussionsService'
 import { useDiscussionActions, useMentionSource, useMentionable, useSubjectPeople } from './useDiscussions'
 import type { DrawerEntity } from './drawerStore'
+import { EntityAnchor } from './EntityAnchor'
 import { listNames, nameOf, stackPerson, subjectNoun } from './discussionText'
 
 const MAX_RECIPIENTS = 20
@@ -184,7 +185,11 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
                 body, visibility, mentions, clientKey,
                 route: { viewOwners: isView && route.viewOwners, dataContacts: route.dataContacts },
                 recipientIds: recipients.map((r) => r.id),
-                ...(entity ? { entityId: entity.id, entityLabel: entity.label } : {}),
+                ...(entity ? {
+                    entityId: entity.id, entityLabel: entity.label,
+                    ...(entity.path?.length ? { entityPath: entity.path } : {}),
+                    ...(entity.type ? { entityType: entity.type } : {}),
+                } : {}),
             },
         })
         if (res.notReached.length) {
@@ -203,8 +208,8 @@ export function AskComposer({ subject, entity, onClearEntity, initialRecipients,
             <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-[13px] font-bold text-ink">Ask a question</h3>
                 {entity && (
-                    <span className="inline-flex items-center gap-1 min-w-0 max-w-full rounded-lg border border-amber-500/25 bg-amber-500/[0.07] pl-1.5 pr-1 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-200">
-                        <MapPin className="w-3 h-3 shrink-0" aria-hidden />About <span className="truncate font-semibold">{entity.label}</span>
+                    <span className="inline-flex items-start gap-1 min-w-0 max-w-full rounded-lg border border-amber-500/25 bg-amber-500/[0.07] pl-1.5 pr-1 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-200">
+                        <EntityAnchor entity={entity} variant="full" prefix="About" />
                         {onClearEntity && (
                             <button type="button" onClick={onClearEntity} aria-label={`Ask about all of ${noun} instead`}
                                 className="ml-0.5 rounded p-0.5 hover:bg-amber-500/15"><X className="w-3 h-3" aria-hidden /></button>

@@ -6,7 +6,7 @@ What the routes do: ``backend.app.api.v1.endpoints.discussions``,
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -106,6 +106,9 @@ DiscussionStatus = Literal["open", "answered", "closed"]
 MessageRole = Literal["asker", "view_owner", "data_owner", "data_steward", "admin"]
 BODY_MAX = 10_000
 MENTIONS_MAX = 20
+#: The containers an asked-about entity sits in, top first, as named when it was asked.
+ENTITY_PATH_MAX = 32
+ENTITY_NAME_MAX = 200
 
 
 def _key():
@@ -135,6 +138,8 @@ class ThreadSummary(_Wire):
     subject: SubjectRef
     entity_id: Optional[str] = None
     entity_label: Optional[str] = None
+    entity_path: Optional[list[str]] = None
+    entity_type: Optional[str] = None
     visibility: Visibility
     status: DiscussionStatus
     asked_by: str
@@ -242,6 +247,9 @@ class AskBody(_Wire):
     mentions: list[str] = Field(default_factory=list, max_length=MENTIONS_MAX)
     entity_id: Optional[str] = Field(default=None, max_length=1000)
     entity_label: Optional[str] = Field(default=None, max_length=500)
+    entity_path: Optional[list[Annotated[str, Field(max_length=ENTITY_NAME_MAX)]]] = Field(
+        default=None, max_length=ENTITY_PATH_MAX)
+    entity_type: Optional[str] = Field(default=None, max_length=ENTITY_NAME_MAX)
     client_key: str = _key()
 
 

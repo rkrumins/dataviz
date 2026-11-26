@@ -80,6 +80,17 @@ def mentions_of(raw: Optional[str]) -> list[str]:
     return [str(v) for v in value] if isinstance(value, list) else []
 
 
+def names_of(raw: Optional[str]) -> Optional[list[str]]:
+    """A thread's stored entity path: its names, or None when there is none (or it can't be read)."""
+    try:
+        value = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, list):
+        return None
+    return [str(v) for v in value] or None
+
+
 # ── Threads ──────────────────────────────────────────────────────────
 
 

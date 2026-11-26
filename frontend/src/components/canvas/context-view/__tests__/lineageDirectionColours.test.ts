@@ -41,6 +41,6 @@ describe('the lineage direction pair on every direction cue', () => {
 
   it('Display › Lineage colours says that lines keep their flow type colour', () => {
     expect(read('../LineageDisplayPopover.tsx').replace(/\s+/g, ' '))
-      .toContain('Lines outside a trace keep the colour of their flow type.')
+      .toContain('Lines outside a trace keep the colour of their flow type, or of a display rule that styles them.')
   })
 })

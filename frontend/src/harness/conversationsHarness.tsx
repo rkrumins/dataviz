@@ -21,6 +21,7 @@
  *          editor, opened; default named)
  *          views | sources | rows   (page=cards: just that part, for a phone's screen; default all)
  *   theme  light | dark
+ *   hover  1: the first entity a question is about, hovered (its full details)
  *
  * `npm run harness:conversations` drives Chromium over every page at 1280px and 390px, light
  * and dark, and writes PNGs to .harness/.
@@ -67,9 +68,16 @@ const page = params.get('page') ?? 'view-drawer'
 const state = params.get('state') ?? 'open'
 const dark = params.get('theme') === 'dark'
 const withEntity = params.get('entity') === '1'
+const hover = params.get('hover') === '1'
 // The person card opens after the page settles; headless Chromium's virtual clock never runs its
 // fade-in, so it would be captured still invisible.
 if (page === 'hovercard') MotionGlobalConfig.skipAnimations = true
+// Likewise a hovered tip: its rise-and-fade would be captured half drawn, and the drawer still
+// sliding in when it is placed would leave it pointing at where the drawer was.
+if (hover) {
+    MotionGlobalConfig.skipAnimations = true
+    document.documentElement.classList.add('reduce-motion')
+}
 
 // ── fetch, answered from the fixtures ─────────────────────────────────
 const json = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -107,7 +115,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const q: Message = { id: `dmsg_new${++posted}`, kind: 'question', authorId: 'usr_me', body: body.body, mentions: body.mentions, createdAt: new Date().toISOString(),
             editedAt: null, deletedAt: null, version: 1, roles: ['asker'] }
         const t: ThreadDetail = { ...THREADS.th_private, id: `th_new${posted}`, visibility: body.visibility, messages: [q], excerpt: body.body.slice(0, 200),
-            entityId: body.entityId ?? null, entityLabel: body.entityLabel ?? null, privateAudience: body.visibility === 'private' ? ['usr_me', 'usr_ana'] : null,
+            entityId: body.entityId ?? null, entityLabel: body.entityLabel ?? null, entityPath: body.entityPath ?? null,
+            entityType: body.entityType ?? null, privateAudience: body.visibility === 'private' ? ['usr_me', 'usr_ana'] : null,
             messageCount: 1, participantIds: ['usr_me'], participantCount: 1, unread: false, status: 'open' }
         THREADS[t.id] = t
         return json({ thread: t, reached: ['usr_ana', 'usr_eli', 'usr_bo'], notReached: [{ personId: 'usr_fay', reason: 'cannot_read' }], usedFallback: false }, 201)
@@ -370,7 +379,15 @@ function Harness() {
         const open = useDiscussionsDrawer.getState().open
         if (page === 'view-drawer') open({ subject })
         if (page === 'thread') open({ subject, threadId: STATE_THREAD[state] ?? 'th_open', messageId: state === 'answered' ? THREADS.th_answered.answerMessageId : null })
-        if (page === 'ask') open({ subject, compose: true, entity: withEntity ? { id: 'urn:fin:net_revenue', label: 'Net revenue (monthly)' } : null })
+        if (page === 'ask') open({ subject, compose: true, entity: withEntity ? {
+            id: 'urn:fin:net_revenue', label: 'Net revenue (monthly)', path: ['Finance Risk', 'Reporting', 'Monthly', 'Revenue'], type: 'metric',
+        } : null })
+        if (hover) {
+            // What a question is about, hovered: its full details.
+            const t = window.setTimeout(() => document.querySelector('[data-testid="entity-anchor"]')?.parentElement
+                ?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })), 700)
+            return () => window.clearTimeout(t)
+        }
         if (page === 'inbox') {
             const t = window.setTimeout(() => document.querySelector<HTMLButtonElement>('button[aria-label^="Inbox"]')?.click(), 400)
             return () => window.clearTimeout(t)

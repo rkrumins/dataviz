@@ -32,10 +32,11 @@ export function nextRenderTier(count: number, current: RenderTier): RenderTier {
  * the reader is looking at. Past that, hundreds of dashed curves fanning into
  * the same cards interfere into a moiré that reads as the canvas breaking up,
  * and the roll-up draws solid. Every other dash is the ontology's own stroke
- * style for the type, and always stays.
+ * style for the type, or a display rule's (`ruleColor`: the line is a rule's),
+ * and always stays.
  */
-export function lineDash(line: { isGhost: boolean; dashArray: string }, detailed: boolean): string {
-  return line.isGhost && !detailed ? 'none' : line.dashArray
+export function lineDash(line: { isGhost: boolean; dashArray: string; ruleColor?: string }, detailed: boolean): string {
+  return line.isGhost && !detailed && !line.ruleColor ? 'none' : line.dashArray
 }
 
 /**

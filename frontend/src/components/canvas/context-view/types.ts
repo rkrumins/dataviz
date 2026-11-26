@@ -167,4 +167,9 @@ export type ComputedEdge = {
    * (markerStart + markerEnd) to communicate two-way flow.
    */
   isBidirectional?: boolean
+  /** A display rule styling this line's relationships paints it in this colour (its `color` too);
+   *  absent when none does. Flat, as every field here, so the per-line memo compares it. */
+  ruleColor?: string
+  /** The display rules whose chips the line carries, by id, in the view's order. */
+  ruleChipIds?: string[]
 }
