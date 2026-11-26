@@ -100,7 +100,8 @@ Every new capability ships behind its own switch, off by default.
   editor asks what a rule applies to, then its condition (with a count of what it matches), then
   its look, shown as it will be drawn. A bundled line is styled when any relationship it stands
   for matches; a roll-up never is. Library files carry them, warning of relationship types the
-  view's semantic layer doesn't have. Existing rules are unchanged.
+  view's semantic layer doesn't have. Advanced Search's "Make a rule" makes one from a Connections
+  search, or a saved one in the library. Existing rules are unchanged.
 
 ### Changed
 
@@ -230,8 +231,8 @@ Every new capability ships behind its own switch, off by default.
   no flat file carries a property whose value is null.
 - A bulk job over a Connections search doesn't reach a relationship the draft didn't change whose
   ends it changed to match; the job's summary says so.
-- Relationship display rules style the Graph canvas's lines only (the Context View draws its own),
-  and can't be made from Advanced Search's "Make a rule" yet. On a draft, a relationship the draft
+- Relationship display rules style the Graph canvas's lines only (the Context View draws its own).
+  On a draft, a relationship the draft
   didn't change whose end it changed keeps the published look, and its count is the published
   graph's; both say so. A view with more members than can be listed can't evaluate them.
 - One relationship per source, type and target, as before (both directions and several types per

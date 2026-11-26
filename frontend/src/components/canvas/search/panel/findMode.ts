@@ -18,10 +18,6 @@ export function findModeOf(draft: Predicate | null): FindMode {
 }
 
 
-/** Why a Connections search makes no display rule. */
-export const NO_RULE_FOR_CONNECTIONS = 'A display rule tags entities, and this search finds connections — '
-    + 'make a rule from its From or To conditions as an entity search'
-
 /** A saved or shared query as the panel's draft: a Connections search sent
  *  in an AND group of its own — the API reference asks a root to be sent
  *  in one — is the search itself. */
