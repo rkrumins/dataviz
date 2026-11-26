@@ -97,7 +97,7 @@ parameters.
 | GET | `/search/values` | A property's most common values across the view (`viewId`, `key`, `q`, `limit` 1–50) — the value picker's suggestions, bounded to about 1.5 s. |
 | POST | `/search/membership` | Which of up to 1,000 on-screen entities match which of up to 32 display rules. |
 | POST | `/search/counts` | How many entities in the view match each of up to 32 rules, exactly; repeat with the returned `sessions` until every count is complete. |
-| POST | `/search/catalog` | Every property the view's entities carry, read from every entity in scope; repeat with `sessionId` until complete. |
+| POST | `/search/catalog` | Every property the view's entities carry (or, `subject: "relationships"`, the relationships between them), read from every one in scope; repeat with `sessionId` until complete. |
 | POST | `/search/ancestor-counts` | How many of a search session's matches each of up to 2,000 containers holds. |
 | POST | `/search/exports` | Write every match to a CSV or NDJSON file; repeat with `sessionId` until complete. Gated by the `graphExportEnabled` feature. |
 | GET | `/search/exports/{sessionId}/download` | Download a finished export with its `token`, for the user who ran it, for an hour. |

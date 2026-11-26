@@ -2248,6 +2248,15 @@ def _native_edge_properties(rel_type: str, props: Dict[str, Any]) -> Dict[str, A
     return out
 
 
+def edge_user_properties(rel_type: str, props: Dict[str, Any]
+                         ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """A relationship's properties as every reader takes them from ``properties(r)``, and the
+    part of them its JSON bag held: its native ones (:func:`_native_edge_properties`) with the
+    bag over them — the bag wins a name both hold."""
+    bag = _json_object(props.get("properties")) or {}
+    return {**_native_edge_properties(rel_type, props), **bag}, bag
+
+
 def _split_edge_properties(
     props: Optional[Dict[str, Any]], native_keys: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, Any], str]:
@@ -2282,8 +2291,7 @@ def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[
     the platform's bag over them — the bag wins a name both hold. Only a number is the edge's
     ``confidence``; the id is text, whatever the source stored."""
     conf = props.get("confidence")
-    properties = _native_edge_properties(rel_type, props)
-    properties.update(_json_object(props.get("properties")) or {})
+    properties, _bag = edge_user_properties(rel_type, props)
     return GraphEdge(
         id=str(props.get("id") or f"{source_urn}|{rel_type}|{target_urn}"),
         sourceUrn=source_urn,
@@ -6909,16 +6917,33 @@ class FalkorDBProvider(GraphDataProvider):
                                          members=context.members)
 
     @_search_reads
+    async def deep_search_edge_membership(self, scope, items, edges, *, context):
+        """Which of ``edges`` (the relationships on screen) match which Connections rule,
+        inside ``scope``. See ``falkordb_search/membership.py``."""
+        from .falkordb_search.membership import evaluate_edge_membership
+        await self._ensure_connected()
+        admit = context.admit
+
+        async def run(cypher, params):
+            if admit is None:
+                return await self._ro_query(cypher, params=params)
+            async with admit():
+                return await self._ro_query(cypher, params=params)
+
+        return await evaluate_edge_membership(self, scope, items, edges, run=run, timeout_s=5.0)
+
+    @_search_reads
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
-                                  refresh=False, values_for=None):
-        """Every property in ``scope``, exactly, in as many requests as the
-        scan takes — every value kept for ``values_for``. See
-        ``falkordb_search/catalog.py``."""
+                                  refresh=False, values_for=None, subject="entities"):
+        """Every property in ``scope`` — of its entities, or ``subject``
+        ``relationships`` of the relationships between them — exactly, in as
+        many requests as the scan takes, every value kept for ``values_for``.
+        See ``falkordb_search/catalog.py``."""
         from .falkordb_search.catalog import execute_catalog_session
         await self._ensure_connected()
         return await execute_catalog_session(self, scope, context=context, wait_ms=wait_ms,
                                              session_id=session_id, refresh=refresh,
-                                             values_for=values_for)
+                                             values_for=values_for, subject=subject)
 
     @_search_reads
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
@@ -7119,6 +7144,45 @@ class FalkorDBProvider(GraphDataProvider):
 
     #: Source × target URN pairs up to which ``get_edges`` binds both ends by index.
     _PAIR_BIND_MAX_PAIRS = 64
+
+    async def relationships_between(self, pairs: Sequence[Tuple[str, str]]
+                                    ) -> Dict[Tuple[str, str], List[Tuple[str, Dict[str, Any]]]]:
+        """Every relationship stored from each (source urn, target urn) of ``pairs`` — its type
+        and ``properties(r)`` — both ends seeked by their label's URN index and expanded between
+        (as :meth:`_edges_between_pairs`), never a scan of either end's edges or of every edge by
+        its id. A pair whose end the graph doesn't hold has none."""
+        await self._ensure_connected()
+        pairs = list(dict.fromkeys((s, t) for s, t in pairs if s and t))
+        out: Dict[Tuple[str, str], List[Tuple[str, Dict[str, Any]]]] = {}
+        if not pairs:
+            return out
+        label_of: Dict[str, str] = {}
+        for label, bucket in await self._label_buckets([u for p in pairs for u in p]):
+            for urn in bucket:
+                label_of[urn] = label
+        groups: Dict[Tuple[str, str], List[List[str]]] = {}
+        for s, t in pairs:
+            if label_of.get(s) and label_of.get(t):         # an end not in the graph: none
+                groups.setdefault((label_of[s], label_of[t]), []).append([s, t])
+        # Pairs a statement reads: their relationships stay inside a reply (``REPLY_ROWS_MAX``)
+        # unless a pair holds over fifty.
+        step = 200
+
+        async def read(src_label: str, tgt_label: str, part: List[List[str]]) -> list:
+            res = await self._ro_query(
+                f"UNWIND $_pairs AS _p MATCH (a:{src_label}) WHERE a.urn = _p[0] "
+                f"MATCH (b:{tgt_label}) WHERE b.urn = _p[1] "
+                "WITH a, b MATCH (a)-[r]->(b) RETURN a.urn, b.urn, type(r), properties(r)",
+                params={"_pairs": part}, op="edges.between")
+            return res.result_set or []
+
+        answers = await asyncio.gather(*(read(sl, tl, part[i:i + step])
+                                         for (sl, tl), part in groups.items()
+                                         for i in range(0, len(part), step)))
+        for rows in answers:
+            for s, t, rel_type, props in rows:
+                out.setdefault((s, t), []).append((str(rel_type), dict(props or {})))
+        return out
 
     async def _edges_between_pairs(
         self,

@@ -49,6 +49,20 @@ describe('followCatalog', () => {
         expect(second.refresh).toBeUndefined()
     })
 
+    it("asks for the relationships' catalog by its subject, on every request", async () => {
+        const { provider, searchCatalog } = providerAnswering(
+            answer({ sessionId: 's3', subject: 'relationships' }),
+            answer({ sessionId: 's3', subject: 'relationships', status: 'complete', entities: 42 }),
+        )
+        const final = await followCatalog(provider, 'view-1', { subject: 'relationships', valuesFor: 'weight' })
+        expect(final.entities).toBe(42)
+        const bodies = searchCatalog.mock.calls.map(([body]) => body)
+        expect(bodies[0]).toEqual({
+            scope: { viewId: 'view-1', scopeMode: 'view' }, subject: 'relationships', waitMs: 800, valuesFor: 'weight',
+        })
+        expect(bodies[1]).toMatchObject({ subject: 'relationships', sessionId: 's3' })
+    })
+
     it('rejects when a request fails', async () => {
         const searchCatalog = vi.fn(async () => { throw new Error('Service Unavailable') })
         await expect(followCatalog({ searchCatalog } as unknown as RemoteGraphProvider, 'v'))

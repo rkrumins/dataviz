@@ -185,7 +185,8 @@ class _Graph:
                 for k, v in r.items():
                     kind = catalog_mod._kind_of(v)
                     tally[(k, kind)] = tally.get((k, kind), 0) + 1
-            return _Result([[label, k, t, n] for (k, t), n in tally.items()])
+            # One row, however many keys: a wide graph's would be more than a reply holds.
+            return _Result([[[[label, k, t, n] for (k, t), n in tally.items()]]])
         if "n.tags AS _t" in cypher:
             sets = {}
             for r in rows:
@@ -193,8 +194,11 @@ class _Graph:
                     sets[r["tags"]] = sets.get(r["tags"], 0) + 1
             return _Result([[t, n] for t, n in sets.items()][:params["_tagcap"]])
         if "propertiesRaw" in cypher:
-            return _Result([[label, r["propertiesRaw"]] for r in rows
-                            if r.get("propertiesRaw") not in (None, "{}")])
+            # A page in ID order after ``_after`` — the position in the label stands for the ID.
+            held = [[i, label, r["propertiesRaw"]] for i, r in enumerate(self.entities[label])
+                    if r in rows and r.get("propertiesRaw") not in (None, "{}")
+                    and i > params["_after"]]
+            return _Result(held[:params["_page"]])
         if "LIMIT $_probe" in cypher:
             head = rows[:params["_probe"]]
             return _Result([[k, len({json.dumps(r[k]) for r in head if k in r})]
@@ -393,6 +397,29 @@ class TestSessions:
         assert other["sessionId"] != first["sessionId"]
 
 
+    async def test_rows_past_a_reply_are_read_a_page_at_a_time(self, monkeypatch):
+        """FalkorDB cuts a reply at its ``RESULTSET_SIZE`` rows without saying so: every
+        ``propertiesRaw`` row is read in pages, and keys are asked about a few at a time, so
+        none is dropped however many a unit holds."""
+        monkeypatch.setattr(catalog_mod, "make_plan", _plan(UNITS))
+        monkeypatch.setattr(catalog_mod, "PAGE", 1)
+        monkeypatch.setattr(catalog_mod, "KEYS_PER_STATEMENT", 1)
+        graph = _Graph(ENTITIES)
+        out, _ = await _follow(_Provider(graph), SearchRunContext(data_version="1", scope_hash="h"))
+        props = {p["key"]: p for p in out["properties"]}
+        assert props["legacy"]["residual"] == 3 and props["legacy"]["count"] == 3
+        assert {v["value"]: v["count"] for v in props["owner"]["values"]} == {"ann": 7, "bob": 3}
+        assert (props["rows"]["min"], props["rows"]["max"]) == (0, 5000)
+        paged = [c for c in graph.statements if "propertiesRaw" in c]
+        assert len(paged) > 3                      # more than one page per unit that holds any
+        assert all("LIMIT $_page" in c for c in paged)
+
+    def test_too_many_tag_sets_show_inside_one_reply(self):
+        # The row past the cap is how a unit shows it has more: it must fit in the reply.
+        from backend.app.providers.falkordb_search.plan import REPLY_ROWS_MAX
+        assert catalog_mod.TAG_SETS_MAX + 1 <= REPLY_ROWS_MAX
+
+
 # ---------------------------------------------------------------------------
 # Service and route
 # ---------------------------------------------------------------------------
@@ -453,6 +480,45 @@ class TestService:
         request = SearchCatalogRequest.model_validate({"scope": {"viewId": "v"}, "valuesFor": "dept"})
         await _service(_Catalog()).catalog(request)
         assert seen == {"values_for": "dept"}
+
+    async def test_a_relationship_catalog_is_asked_for_by_its_subject(self):
+        seen = {}
+
+        class _Catalog:
+            async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                          refresh=False, subject="entities"):
+                seen.update(subject=subject, scope_hash=context.scope_hash)
+                return {"sessionId": "s", "subject": subject, "status": "complete",
+                        "entities": 4, "entityTypes": [{"type": "FEEDS", "count": 4}]}
+
+        request = SearchCatalogRequest.model_validate({"scope": {"viewId": "v"},
+                                                       "subject": "relationships"})
+        out = await _service(_Catalog()).catalog(request)
+        assert seen == {"subject": "relationships", "scope_hash": "scope-1"}
+        assert out.subject == "relationships" and out.entity_types[0].type == "FEEDS"
+        # An entity catalog asks as it always did: a provider that knows no subject still answers.
+        plain = await _service(_Catalog()).catalog(
+            SearchCatalogRequest.model_validate({"scope": {"viewId": "v"}}))
+        assert seen["subject"] == "entities" and plain.subject == "entities"
+
+    def test_only_entities_or_relationships_are_a_subject(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            SearchCatalogRequest.model_validate({"scope": {"viewId": "v"}, "subject": "tags"})
+
+    async def test_a_lagging_projection_is_a_501_whatever_is_asked(self):
+        """A graph served from Postgres while its projection catches up has no catalog: every
+        way of asking for one is the 501 the route has for it, never a 500."""
+        from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
+        provider = VersionedBranchProvider.__new__(VersionedBranchProvider)
+        provider._deep_search_gap = "the projection is catching up"
+        for extra in ({}, {"values_for": "owner"}, {"subject": "relationships"}):
+            request = SearchCatalogRequest.model_validate({
+                "scope": {"viewId": "v"},
+                **({"valuesFor": extra["values_for"]} if "values_for" in extra else {}),
+                **({"subject": extra["subject"]} if "subject" in extra else {})})
+            with pytest.raises(NotImplementedError):
+                await _service(provider).catalog(request)
 
     async def test_roots_all_outside_the_view_read_nothing(self):
         request = SearchCatalogRequest.model_validate({

@@ -67,6 +67,40 @@ Every new capability ships behind its own switch, off by default.
   accepted answer, the most discussed views and data sources, and the questions waiting longest;
   on the Data tab, how well sources are described and how requests are answered.
 - **Guided tours**, a persona-aware Dashboard and command-palette actions for the new flows.
+- **Every relationship property in a view, exactly**: `POST /search/catalog` with
+  `subject: "relationships"` lists the properties of the relationships between the view's items. It
+  reads every one, not a sample. For each relationship type it gives:
+  - how many carry each key, and the kinds its values are stored as;
+  - its exact range and its values;
+  - how many hold it in the relationship's JSON.
+
+  It has the item catalog's shape, follows a draft's changes, and never reads roll-ups. In CI it
+  completes over about a million relationships, with one item holding half of them, in about a
+  minute, with no statement over two seconds.
+- **Make a relationship property a field**: from a relationship's properties, a property its
+  relationships already carry becomes a defined field of the relationship types you choose. The
+  platform's own keys (`id`, `confidence`, `properties`, `gvHash`) are refused, and built-in types
+  take no fields.
+- **Compare and edit several relationships of every kind**: hierarchy links and associations, as
+  well as lineage (roll-ups stay read-only). A field the type keeps unique is never given one value
+  for several. Adding a property suggests the names others of their types carry. The Property
+  Manager offers "Compare the N selected relationships".
+- **Relationship properties in the Property Manager**: the Properties tab switches between
+  Entities and Relationships. A relationship property gets what an entity property has:
+  - how many carry it, its kinds, its values and their counts, in each relationship type's colour;
+  - how many hold it in the relationship's JSON;
+  - "Find relationships with / without this", and the same from a value or a type;
+  - set, rename, copy, remove, normalize, map values, convert and "Make it a field…" from its row.
+
+  The bulk dialog reads relationship keys and every value from the catalog. It falls back to a
+  sample only where no catalog can be read.
+- **Display rules for relationships**: a rule can apply to relationships — a Connections search,
+  its ends optional, through the types you pick, with an edge filter by any operator — and draws
+  their lines on the Graph canvas in its colour, dashed or dotted, thin or bold, with its chip. The
+  editor asks what a rule applies to, then its condition (with a count of what it matches), then
+  its look, shown as it will be drawn. A bundled line is styled when any relationship it stands
+  for matches; a roll-up never is. Library files carry them, warning of relationship types the
+  view's semantic layer doesn't have. Existing rules are unchanged.
 
 ### Changed
 
@@ -109,6 +143,17 @@ Every new capability ships behind its own switch, off by default.
 
 ### Fixed
 
+- **The property catalog never loses rows past one reply from the graph store**, which cuts a
+  reply at 10,000 rows without saying so. Keys come back as one row, values kept as raw text are
+  read in pages, statements about keys ask about 500 at a time, and the tag-set cutoff fits inside a
+  reply. A wide or raw-heavy view could otherwise count some properties short.
+- **A graph whose projection is catching up answers 501 for every catalog request**, as the route
+  intends, rather than a 500 when one key's every value was asked for.
+- **A relationship property held both natively and in the relationship's JSON reads the same
+  everywhere**: the JSON's value, as the relationship drawer shows it. Search results and exports
+  showed the native one.
+- **Relationship discovery samples each relationship type on its own**, so one type with millions
+  of relationships (containment, roll-ups) no longer leaves others unseen.
 - **Enabling version control keeps every property of a graph another tool built.** A
   relationship's own properties (`r.weight`, `r.\`my prop\``) were not copied into history — only
   the platform's `r.properties` bag was — so they disappeared the first time the graph was rebuilt
@@ -185,6 +230,10 @@ Every new capability ships behind its own switch, off by default.
   no flat file carries a property whose value is null.
 - A bulk job over a Connections search doesn't reach a relationship the draft didn't change whose
   ends it changed to match; the job's summary says so.
+- Relationship display rules style the Graph canvas's lines only (the Context View draws its own),
+  and can't be made from Advanced Search's "Make a rule" yet. On a draft, a relationship the draft
+  didn't change whose end it changed keeps the published look, and its count is the published
+  graph's; both say so. A view with more members than can be listed can't evaluate them.
 - One relationship per source, type and target, as before (both directions and several types per
   pair are supported). Several of one type between two items is proposed as an opt-in per type in
   `docs/versioning/20-parallel-relationships.md`.

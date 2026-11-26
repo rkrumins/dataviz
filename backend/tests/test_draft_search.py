@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
+from pydantic import TypeAdapter
 
 from backend.app.providers import draft_search
 from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
@@ -28,8 +29,9 @@ from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.graph import GraphNode
 from backend.common.models.search import (
     DegreePredicate, DescendantOfPredicate, EntityTypePredicate, GroupPredicate,
-    HasPropertyPredicate, IsPredicate, NodeRef, PropertyPredicate, SearchCountsRequest,
-    SearchMembershipRequest, SearchOptions, SearchQuery, SearchScope, TagPredicate, TextPredicate,
+    HasPropertyPredicate, IsPredicate, NodeRef, Predicate, PropertyPredicate, SearchCountsRequest,
+    SearchMembershipEdge, SearchMembershipRequest, SearchOptions, SearchQuery, SearchScope,
+    TagPredicate, TextPredicate,
 )
 from backend.common.predicate_eval import NODE_FIELDS, matches
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
@@ -132,10 +134,10 @@ class Draft:
     """The draft's side: a scripted versioning service over ``MAIN``, committed to by ``commit``
     — what each commit wrote kept by seq, so a fold can read the draft as it was."""
 
-    def __init__(self):
-        self.main = {n["urn"]: dict(n) for n in MAIN}
+    def __init__(self, main_nodes=MAIN, main_edges=MAIN_EDGES):
+        self.main = {n["urn"]: dict(n) for n in main_nodes}
         self.nodes = {u: dict(n) for u, n in self.main.items()}
-        self.edges = {e["id"]: dict(e) for e in MAIN_EDGES}
+        self.edges = {e["id"]: dict(e) for e in main_edges}
         self.seq = 0
         self.history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         # The type of each edge row a commit wrote — None for a delete, whose row names none.
@@ -252,9 +254,9 @@ RULES = {
 }
 
 
-def _first_draft() -> Draft:
+def _first_draft(draft: Optional[Draft] = None) -> Draft:
     """A draft that changes c2, removes c3 and creates c4 under t2."""
-    draft = Draft()
+    draft = draft or Draft()
     draft.commit({"c2": {**draft.main["c2"], "tier": "gold", "rows": 50},
                   "c3": None,
                   "c4": {"entityType": "Column", "displayName": "phone", "tier": "gold",
@@ -515,6 +517,75 @@ async def test_membership_of_a_relationship_rule_is_mains_less_what_the_draft_re
         SCOPE, [("fed", rule)], ["c1", "c3", "c4"], context=CONTEXT)
     assert out["matches"]["fed"] == []       # c3 had lineage in, but the draft removed it
     assert out["notes"] == [draft_search.MEMBERSHIP_MAINS.format(n=1)]
+
+
+class EdgeDraft(Draft):
+    """A draft that serves its relationships' values as the versioning service does."""
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node",
+                               as_of_seq=None):
+        if kind != "edge":
+            return await super().overlay_payloads(graph_id=graph_id, branch_id=branch_id,
+                                                  entity_ids=entity_ids, kind=kind)
+        return [{"id": e, "sourceUrn": self.edges[e]["source"], "targetUrn": self.edges[e]["target"],
+                 "edgeType": self.edges[e]["type"], "properties": self.edges[e].get("properties") or {}}
+                for e in entity_ids if e in self.edges]
+
+
+P_EDGES = TypeAdapter(Predicate).validate_python
+
+
+def _flow(src, tgt, **props):
+    return {"id": f"e:{src}>{tgt}", "source": src, "target": tgt, "type": "FLOWS_TO", "properties": props}
+
+
+EDGE_RULES = {
+    "to_gold": P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "targetWhere": {
+        "kind": "property", "key": "tier", "op": "eq", "value": "gold"}}),
+    "streams": P_EDGES({"kind": "edges", "edgePredicate": {
+        "kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}}),
+}
+
+
+def _asked_edges(draft, ids):
+    held = {**{e["id"]: e for e in MAIN_EDGES}, **draft.edges}
+    return [SearchMembershipEdge(id=i, source=held[i]["source"], target=held[i]["target"]) for i in ids]
+
+
+async def test_edge_membership_judges_the_relationships_the_draft_changed_on_the_draft():
+    """c2 → c4 and c1 → c4 are new in the draft (c4 created gold), c1 → c3 lost its end (c3
+    removed): each is answered as the draft holds it — the truth over the draft's graph."""
+    draft = _first_draft(EdgeDraft())
+    draft.commit({}, add_edges=[_flow("c2", "c4", mode="stream"), _flow("c1", "c4", mode="batch")])
+    asked = _asked_edges(draft, ["e:c1>c3", "e:c2>c4", "e:c1>c4"])
+    items = list(EDGE_RULES.items())
+    out = await _overlay(draft).deep_search_edge_membership(SCOPE, items, asked, context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": ["e:c2>c4", "e:c1>c4"],
+                                                 "streams": ["e:c2>c4"]}
+    assert out["notes"] == []
+    # Main alone: c1 → c3 still reaches a gold column, and the draft's relationships are unknown.
+    main = await Main().deep_search_edge_membership(SCOPE, items, asked)
+    assert main["matches"] == {"to_gold": ["e:c1>c3"], "streams": []}
+
+
+async def test_edge_membership_of_a_relationship_the_draft_removed_is_nothing():
+    draft = EdgeDraft()
+    draft.commit({}, drop_edges=[_flow("c1", "c3")])
+    asked = _asked_edges(draft, ["e:c1>c3"])
+    out = await _overlay(draft).deep_search_edge_membership(
+        SCOPE, [("to_gold", EDGE_RULES["to_gold"])], asked, context=CONTEXT)
+    assert out["matches"] == {"to_gold": []}
+
+
+async def test_edge_membership_keeps_mains_answer_for_one_whose_end_alone_changed_and_says_so():
+    main = Main(edges=[*MAIN_EDGES, _flow("c1", "c2")])
+    draft = _first_draft_on(EdgeDraft())               # c2 changed to gold, c1 → c2 unchanged
+    asked = [SearchMembershipEdge(id="e:c1>c2", source="c1", target="c2")]
+    out = await _overlay(draft, main).deep_search_edge_membership(
+        SCOPE, list(EDGE_RULES.items()), asked, context=CONTEXT)
+    assert out["matches"] == {"to_gold": [], "streams": []}
+    assert out["notes"] == [draft_search.EDGE_MEMBERSHIP_ENDS.format(n=1)]
 
 
 async def test_membership_falls_back_to_main_when_the_draft_cant_be_read():
@@ -911,3 +982,147 @@ def test_what_cant_be_answered_on_the_drafts_values_is_said():
                                 set()) == draft_search.PLATFORM_FIELD
     assert draft_search.inexact(RULES["gold"], {"x"}, frozenset({"x"})) == \
         draft_search.NAMES_CHANGED
+    # A rule that styles relationships is counted on the published graph.
+    assert draft_search.inexact(EDGE_RULES["streams"], set()) == draft_search.RELATIONSHIP_COUNT
+
+
+# ---------------------------------------------------------------------------
+# The relationship catalog
+# ---------------------------------------------------------------------------
+
+#: Main's relationships with properties — one to an entity outside the view (x1, under no root).
+REL_NODES = MAIN + [{"urn": "x1", "entityType": "Table", "displayName": "outside"}]
+REL_EDGES = MAIN_EDGES[:-1] + [
+    {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 5}},
+    {**_edge("c2", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "owner": "kim"}},
+    {**_edge("c1", "x1", "FLOWS_TO"), "properties": {"mode": "zzz"}},
+]
+
+
+def _rel_stats(nodes, edges, scope) -> CatalogStats:
+    """The relationship catalog of a graph, read whole: every relationship with both ends in
+    the scope, by type, its properties as stored."""
+    truth = StubDeepSearchProvider(nodes=nodes, edges=edges, lineage_edge_types=["FLOWS_TO"])
+    inside = {n["urn"] for n in truth._in_scope(scope)}
+    stats = CatalogStats()
+    for e in edges:
+        if e["source"] in inside and e["target"] in inside:
+            stats.add_entities(e["type"], 1)
+            stats.add_properties(e["type"], e.get("properties") or {}, frozenset())
+    return stats
+
+
+class RelMain(Main):
+    """Main holding ``REL_EDGES``: its relationship catalog, and its relationships read between
+    their ends as FalkorDB stores them — each user property in the JSON bag."""
+
+    def __init__(self):
+        super().__init__(nodes=REL_NODES, edges=REL_EDGES)
+        self.between: List[Any] = []
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False, subject="entities"):
+        assert subject == "relationships"
+        from backend.app.providers.falkordb_search.session import store_for
+        stats = _rel_stats(REL_NODES, REL_EDGES, scope)
+        session = Session(f"rcat-{uuid.uuid4().hex[:8]}", "catalog:relationships",
+                          context.data_version, None, 0, [], [], 1, scanned=1,
+                          count=sum(stats.entities.values()), status=COMPLETE)
+        await store_for(self).save(session, None, 600, accumulator=stats.to_json())
+        return answer_of(stats, session, context, subject="relationships")
+
+    async def relationships_between(self, pairs):
+        import json as _json
+        self.between.append(list(pairs))
+        out: Dict[Any, List[Any]] = {}
+        for e in REL_EDGES:
+            if (e["source"], e["target"]) in set(pairs):
+                out.setdefault((e["source"], e["target"]), []).append(
+                    (e["type"], {"id": e["id"], "gvHash": "h",
+                                 "properties": _json.dumps(e.get("properties") or {})}))
+        return out
+
+
+class RelDraft(Draft):
+    """A draft over ``REL_EDGES``: its patch set names each relationship it added, changed (with
+    where main holds it) or removed, and serves each one's value."""
+
+    def __init__(self):
+        super().__init__(REL_NODES, REL_EDGES)
+
+    def truth(self) -> StubDeepSearchProvider:
+        return StubDeepSearchProvider(nodes=list(self.nodes.values()),
+                                      edges=list(self.edges.values()),
+                                      lineage_edge_types=["FLOWS_TO"])
+
+    async def branch_overlay_delta(self, *, graph_id, branch_id):
+        delta = await super().branch_overlay_delta(graph_id=graph_id, branch_id=branch_id)
+        main_edges = {e["id"]: e for e in REL_EDGES}
+        delta["edgesUpsert"], delta["edgesRemove"] = [], []
+        for eid, e in self.edges.items():
+            held = main_edges.get(eid)
+            if held == e:
+                continue
+            row = {"id": eid, "sourceUrn": e["source"], "targetUrn": e["target"],
+                   "edgeType": e["type"], "lazy": True}
+            if held is not None:
+                row["was"] = {"sourceUrn": held["source"], "targetUrn": held["target"],
+                              "edgeType": held["type"]}
+            delta["edgesUpsert"].append(row)
+        for eid, e in main_edges.items():
+            if eid not in self.edges:
+                delta["edgesRemove"].append({"id": eid, "sourceUrn": e["source"],
+                                             "targetUrn": e["target"], "edgeType": e["type"]})
+        return delta
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node",
+                               as_of_seq=None):
+        if kind != "edge":
+            return await super().overlay_payloads(graph_id=graph_id, branch_id=branch_id,
+                                                  entity_ids=entity_ids, kind=kind)
+        return [{"id": eid, "sourceUrn": self.edges[eid]["source"],
+                 "targetUrn": self.edges[eid]["target"], "edgeType": self.edges[eid]["type"],
+                 "properties": self.edges[eid].get("properties") or {}}
+                for eid in entity_ids if eid in self.edges]
+
+
+def _rel_draft() -> RelDraft:
+    """A draft that changes one relationship, removes one, adds one — and changes the one to
+    the entity outside the view, which stays out."""
+    draft = RelDraft()
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "stream", "lag": 9}},
+        {**_edge("c3", "c1", "FLOWS_TO"), "properties": {"mode": "batch", "since": 2024}},
+        {**_edge("c1", "x1", "FLOWS_TO"), "properties": {"mode": "yyy"}},
+    ], drop_edges=[_edge("c2", "c3", "FLOWS_TO")])
+    return draft
+
+
+async def test_the_relationship_catalog_is_the_drafts():
+    draft, main = _rel_draft(), RelMain()
+    out = await _overlay(draft, main).deep_search_catalog(SCOPE, context=CONTEXT, wait_ms=2000,
+                                                         subject="relationships")
+    truth = _rel_stats(list(draft.nodes.values()), list(draft.edges.values()), SCOPE)
+    want = answer_of(truth, Session("t", "t", "1", None, 0, [], [], 1, status=COMPLETE,
+                                    count=sum(truth.entities.values())),
+                     CONTEXT, subject="relationships")
+    assert out["status"] == "complete" and out["subject"] == "relationships"
+    assert out["entities"] == want["entities"]
+    assert out["entityTypes"] == want["entityTypes"]
+    got = {p["key"]: p for p in out["properties"]}
+    assert set(got) == {p["key"] for p in want["properties"]} == {"mode", "lag", "since"}
+    for p in want["properties"]:
+        for field in ("count", "byEntityType", "kinds", "distinct", "values"):
+            assert got[p["key"]][field] == p[field], (p["key"], field)
+    # "owner" went with the removed relationship; "zzz" and "yyy" are outside the view.
+    assert {v["value"] for v in got["mode"]["values"]} == {"stream", "batch"}
+    # Main's side was read between each relationship's ends, never by its id.
+    assert main.between and all(isinstance(p, tuple) for part in main.between for p in part)
+
+
+async def test_a_relationship_catalog_of_a_draft_too_large_is_mains_said_so(monkeypatch):
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 1)
+    out = await _overlay(_rel_draft(), RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    assert draft_search.TOO_LARGE_RELATIONSHIP_CATALOG.format(n=1) in out["notes"]
+    assert {p["key"] for p in out["properties"]} == {"mode", "lag", "owner"}

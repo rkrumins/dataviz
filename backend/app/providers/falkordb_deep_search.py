@@ -2931,6 +2931,35 @@ def _accumulate_tag_values(raw: Any, into: Dict[str, int]) -> None:
         into[stripped] = into.get(stripped, 0) + 1
 
 
+async def _sample_edges_per_type(provider, cap: int, timeout_s: float) -> List[List[Any]]:
+    """``[type, r]`` rows: up to ``cap`` edges, shared between the graph's
+    relationship types — each type its own sample, so one with millions of
+    edges (containment, rollups) never leaves another unseen."""
+    res = await provider._ro_query("CALL db.relationshipTypes() YIELD relationshipType "
+                                   "RETURN relationshipType", timeout=timeout_s)
+    types = sorted({str(r[0]) for r in res.result_set or [] if r and r[0]})
+    if not types:
+        return []
+    per_type = max(_EDGE_SAMPLE_FLOOR, cap // len(types))
+    gate = asyncio.Semaphore(_EDGE_SAMPLE_PARALLEL)
+
+    async def sample(edge_type: str) -> List[List[Any]]:
+        async with gate:
+            out = await provider._ro_query(
+                f"MATCH ()-[r:{_sanitize_label(edge_type)}]->() WITH r LIMIT $lim "
+                "RETURN type(r) AS edgeType, r",
+                params={"lim": per_type}, timeout=timeout_s)
+            return out.result_set or []
+
+    return [row for rows in await asyncio.gather(*(sample(t) for t in types)) for row in rows]
+
+
+#: Edges each relationship type's sample reads at the least, however many types share the cap.
+_EDGE_SAMPLE_FLOOR = 50
+#: Types sampled at once.
+_EDGE_SAMPLE_PARALLEL = 8
+
+
 async def _discover_edge_metadata(
     provider, *, timeout_s: float = 5.0,
 ) -> Dict[str, Dict[str, Any]]:
@@ -2946,16 +2975,11 @@ async def _discover_edge_metadata(
     """
     _s = get_deep_search_settings()
     try:
-        res = await provider._ro_query(
-            "MATCH ()-[r]->() WITH r LIMIT $lim RETURN type(r) AS edgeType, r",
-            params={"lim": _s.discover_edge_sample_cap},
-            timeout=timeout_s,
-        )
+        rows = await _sample_edges_per_type(provider, _s.discover_edge_sample_cap, timeout_s)
     except Exception as exc:
         logger.warning("discover: edge sampling failed: %s", exc)
         return {}
 
-    rows = res.result_set or []
     per_type: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         if not row or len(row) < 2:
@@ -3021,9 +3045,13 @@ def _edge_user_properties(raw: Any) -> Dict[str, Any]:
 
 def _edge_properties(native: Any) -> Dict[str, Any]:
     """An edge's properties as a reader sees them: a user's, parsed from
-    its JSON, beside the platform's own fields."""
+    its JSON, beside the platform's own fields. A name both hold: the JSON's
+    value, as every reader takes it (``falkordb_provider.edge_user_properties``)
+    — but the edge's own id, confidence and hash are always the platform's."""
     props = dict(native or {})
-    return {**_edge_user_properties(props.pop("properties", None)), **props}
+    bag = _edge_user_properties(props.pop("properties", None))
+    envelope = {k: props.pop(k) for k in ("id", "confidence", "gvHash") if k in props}
+    return {**props, **bag, **envelope}
 
 
 # ---------------------------------------------------------------------------

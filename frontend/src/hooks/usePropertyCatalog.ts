@@ -1,6 +1,8 @@
 /**
  * usePropertyCatalog — the view's exact property catalog, read as the
- * Properties tab opens and followed to the end (``services/propertyCatalog``).
+ * Properties tab opens and followed to the end (``services/propertyCatalog``):
+ * its entities' properties, or — ``subject`` ``relationships`` — those of the
+ * relationships between them, each kept and read apart from the other.
  *
  * While a read runs, ``catalog`` is what it has found so far and
  * ``reading`` how far it has got. A refresh keeps showing the last complete
@@ -20,7 +22,7 @@ import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { followCatalog } from '@/services/propertyCatalog'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { useBranchStore } from '@/store/branchStore'
-import type { SearchCatalogResult } from '@/types/search'
+import type { CatalogSubject, SearchCatalogResult } from '@/types/search'
 
 
 export interface PropertyCatalogState {
@@ -37,7 +39,7 @@ export interface PropertyCatalogState {
 }
 
 
-/** The last complete catalog, per provider and view (and the draft open: a
+/** The last complete catalog, per provider, subject and view (and the draft open: a
  *  draft's catalog is its own, never Published's). */
 const lastComplete = new WeakMap<object, Map<string, SearchCatalogResult>>()
 
@@ -62,14 +64,14 @@ interface SharedRead {
     last: CatalogEvent | null
 }
 
-/** The reads under way, per provider and key (the view, the draft and how far it has got, and a
- *  refresh asked for). */
+/** The reads under way, per provider and key (the subject, the view, the draft and how far it has
+ *  got, and a refresh asked for). */
 const reads = new WeakMap<object, Map<string, SharedRead>>()
 
 /** Follow the catalog `key` names with `reader`, sharing a read already under way for it. Returns
  *  how to leave it: the last reader to leave stops the read. */
-function joinRead(provider: RemoteGraphProvider, viewId: string, key: string, refresh: boolean,
-                  reader: (event: CatalogEvent) => void): () => void {
+function joinRead(provider: RemoteGraphProvider, viewId: string, subject: CatalogSubject, key: string,
+                  refresh: boolean, reader: (event: CatalogEvent) => void): () => void {
     let byKey = reads.get(provider)
     if (!byKey) reads.set(provider, (byKey = new Map()))
     const under = byKey
@@ -83,6 +85,7 @@ function joinRead(provider: RemoteGraphProvider, viewId: string, key: string, re
         }
         followCatalog(provider, viewId, {
             signal: started.controller.signal,
+            subject,
             refresh,
             onUpdate: (answer) => tell({ answer }),
         }).catch((error: unknown) => tell({ error }))
@@ -109,14 +112,14 @@ interface ViewState {
 }
 
 
-export function usePropertyCatalog(viewId: string): PropertyCatalogState {
+export function usePropertyCatalog(viewId: string, subject: CatalogSubject = 'entities'): PropertyCatalogState {
     const provider = useGraphProvider()
     // On a draft the server's catalog is the draft's, so it is read again as
     // the draft changes — a bulk change window by window — showing the last
     // complete one until the new one is.
     const draftKey = useDraftDataKey()
     const branchId = useBranchStore((s) => s.currentBranchId) ?? ''
-    const kept = `${branchId}|${viewId}`
+    const kept = `${subject}|${branchId}|${viewId}`
     const [held, setHeld] = useState<ViewState | null>(null)
     // A refresh belongs to the view it was asked for — and to the read it
     // started: one the draft moving on starts reads what the server has.
@@ -133,7 +136,7 @@ export function usePropertyCatalog(viewId: string): PropertyCatalogState {
             s && s.viewId === kept ? s : fresh(provider, kept)))
         // A refresh is a read of its own; any other is shared with every reader of this view.
         const key = `${kept}|${draftKey}|${refresh ? `refresh:${refreshOf.n}` : ''}`
-        return joinRead(provider, viewId, key, refresh, (event) => {
+        return joinRead(provider, viewId, subject, key, refresh, (event) => {
             if ('answer' in event) {
                 const { answer } = event
                 if (answer.status === 'complete') remember(provider, kept, answer)
@@ -147,7 +150,7 @@ export function usePropertyCatalog(viewId: string): PropertyCatalogState {
             update((s) => ({ ...s, running: null, refused,
                              error: refused ? null : (event.error as Error).message }))
         })
-        // ``kept`` is the view and the branch; ``draftKey`` how far the draft has got.
+        // ``kept`` is the subject, the view and the branch; ``draftKey`` how far the draft has got.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [provider, kept, draftKey, refreshOf])
 

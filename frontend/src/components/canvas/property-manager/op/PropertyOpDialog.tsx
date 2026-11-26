@@ -4,8 +4,10 @@
  * (which entities) → **Review** (counted exactly, with anything that would stop it, and an optional
  * reason kept with it), then applied to the draft by a job on the server: every entity the target
  * reaches, however many — not only the ones loaded on the canvas. Relationships the same way: named
- * ones, or every one a Connections search matches (an edge target, `isEdgeTarget`) — a clean-up of
- * them previewing the values read from those it reaches (`useRelationshipValues`).
+ * ones, every one a Connections search matches, or the view's (an edge target, `isEdgeTarget`) — their
+ * properties named, counted and previewed from the view's relationship catalog; where none can be
+ * read, from the keys discovery samples and the values read from those it reaches
+ * (`useRelationshipValues`).
  *
  * It is applied only once Review's count is final. A removal, a rename or an overwrite of many
  * entities (or across the whole data source) asks for the property's name to be typed first — of
@@ -89,8 +91,12 @@ export function PropertyOpDialog({
   const [chosen, setChosen] = useState<TargetPreset | null>(() => seed.target ?? null)
   const [scopeMode, setScopeMode] = useState<ScopeMode>(() => (seed.target?.kind === 'search' || seed.target?.kind === 'connections' ? seed.target.scopeMode : seed.scopeMode ?? 'view'))
   const [sourceConfirmed, setSourceConfirmed] = useState(false)
-  // Relationships, not entities (`EdgeWhatStep`): only ever the target it was opened with.
+  // Relationships, not entities: only ever the kind of target it was opened with.
   const edges = !!chosen && isEdgeTarget(chosen)
+  // Their properties, from the view's relationship catalog — counted, every value at hand — or, where
+  // none can be read (a provider without one), the keys discovery samples, uncounted.
+  const relationshipCatalog = usePropertyCatalog(edges ? viewId : '', 'relationships')
+  const uncatalogued = relationshipCatalog.unavailable || (!relationshipCatalog.catalog && !!relationshipCatalog.error)
   // A change whose What is already whole (Remove from a row) opens on Where; a clean-up opens on
   // What, where its before → after is shown.
   const [step, setStep] = useState(() => (isCleanup(op.kind) || opProblem(op, !!seed.target && isEdgeTarget(seed.target)) ? 0 : 1))
@@ -99,15 +105,18 @@ export function PropertyOpDialog({
   const go = (to: number) => { setDir(to < step ? -1 : 1); setStep(to) }
   const [reason, setReason] = useState('')
   const cleanup = isCleanup(op.kind)
-  // The keys the view's relationships carry, for a change of relationships.
-  const { keysByEdgeType } = useDiscovery(edges ? viewId : null)
-  const edgeProperties = useMemo(() => edgePropertiesOf(keysByEdgeType), [keysByEdgeType])
+  const { keysByEdgeType } = useDiscovery(edges && uncatalogued ? viewId : null)
+  const edgeProperties = useMemo(
+    () => (uncatalogued ? edgePropertiesOf(keysByEdgeType) : relationshipCatalog.catalog?.properties ?? []),
+    [uncatalogued, keysByEdgeType, relationshipCatalog.catalog])
   // "Add a property" gives a value to a property nothing in the view holds yet, or to one not named
   // yet from Property Manager's New. Opened on chosen entities (a container's children, a layer, a
   // selection), a property not named yet reads as a change of them, as the menu that opened it
   // said. Until the catalog answers, a named property counts as held.
   const key = op.key.trim()
-  const held = !!key && (edges ? edgeProperties.some((p) => p.key === key) : !catalog || properties.some((p) => p.key === key))
+  const held = !!key && (edges
+    ? (!uncatalogued && !relationshipCatalog.catalog) || edgeProperties.some((p) => p.key === key)
+    : !catalog || properties.some((p) => p.key === key))
   // Unless one is chosen, a change reaches every entity in the view when nothing holds its property
   // yet — the catalog read to the end, and no change on this draft still adding it — and otherwise
   // every entity with it. A target that names the property follows it as it is renamed on What.
@@ -115,9 +124,10 @@ export function PropertyOpDialog({
     .some((t) => !jobEnded(t) && t.entityKind !== 'edge' && writesKey(t.op, key))
   const nothingHolds = !key || (catalog?.status === 'complete' && !properties.some((p) => p.key === key) && !adding)
   const preset: TargetPreset = chosen?.kind === 'hasKey' ? { kind: 'hasKey', key }
-    : chosen ?? (nothingHolds ? { kind: 'view' } : { kind: 'hasKey', key })
+    : chosen?.kind === 'relationshipsWithKey' ? { kind: 'relationshipsWithKey', key }
+      : chosen ?? (nothingHolds ? { kind: 'view' } : { kind: 'hasKey', key })
   const title = cleanup ? 'Clean up a property'
-    : needsValue(op.kind) && (key ? !held : !seed.target) ? 'Add a property' : 'Change a property'
+    : needsValue(op.kind) && (key ? !held : !seed.target || seed.target.kind === 'viewRelationships') ? 'Add a property' : 'Change a property'
   // Opened with its property named (a fill from a refused publish, a catalog row): What focuses
   // what is still to give. And the target it was opened with, said on What when it has a name.
   const keySeeded = !!(seed.op?.key ?? seed.key)
@@ -130,8 +140,8 @@ export function PropertyOpDialog({
   const target = targetOf(preset, viewId, scopeMode)
   const predicate = predicateOf(preset)
   const effectiveScope: ScopeMode = scopeFixedToView(preset) ? 'view' : scopeMode
-  // A clean-up of relationships previews the values read from those it reaches: no catalog counts them.
-  const relationshipValues = useRelationshipValues(graphWrite, edges && cleanup && step === 0 && !nameProblem(key, true) ? target : null, key)
+  // A clean-up of relationships no catalog counts previews the values read from those it reaches.
+  const relationshipValues = useRelationshipValues(graphWrite, edges && uncatalogued && cleanup && step === 0 && !nameProblem(key, true) ? target : null, key)
   const edgeWhatProperties = useMemo(() => withRead(edgeProperties, relationshipValues.property), [edgeProperties, relationshipValues.property])
   const whatProblem = opProblem(op, edges)
   const whereProblem = !target
@@ -191,9 +201,10 @@ export function PropertyOpDialog({
       target: counts.counts.get('target')?.count, haveKey: counts.counts.get('haveKey')?.count, haveTo: counts.counts.get('haveTo')?.count,
       match: counts.counts.get('match')?.count,
     } : null
-  // A convert's bound, from how the view's entities store the property (the target is in the view) —
-  // never theirs for relationships, which the view's catalog doesn't count.
-  const kinds = effectiveScope === 'view' && !edges ? properties.find((p) => p.key === op.key.trim())?.kinds : null
+  // A convert's bound, from how the view's entities — or its relationships — store the property (the
+  // target is in the view); none where no catalog counts them.
+  const kinds = effectiveScope === 'view' && !(edges && uncatalogued)
+    ? (edges ? edgeProperties : properties).find((p) => p.key === op.key.trim())?.kinds : null
   const impact = tally && tally.target !== undefined ? impactOf(op, tally, kinds) : null
   // Counted to the end (or, where nothing can count it, never to be); `exact` when it is also the
   // draft's own count, not Published's or a floor.
@@ -381,7 +392,9 @@ export function PropertyOpDialog({
               <AnimatePresence mode="popLayout" initial={false} custom={dir}>
                 <StepPane key={step} step={step} dir={dir}>
                   {step === 0 && (edges
-                    ? <WhatStep op={op} onChange={setOp} properties={edgeWhatProperties} viewId={viewId} edges relationshipValues={relationshipValues} />
+                    ? (uncatalogued
+                      ? <WhatStep op={op} onChange={setOp} properties={edgeWhatProperties} viewId={viewId} edges relationshipValues={relationshipValues} />
+                      : <WhatStep op={op} onChange={setOp} properties={edgeProperties} viewId={viewId} edges counted keySeeded={keySeeded} />)
                     : <WhatStep op={op} onChange={setOp} properties={properties} viewId={viewId}
                       entityTypes={entityTypesOf(preset) ?? knownEntityTypes} keySeeded={keySeeded} />)}
                   {step === 1 && (
@@ -470,8 +483,9 @@ function focusables(root: HTMLElement): HTMLElement[] {
     .filter((el) => el.tabIndex >= 0 && !el.closest('[inert]'))
 }
 
-/** The keys the view's relationships carry, as the What step names a property from — the ones most
- *  relationship types carry first (`count`: how many types do). An edge's own fields are not offered. */
+/** The keys the view's relationships carry, as discovery samples them, where no catalog counts them —
+ *  the ones most relationship types carry first (`count`: how many types do). An edge's own fields are
+ *  not offered. */
 function edgePropertiesOf(keysByEdgeType: Record<string, string[]>): SearchCatalogProperty[] {
   const types = new Map<string, number>()
   for (const keys of Object.values(keysByEdgeType)) {

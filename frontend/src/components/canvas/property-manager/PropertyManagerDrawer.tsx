@@ -5,7 +5,8 @@
  *   • Properties tab — browse every property key / value / tag in use
  *     across the view (sourced from Advanced-Search discovery), with a
  *     one-click handoff to create a rule from any of them, and change any
- *     of them in bulk on the draft.
+ *     of them in bulk on the draft. An Entities | Relationships switch
+ *     lists the properties of the relationships between them instead.
  *   • Display rules tab — CRUD the view's rules; each tags its matched
  *     entities with a colored chip on the canvas. Every change is saved to
  *     the view's library as it is made (on a draft, to the draft's own
@@ -19,12 +20,13 @@
  * opens, within the details panel's bounds.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { Download, Loader2, RefreshCw, SlidersHorizontal, Tags, Layers, Upload, X } from 'lucide-react'
+import { Boxes, Download, Loader2, RefreshCw, SlidersHorizontal, Tags, Layers, Upload, Waypoints, X } from 'lucide-react'
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { Segmented } from '@/components/ui/Segmented'
 import { ResizeHandle } from '@/components/canvas/search/panel/ResizeHandle'
 import { useHostRect } from '@/components/canvas/search/studio/useHostRect'
 import { CANVAS_MIN_WIDTH, DRAWER_MAX_WIDTH, DRAWER_MIN_WIDTH } from '@/components/panels/shell/drawerWidth'
@@ -33,12 +35,13 @@ import { exportViewLibrary, type LibraryImportResult } from '@/services/viewLibr
 import { useDisplayRules } from '@/store/referenceModelStore'
 import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { DisplayRuleConfig } from '@/types/schema'
-import type { Predicate } from '@/types/search'
+import type { CatalogSubject, Predicate } from '@/types/search'
 
 import { DisplayRuleEditor } from './DisplayRuleEditor'
 import { DisplayRuleList } from './DisplayRuleList'
 import { LibraryImportDialog } from './LibraryImportDialog'
 import { PropertyBrowser } from './PropertyBrowser'
+import { SelectedRelationshipsEntry } from './SelectedRelationshipsEntry'
 import { saveLibraryFile } from './libraryFile'
 import { MOTION } from '@/lib/motion'
 
@@ -60,6 +63,11 @@ export interface PropertyManagerDrawerProps {
 
 type Tab = 'properties' | 'rules'
 
+const SUBJECTS = [
+    { value: 'entities', label: 'Entities', icon: Boxes },
+    { value: 'relationships', label: 'Relationships', icon: Waypoints },
+] as const
+
 /** Its width until the reader drags its edge: a step wider than the details
  *  panel, so a property's name, coverage and values have room. */
 const DEFAULT_WIDTH = 'clamp(440px, 34vw, 640px)'
@@ -76,6 +84,8 @@ export function PropertyManagerDrawer({
     viewId, open, onClose, knownEntityTypes = [], knownLayers = [], onSearchPredicate,
 }: PropertyManagerDrawerProps) {
     const [tab, setTab] = useState<Tab>('rules')
+    // Whose properties the Properties tab lists: the view's entities, or the relationships between them.
+    const [subject, setSubject] = useState<CatalogSubject>('entities')
     const [editor, setEditor] = useState<EditorState>({ mode: 'closed' })
 
     const [importOpen, setImportOpen] = useState(false)
@@ -124,7 +134,8 @@ export function PropertyManagerDrawer({
         // Premium feedback: confirm the rule applied. The engine recomputes
         // the match set asynchronously; the notification reassures the user the
         // tag is now live on the canvas.
-        notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
+        notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — ${rule.target === 'relationships'
+            ? 'styling matched relationships' : 'tagging matched entities'}`)
     }
 
     /** Reveal a rule's matches by running its criteria as a search: the
@@ -201,7 +212,7 @@ export function PropertyManagerDrawer({
                                             Property Manager
                                         </h2>
                                         <p className="text-[10px] text-ink-muted/80">
-                                            Browse · change in bulk · tag matched entities
+                                            Browse · change in bulk · tag and style what matches
                                         </p>
                                     </div>
                                 </div>
@@ -230,6 +241,16 @@ export function PropertyManagerDrawer({
                                     label="Properties"
                                 />
                             </div>
+                            {tab === 'properties' && (
+                                <Segmented<CatalogSubject>
+                                    label="Whose properties"
+                                    size="md"
+                                    value={subject}
+                                    onChange={setSubject}
+                                    options={SUBJECTS}
+                                    className="mt-2.5 w-full [&>button]:flex-1 [&>button]:justify-center"
+                                />
+                            )}
                         </div>
 
                         {/* Body — animated list ⇄ editor transition.
@@ -239,9 +260,12 @@ export function PropertyManagerDrawer({
                             shell and clips — the Properties tab "won't scroll"
                             bug). */}
                         <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4">
+                            {tab === 'properties' && <SelectedRelationshipsEntry />}
                             {tab === 'properties' && (
                                 <PropertyBrowser
+                                    key={subject}
                                     viewId={viewId}
+                                    subject={subject}
                                     onCreateRuleFromPredicate={handleCreateFromPredicate}
                                     onSearchPredicate={onSearchPredicate}
                                 />

@@ -27,6 +27,13 @@ describe('reusableChangeTargetOf', () => {
     expect(reusableChangeTargetOf({ kind: 'custom', predicate: pii }, 'data_source')).toEqual({ target: { kind: 'custom', predicate: pii, scopeMode: 'data_source' } })
     expect(reusableChangeTargetOf({ kind: 'connections', predicate: flows, scopeMode: 'view', label: 'x' }, 'view'))
       .toEqual({ target: { kind: 'connections', predicate: flows, scopeMode: 'view' } })
+    // The view's relationships, or those holding a key: kept as the Connections search they are.
+    expect(reusableChangeTargetOf({ kind: 'relationshipsWithKey', key: 'sla' }, 'data_source')).toEqual({ target: {
+      kind: 'connections', scopeMode: 'data_source',
+      predicate: { kind: 'edges', edgeClass: 'any', edgePredicate: { kind: 'edgeHasProperty', key: 'sla', negate: false } },
+    } })
+    expect(reusableChangeTargetOf({ kind: 'viewRelationships' }, 'view'))
+      .toEqual({ target: { kind: 'connections', predicate: { kind: 'edges', edgeClass: 'any' }, scopeMode: 'view' } })
   })
 
   it('says why entities picked by id can’t be kept', () => {

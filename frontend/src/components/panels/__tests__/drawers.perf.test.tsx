@@ -63,6 +63,7 @@ vi.mock('@/hooks/useViewSchema', () => ({
   useViewRelationshipTypes: () => [],
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
+vi.mock('@/hooks/useOntologyDefinition', () => ({ useOntologyDefinition: () => ({ ontology: null, isLoading: false }) }))
 
 import { EntityDrawer } from '../entity/EntityDrawer'
 import { RelationshipDrawer } from '../RelationshipDrawer'

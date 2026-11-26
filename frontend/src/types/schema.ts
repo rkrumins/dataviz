@@ -508,12 +508,20 @@ export interface DisplayRuleConfig {
   /** How the rule paints what it matches, besides its chip. Absent: the chip
    *  alone, as every rule did before styles. */
   style?: DisplayRuleStyle;
+  /** What the rule applies to. Absent: entities, as every rule did before
+   *  relationship rules. `relationships`: its predicate is a Connections
+   *  search, and it styles the lines of the relationships it matches. */
+  target?: DisplayRuleTarget;
 }
 
+export type DisplayRuleTarget = 'entities' | 'relationships';
+
 /**
- * A display rule's look on the entities it matches. Chips stack — every
- * matching rule adds its own — but a card has one tint and one frame: where
- * two rules paint the same card, the one first in the view's list wins.
+ * A display rule's look on what it matches. Chips stack — every matching
+ * rule adds its own — but a card has one tint and one frame, and a line one
+ * colour, dash and width: where two rules paint the same card or line, the
+ * one first in the view's list wins. `fill` and `frame` paint an entity's
+ * card; `dash` and `width` a relationship's line, drawn in the rule's colour.
  */
 export interface DisplayRuleStyle {
   /** Show the rule's tag chip. Absent: shown. */
@@ -522,6 +530,10 @@ export interface DisplayRuleStyle {
   fill?: boolean;
   /** Draw a frame round the card, in the rule's colour. */
   frame?: 'solid' | 'dashed';
+  /** Draw the line dashed or dotted. Absent: solid. */
+  dash?: 'solid' | 'dashed' | 'dotted';
+  /** The line's width, in pixels (1–6). Absent: 2.5. */
+  width?: number;
 }
 
 export interface LogicalNodeConfig {

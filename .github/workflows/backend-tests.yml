@@ -160,6 +160,7 @@ jobs:
             tests/integration/test_raw_properties_live.py \
             tests/integration/test_search_export_live.py \
             tests/integration/test_search_reply_cap_live.py \
+            tests/integration/test_relationship_catalog_live.py \
             tests/integration/test_relational_shapes_live.py \
             tests/integration/test_search_refs_live.py \
             tests/integration/test_search_relations_live.py \
@@ -183,6 +184,18 @@ jobs:
           FALKORDB_PORT: "6379"
         run: |
           python -m pytest tests/integration/test_hub_lookups_live.py -q -s
+      # The property catalogs at scale: about a million relationships across several types, one
+      # entity a hub with half a million, read exactly; each statement timed beside the entity
+      # catalog's. Its report is the CATALOG_SCALE_REPORT line in this step's log.
+      - name: Property catalogs at scale
+        if: ${{ !cancelled() }}
+        working-directory: backend
+        env:
+          RUN_FALKOR_LIVE: "1"
+          FALKORDB_HOST: localhost
+          FALKORDB_PORT: "6379"
+        run: |
+          python -m pytest tests/integration/test_catalog_scale_live.py -q -s
       # A spike: what GRAPH.COPY on this engine does — whole, one version, the source serving
       # meanwhile — and what it costs (time, memory, stalls, a node without room), for building a
       # graph's next version beside its key (New-version builds). Last: it lowers maxmemory for a

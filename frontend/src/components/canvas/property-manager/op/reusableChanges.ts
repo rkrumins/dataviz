@@ -9,7 +9,7 @@
  */
 import type { ReusableChange, ReusableChangeTarget } from '@/services/viewLibraryService'
 import type { OpRequest } from '@/store/propertyJobsStore'
-import { searchPreset, type ScopeMode, type TargetPreset } from './opModel'
+import { predicateOf, searchPreset, type ScopeMode, type TargetPreset } from './opModel'
 
 /** The target a reusable change keeps for `preset`, searched in `scopeMode` — or why it can't keep one. */
 export function reusableChangeTargetOf(preset: TargetPreset, scopeMode: ScopeMode): { target: ReusableChangeTarget } | { reason: string } {
@@ -19,6 +19,9 @@ export function reusableChangeTargetOf(preset: TargetPreset, scopeMode: ScopeMod
     case 'layer': return { target: { kind: 'layer', layerName: preset.name, scopeMode: 'view' } }
     case 'search': return { target: { kind: 'search', predicate: preset.predicate, scopeMode } }
     case 'connections': return { target: { kind: 'connections', predicate: preset.predicate, scopeMode } }
+    // The view's relationships, or those holding a key: the Connections search they are.
+    case 'viewRelationships':
+    case 'relationshipsWithKey': return { target: { kind: 'connections', predicate: predicateOf(preset)!, scopeMode } }
     case 'custom': return preset.predicate
       ? { target: { kind: 'custom', predicate: preset.predicate, scopeMode } }
       : { reason: 'Add a condition first' }

@@ -106,6 +106,100 @@ async def test_a_style_the_canvas_cannot_draw_is_refused(test_client: AsyncClien
     assert resp.status_code == 422
 
 
+def _relationship_rule(rule_id: str, name: str, **over) -> dict:
+    return _rule(rule_id, name, **{"target": "relationships", "predicate": {
+        "kind": "group", "op": "and", "children": [{
+            "kind": "edges", "edgeTypes": ["FEEDS"],
+            "edgePredicate": {"kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}}]},
+        **over})
+
+
+async def test_a_rule_applies_to_entities_and_is_stored_as_it_always_was(test_client: AsyncClient):
+    """A rule applies to entities unless it says otherwise, and one that does is stored, read
+    and exported without saying so — every rule saved before relationship rules is unchanged."""
+    view_id = await _view(test_client)
+    base = f"/api/v1/views/{view_id}/library/rules"
+    await test_client.put(f"{base}/r1", json=_rule("r1", "PII"))
+    resp = await test_client.put(f"{base}/r2", json=_rule("r2", "Owned", target="entities"))
+    assert resp.status_code == 200, resp.text
+    assert all("target" not in r for r in resp.json())
+    stored = (await test_client.get(f"/api/v1/views/{view_id}")).json()
+    assert [set(r) for r in stored["config"]["layout"]["referenceLayout"]["displayRules"]] == \
+        [{"id", "name", "color", "enabled", "predicate", "createdAt"}] * 2
+    assert all("target" not in r for r in (await test_client.get(
+        f"/api/v1/views/{view_id}/library/export")).json()["displayRules"])
+
+
+async def test_a_rule_applied_to_relationships_keeps_how_it_draws_their_lines(test_client: AsyncClient):
+    view_id = await _view(test_client)
+    style = {"chip": False, "dash": "dotted", "width": 4}
+    resp = await test_client.put(f"/api/v1/views/{view_id}/library/rules/r1",
+                                 json=_relationship_rule("r1", "Streams", style=style))
+    assert resp.status_code == 200, resp.text
+    [rule] = (await _library(test_client, view_id))["displayRules"]
+    assert (rule["target"], rule["style"], rule.get("invalid")) == ("relationships", style, None)
+
+
+async def test_a_rule_is_a_connections_search_exactly_when_it_applies_to_relationships(
+        test_client: AsyncClient):
+    view_id = await _view(test_client)
+    base = f"/api/v1/views/{view_id}/library/rules"
+    connections = _relationship_rule("x", "x")["predicate"]
+    for rule, why in [
+        (_rule("a", "Entities", predicate=connections), "A display rule tags entities"),
+        (_rule("b", "Lines", target="relationships"), "is a Connections search"),
+        (_relationship_rule("c", "Far", predicate={"kind": "edges", "targetWhere": {
+            "kind": "related", "axis": "downstream", "maxHops": 2}}), "one hop"),
+        (_relationship_rule("d", "Regex", predicate={"kind": "edges", "sourceWhere": {
+            "kind": "text", "value": "^ord", "match": "regex"}}), "regex"),
+        (_relationship_rule("e", "Tinted", style={"fill": True}), "a dash and a width"),
+        (_rule("f", "Dashed", style={"dash": "dashed"}), "a fill and a frame"),
+        (_relationship_rule("g", "Wide", style={"width": 20}), "width"),
+    ]:
+        resp = await test_client.put(f"{base}/{rule['id']}", json=rule)
+        assert resp.status_code == 422, rule["id"]
+        assert why in str(resp.json()["detail"]), (rule["id"], resp.json()["detail"])
+    assert (await _library(test_client, view_id))["displayRules"] == []
+
+
+async def test_a_stored_connections_rule_that_doesnt_say_it_styles_relationships_is_flagged(
+        test_client: AsyncClient):
+    connections = _relationship_rule("x", "x")["predicate"]
+    view_id = await _view(test_client, config={"layout": {"type": "reference", "referenceLayout": {
+        "displayRules": [_relationship_rule("ok", "Lines"), _rule("old", "Old", predicate=connections)]}}})
+    rules = (await _library(test_client, view_id))["displayRules"]
+    assert [r["id"] for r in rules if r.get("invalid")] == ["old"]
+
+
+async def test_relationship_rules_travel_in_a_pack_warning_of_types_the_ontology_lacks(
+        test_client: AsyncClient, monkeypatch):
+    source = await _view(test_client, "Source")
+    style = {"chip": True, "dash": "dashed", "width": 2}
+    await test_client.put(f"/api/v1/views/{source}/library/rules/r1",
+                          json=_relationship_rule("r1", "Streams", style=style))
+    await test_client.put(f"/api/v1/views/{source}/library/rules/r2", json=_rule("r2", "PII"))
+    pack = (await test_client.get(f"/api/v1/views/{source}/library/export")).json()
+    assert [r.get("target") for r in pack["displayRules"]] == ["relationships", None]
+
+    target = await _view(test_client, "Target")
+    url = f"/api/v1/views/{target}/library/import"
+    # An ontology that defines no relationship types warns of none.
+    assert [i["warnings"] for i in (await test_client.post(url, json=pack)).json()["items"]] == [[], []]
+
+    async def ontology(session, view):
+        return frozenset({"produces"})
+
+    monkeypatch.setattr(view_library, "_view_relationship_types", ontology)
+    items = (await test_client.post(url, json=pack)).json()["items"]
+    assert items[0]["warnings"] == ["Refers to relationship types this view's ontology doesn't have: FEEDS"]
+    assert items[1]["warnings"] == []
+    done = (await test_client.post(url, params={"dryRun": "false"}, json=pack)).json()
+    [lines, pii] = done["library"]["displayRules"]
+    assert (lines["target"], lines["style"], lines["predicate"]) == (
+        "relationships", style, pack["displayRules"][0]["predicate"])
+    assert "target" not in pii
+
+
 async def test_the_path_names_the_rule(test_client: AsyncClient):
     view_id = await _view(test_client)
     resp = await test_client.put(f"/api/v1/views/{view_id}/library/rules/r9", json=_rule("other", "PII"))

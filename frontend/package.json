@@ -27,6 +27,7 @@
     "harness:digest": "node scripts/digest-shot.mjs",
     "harness:scale": "node scripts/scale-shot.mjs",
     "harness:conversations": "node scripts/conversations-shot.mjs",
+    "harness:property-manager": "node scripts/property-manager-shot.mjs",
     "probe:drawer": "node scripts/app-probe-drawer.mjs",
     "probe:fold": "node scripts/app-probe-fold.mjs",
     "probe:ghosts": "node scripts/app-probe-ghosts.mjs"

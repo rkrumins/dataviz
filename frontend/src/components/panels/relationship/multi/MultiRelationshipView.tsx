@@ -8,13 +8,15 @@
  *   row shows every value and which relationships hold it — read in one request, as main or the
  *   open draft has them (`useRelationshipRecords`), never the canvas copy (lines carry no
  *   properties).
- * - **Who is compared.** Authored lineage relationships, as they are stored. Roll-ups, hierarchy
- *   links, relationships not saved yet, deleted in the draft or with a deletion staged are left out,
- *   each listed with why. Each is named by its ends ("Orders → Revenue"); a list opened on them
- *   adds each one's ID beneath.
+ * - **Who is compared.** Relationships of every kind — lineage, hierarchy links, associations — as
+ *   they are stored. Roll-ups (the aggregation job's), relationships not saved yet, deleted in the
+ *   draft or with a deletion staged are left out, each listed with why. Each is named by its ends
+ *   ("Orders → Revenue"); a list opened on them adds each one's ID beneath.
  * - **Editing**, in a draft: set a value for all, fill where missing, rename, copy, remove, add a
  *   property to all — pending until "Stage", then staged as each relationship's own edit in one
  *   step that Undo takes back (`stageEdgeEdits`). Unstaged changes hold every move of the drawer.
+ *   A field their type keeps unique is not given one value for several of that type; adding a
+ *   property offers the names others of their types carry, with a value they hold.
  *   Outside a draft, "Edit in a draft" sits in the top line; a note says why they can't be edited
  *   here only when its tip can't.
  * - **Scale.** Up to `MULTI_RELATIONSHIP_MAX` relationships are compared here; more — or any
@@ -53,14 +55,13 @@ import type { GovernedRule } from '../../entity/multi/ComparisonRow'
 import { MemberList, type Member } from '../../entity/multi/ValueBreakdown'
 import { Notice, TypeChip } from '../RelationshipParts'
 import { useEndpoints } from '../useEndpoints'
-import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from '../relationshipModel'
+import { useEdgePropertySuggestions } from '../useEdgePropertySuggestions'
+import { openInEdgeExplorer, relationshipCopy } from '../relationshipModel'
 
 /** Relationships compared and edited here at once; more are changed on the server. */
 export const MULTI_RELATIONSHIP_MAX = 1000
 
 const STAGED_MARK_MS = 2500
-const NO_SUGGESTIONS = () => []
-const NOT_REFUSED = () => null
 
 type RelationshipsTarget = Extract<DrawerEdgeTarget, { kind: 'relationships' }>
 
@@ -123,8 +124,9 @@ export function MultiRelationshipView({
         else if (read.missing.has(m.id)) excluded.push({ member: m, reason: 'Not found in the graph' })
         return
       }
-      const kind = edgeKind(record.edgeType || m.edgeType, relationshipTypes, containmentTypes)
-      if (kind !== 'lineage') { excluded.push({ member: m, reason: `${KIND_COPY[kind].label} — read-only` }); return }
+      if (edgeKind(record.edgeType || m.edgeType, relationshipTypes, containmentTypes) === 'rollup') {
+        excluded.push({ member: m, reason: 'A roll-up — read-only' }); return
+      }
       if (read.versioned && !record.version) { excluded.push({ member: m, reason: 'Not under version control yet' }); return }
       const j = at.get(m.id)!
       if (pendingDeletes[j]) { excluded.push({ member: m, reason: 'Deletion staged' }); return }
@@ -178,11 +180,27 @@ export function MultiRelationshipView({
     return out
   }, [typeOrder, declared, relationshipTypes])
   const fieldRuleFor = useCallback((key: string) => rules.get(key) ?? null, [rules])
+  // What no two of a type may share: refused as one value for all, where several of that type are held.
+  const sharedTypes = types.filter(([, n]) => n > 1).map(([t]) => t).join('\u0000')
+  const refusals = useMemo(() => {
+    const out = new Map<string, string>()
+    for (const t of sharedTypes ? sharedTypes.split('\u0000') : []) {
+      const name = relationshipCopy(t, relationshipTypes).label
+      for (const f of declared(t)?.fields ?? []) {
+        if (f.unique && !out.has(f.id)) out.set(f.id, `No two ${name} relationships may share a ${f.name || f.id} — set it one at a time.`)
+      }
+    }
+    return out
+  }, [sharedTypes, declared, relationshipTypes])
+  const sharedValueRefused = useCallback((key: string) => refusals.get(key) ?? null, [refusals])
 
   // ── Whether they can be edited here ──
   const editing = useEntityEditing()
   const editOffered = !writesLocked && editing.offered
   const editable = canEdit && editOffered && !editing.blocked && read.versioned && !tooMany && held.length > 0
+  // The names others of their types carry, most-held type first — asked for only to be edited.
+  const peers = useEdgePropertySuggestions(types.map(([t]) => t), editable)
+  const suggestions = useCallback(() => peers, [peers])
 
   // ── The edit: one pending change per property, kept until staged ──
   const [edit, setEdit] = useState<BulkEdit>(EMPTY_EDIT)
@@ -379,13 +397,13 @@ export function MultiRelationshipView({
             onChange={onChange}
             onAddAll={onAddAll}
             editable={editable}
-            sharedValueRefused={NOT_REFUSED}
+            sharedValueRefused={sharedValueRefused}
             fieldRuleFor={fieldRuleFor}
             memberOf={memberOf}
             onFocusNode={onLocateMany ? locateOne : undefined}
             onOpenNode={openOne}
             staged={staged}
-            suggestions={NO_SUGGESTIONS}
+            suggestions={suggestions}
           />
         ) : !read.isError && (
           <p className="px-5 py-4 text-xs text-ink-muted">None of these can be compared here.</p>

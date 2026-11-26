@@ -10,8 +10,9 @@
  *
  * Besides changing a property (set, fill, rename, copy, remove) it cleans up the values it holds:
  * find & replace, normalize, merge near-duplicate values, convert every value to one kind.
- * Relationships are changed the same way (`isEdgeTarget`): named ones, or every one a Connections
- * search matches.
+ * Relationships are changed the same way (`isEdgeTarget`): named ones, every one a Connections
+ * search matches, or — from Property Manager — every one between the view's entities, or those of
+ * them holding a property.
  */
 import type { Predicate } from '@/types/search'
 import type { PropertyJobOp, PropertyJobTarget, PropertyOpKind, ValueKind, ValueMapping } from '@/services/versioningApiService'
@@ -35,9 +36,24 @@ export type TargetPreset =
   | { kind: 'relationships'; ids: readonly string[] }
   /** Every relationship a Connections search (an `edges` predicate) matches. */
   | { kind: 'connections'; predicate: Predicate; scopeMode: ScopeMode; label: string; count?: number }
+  /** Every relationship between the view's entities, as its relationship catalog reads them (rollups
+   *  aside) — and of them, those holding `key`. */
+  | { kind: 'viewRelationships' }
+  | { kind: 'relationshipsWithKey'; key: string }
+
+const EDGE_TARGETS: ReadonlySet<TargetPreset['kind']> = new Set(['relationships', 'connections', 'viewRelationships', 'relationshipsWithKey'])
 
 /** A change of relationships, not entities. */
-export const isEdgeTarget = (preset: TargetPreset) => preset.kind === 'relationships' || preset.kind === 'connections'
+export const isEdgeTarget = (preset: TargetPreset) => EDGE_TARGETS.has(preset.kind)
+
+/** Every relationship between the entities in scope, of every type — containment included, rollups
+ *  never: what the relationship catalog reads. */
+export const ANY_RELATIONSHIP = { kind: 'edges', edgeClass: 'any' } as Predicate
+
+/** The relationships in scope that hold `key` — or, `negate`, that don't. */
+export function relationshipsWith(key: string, negate = false): Predicate {
+  return { ...ANY_RELATIONSHIP, edgePredicate: { kind: 'edgeHasProperty', key, negate } } as Predicate
+}
 
 /** A Connections search — an `edges` predicate, alone or as the one condition of an AND. */
 export function isConnectionsPredicate(p: Predicate | null | undefined): boolean {
@@ -60,6 +76,10 @@ export const EDGE_RESERVED_KEYS: ReadonlySet<string> = new Set([
   'aggKey', 'weight', 'sourceEdgeTypes', 'sourceLevel', 'targetLevel',
   'sourceDepth', 'targetDepth', 'levelDigest', 'gvSeq', 'latestUpdate',
 ])
+
+/** A relationship's envelope — what every relationship is, never a property it carries, so never a
+ *  field of its type: the mirror of `_EDGE_ENVELOPE_KEYS` in `backend/app/providers/falkordb_provider.py`. */
+export const EDGE_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['id', 'confidence', 'properties', 'gvHash'])
 
 /** Structural targets name at most this many containers: the search's limit on one OR. */
 export const MAX_CONTAINERS = 24
@@ -112,6 +132,8 @@ export function predicateOf(preset: TargetPreset): Predicate | null {
     case 'custom': return preset.predicate
     case 'relationships': return null
     case 'connections': return preset.predicate
+    case 'viewRelationships': return ANY_RELATIONSHIP
+    case 'relationshipsWithKey': return relationshipsWith(preset.key)
   }
 }
 
@@ -153,6 +175,8 @@ export function targetLabel(preset: TargetPreset): string {
     case 'custom': return 'the entities matching your criteria'
     case 'relationships': return `the ${preset.ids.length.toLocaleString()} selected relationships`
     case 'connections': return preset.label
+    case 'viewRelationships': return 'every relationship in this view'
+    case 'relationshipsWithKey': return `every relationship with ${preset.key}`
   }
 }
 
@@ -166,7 +190,9 @@ export function scopedTargetLabel(preset: TargetPreset, scope: ScopeMode): strin
   if (scope !== 'data_source' || preset.kind === 'selection' || preset.kind === 'relationships' || scopeFixedToView(preset)) {
     return targetLabel(preset)
   }
-  return preset.kind === 'view' ? 'every entity in the data source' : `${targetLabel(preset)}, across the whole data source`
+  if (preset.kind === 'view') return 'every entity in the data source'
+  if (preset.kind === 'viewRelationships') return 'every relationship in the data source'
+  return `${targetLabel(preset)}, across the whole data source`
 }
 
 export interface OpDraft {

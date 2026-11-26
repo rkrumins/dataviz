@@ -19,7 +19,9 @@
  * is made, and one deleted in the draft is restored from here. Edited, the
  * fields its type defines are held up as an entity's are: each typed as it is
  * defined, their allowed values a click away, a value publishing would refuse
- * said where it is, and a required one it has no value for a row to add.
+ * said where it is, and a required one it has no value for a row to add. A
+ * property its type has no field for is made one from its row ("Make this a
+ * field", `PromoteRelationshipFieldDialog`), by who may edit the semantic layer.
  *
  * Details come from the drawer's own read (`useRelationshipRecord`), never the
  * canvas copy: canvas edges carry no properties and, from a trace, not even the
@@ -31,7 +33,6 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ArrowLeftRight, Code, Crosshair, Eye, FileText, History, Info, ListChecks, Pencil, Trash2, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageNode } from '@/store/canvas'
-import { useActiveView } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { stagedIndexOf } from '@/store/stagedIndex'
 import { useFeature } from '@/store/features'
@@ -43,8 +44,12 @@ import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useEntityBaseline } from '@/features/versioning/hooks/useEntityBaseline'
 import { isGhostEdge } from '@/features/versioning/canvas/deletionGhosts'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
-import { useDiscovery } from '@/components/canvas/search/builder/useDiscovery'
-import { EDGE_RESERVED_KEYS } from '@/components/canvas/property-manager/op/opModel'
+import { EDGE_ENVELOPE_KEYS } from '@/components/canvas/property-manager/op/opModel'
+import { PromoteRelationshipFieldDialog } from '@/components/canvas/property-manager/PromoteFieldDialog'
+import { storedKindOf } from '@/components/canvas/property-manager/propertyValueTypes'
+import { useWorkspacesStore } from '@/store/workspaces'
+import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
+import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayerAccess'
 import type { HeldByEdge } from '@/hooks/useCanvasInteractions'
 import { userProperties } from '@/lib/nodeFields'
 import { fieldWarning, governedFields, inputTypeOf, isPropertyField } from '@/lib/fieldRules'
@@ -62,7 +67,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonText } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { Section } from './DrawerSection'
-import { PropertyEditor, type PropertyEditorProps } from './PropertyEditor'
+import { PropertyEditor, type MakeField, type PropertyEditorProps } from './PropertyEditor'
 import { AllowedValuePicker, FieldNote } from './property/FieldGovernance'
 import { InlineValue } from './property/InlineValue'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
@@ -77,6 +82,7 @@ import { ConnectionView } from './relationship/ConnectionView'
 import { MultiRelationshipView } from './relationship/multi/MultiRelationshipView'
 import { Bridge, DetailRow, DetailList, Notice, TypeChip } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
+import { useEdgePropertySuggestions } from './relationship/useEdgePropertySuggestions'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
 
 interface RelationshipDrawerProps {
@@ -194,7 +200,8 @@ function RelationshipPanel({
   const color = useEdgeVisual(type).strokeColor
   // The fields of its type a publish judges: edited, their rows offer the allowed values and warn
   // of a value publishing would refuse.
-  const typeFields = relationshipTypes.find((r) => r.id.toLowerCase() === type.toLowerCase())?.fields
+  const declaredType = relationshipTypes.find((r) => r.id.toLowerCase() === type.toLowerCase())
+  const typeFields = declaredType?.fields
   const typeLabel = `${copy.label} relationships`
   const governed = useMemo(() => {
     const fields = governedFields(typeFields, true)
@@ -202,6 +209,16 @@ function RelationshipPanel({
   }, [typeFields, typeLabel])
   const required = useMemo(() => [...(governed?.fields.values() ?? [])].filter((f) => f.required), [governed])
   const confidence = record?.confidence ?? createdAfter?.confidence ?? canvasEdge?.data?.confidence
+
+  // ── A property made a field of its type, in the semantic layer — by who may edit the layer ──
+  const layerId = useWorkspacesStore((s) => s.getActiveDataSource()?.ontologyId ?? null)
+  const canEditLayer = useSemanticLayerAccess(useOntologyDefinition(layerId).ontology).canEdit
+  const [promoting, setPromoting] = useState<string | null>(null)
+  const makeField = useMemo<MakeField | null>(() => {
+    if (!canEditLayer || kind === 'rollup' || !declaredType) return null
+    const fieldIds = new Set((declaredType.fields ?? []).map((f) => f.id))
+    return { offered: (key) => !fieldIds.has(key) && !EDGE_ENVELOPE_KEYS.has(key), onSelect: setPromoting, typeLabel }
+  }, [canEditLayer, kind, declaredType, typeLabel, setPromoting])
 
   const ids = useMemo(() => [target.source, target.target], [target.source, target.target])
   const endpoints = useEndpoints(ids, resolveNode)
@@ -391,8 +408,11 @@ function RelationshipPanel({
   const removedSome = !!publishedProps && Object.keys(publishedProps).some((k) => !(k in shownProps))
   const sectionsKey = `edge:${type}`
   const editing = shownMode === 'edit' || hasChanges || justStaged
+  // The property being made a field: the kind this relationship stores it as.
+  const promotedKind = promoting === null ? null : storedKindOf(shownProps[promoting])
 
   return (
+    <>
     <DrawerShell
       titleId={titleId}
       focusKey={target.id}
@@ -532,10 +552,10 @@ function RelationshipPanel({
                     {editable ? (
                       <EditedProperties key={entityId ?? target.id} edgeType={type} value={shownProps} onChange={(next) => stageInline(next as Record<string, unknown>)}
                         inline original={unsaved ? undefined : storedProps} published={publishedProps} startAdding={addingInline && !hasProps}
-                        searchable groupByPath bare sectionsKey={sectionsKey} governed={governed} />
+                        searchable groupByPath bare sectionsKey={sectionsKey} governed={governed} makeField={makeField} />
                     ) : (
                       <PropertyEditor value={shownProps} onChange={() => {}} readOnly published={publishedProps}
-                        searchable groupByPath bare sectionsKey={sectionsKey} />
+                        searchable groupByPath bare sectionsKey={sectionsKey} makeField={makeField} />
                     )}
                   </PanelErrorBoundary>
                 ) : (
@@ -623,6 +643,12 @@ function RelationshipPanel({
         </DrawerFooter>
       </Tabs>
     </DrawerShell>
+    {/* Beside the shell, not in it: the drawer's keys are not the dialog's. */}
+    {promoting !== null && (
+      <PromoteRelationshipFieldDialog propertyKey={promoting} types={{ [declaredType?.id ?? type]: 1 }}
+        kinds={promotedKind ? { [promotedKind]: 1 } : {}} onClose={() => setPromoting(null)} />
+    )}
+    </>
   )
 }
 
@@ -630,17 +656,7 @@ function RelationshipPanel({
  *  type carry in the view's discovery sample, each with a value or two it holds. Mounted only where
  *  they are edited, so the sample is asked for only then. */
 function EditedProperties({ edgeType, ...props }: PropertyEditorProps & { edgeType: string }) {
-  const { keysByEdgeType, getEdgeValueSamples } = useDiscovery(useActiveView()?.id ?? null)
-  const suggestions = useMemo(() => {
-    const at = Object.keys(keysByEdgeType).find((t) => t.toLowerCase() === edgeType.toLowerCase())
-    return (at ? keysByEdgeType[at]! : []).filter((key) => !EDGE_RESERVED_KEYS.has(key)).map((key) => ({
-      key,
-      count: 0,
-      examples: getEdgeValueSamples(at!, key)
-        .filter((v): v is string | number => typeof v === 'string' || typeof v === 'number')
-        .map(String).filter((v) => v.length <= 40).slice(0, 2),
-    }))
-  }, [keysByEdgeType, getEdgeValueSamples, edgeType])
+  const suggestions = useEdgePropertySuggestions([edgeType])
   return <PropertyEditor {...props} suggestions={suggestions} />
 }
 

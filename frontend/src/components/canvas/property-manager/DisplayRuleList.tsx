@@ -21,6 +21,8 @@ import { cn } from '@/lib/utils'
 import type { DisplayRuleConfig } from '@/types/schema'
 import { useDisplayRuleMatchStore, useRuleCount } from '@/store/displayRuleMatchStore'
 
+import { dashArrayOf, RULE_LINE_WIDTH } from '../ruleLines'
+
 
 export interface DisplayRuleListProps {
     rules: DisplayRuleConfig[]
@@ -113,12 +115,12 @@ export function DisplayRuleList({
                         <Tags className="w-5 h-5 text-accent-lineage" strokeWidth={1.8} />
                     </div>
                     <div className="text-base font-display font-semibold text-ink leading-tight">
-                        Tag entities by criteria
+                        Tag entities and style relationships by criteria
                     </div>
                     <p className="mt-1.5 text-xs text-ink-muted leading-snug max-w-[34ch] mx-auto">
                         Create a display rule to decorate matching entities with a colored
                         tag on the canvas — e.g. everything classified PII, or every dataset
-                        missing an owner.
+                        missing an owner — or to colour the relationships between them.
                     </p>
                     <button
                         type="button"
@@ -140,13 +142,14 @@ export function DisplayRuleList({
         <div className="flex flex-col gap-3">
             {readOnly ? (
                 <p className="text-[11px] text-ink-muted leading-snug">
-                    Rules tag matched entities on the canvas. Only people who can edit this
-                    view can change them.
+                    Rules tag matched entities, and style matched relationships, on the canvas.
+                    Only people who can edit this view can change them.
                 </p>
             ) : (
             <div className="flex items-center justify-between">
                 <p className="text-[11px] text-ink-muted leading-snug max-w-[70%]">
-                    Rules tag matched entities on the canvas. Drag order sets chip stacking.
+                    Rules tag matched entities, and style matched relationships, on the canvas.
+                    Drag order sets chip stacking.
                 </p>
                 <button
                     type="button"
@@ -236,6 +239,28 @@ function lookSummary(style: NonNullable<DisplayRuleConfig['style']>): string {
     ].filter(Boolean) as string[]
     const text = parts.join(' · ')
     return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/** A relationship rule's line, in words: "Relationships · dashed, bold line · no chip". */
+function lineSummary(style: DisplayRuleConfig['style']): string {
+    const width = style?.width ?? RULE_LINE_WIDTH
+    const look = [style?.dash ?? 'solid', width < 2 ? 'thin' : width > 3.25 ? 'bold' : null]
+        .filter(Boolean).join(', ')
+    return ['Relationships', `${look} line`, style?.chip === false && 'no chip'].filter(Boolean).join(' · ')
+}
+
+/** A relationship rule's line as a swatch: its colour, dash and (a capped) width —
+ *  its dash drawn small enough that a few fit. */
+function LineSwatch({ rule }: { rule: DisplayRuleConfig }) {
+    const width = Math.min(3, rule.style?.width ?? RULE_LINE_WIDTH)
+    const dash = rule.style?.dash === 'solid' ? undefined : rule.style?.dash
+    return (
+        <svg aria-hidden className="inline-block h-3 w-6">
+            <line x1="2" y1="50%" x2="22" y2="50%" stroke={rule.color} strokeWidth={width}
+                  strokeDasharray={dashArrayOf(dash, 1.5)}
+                  strokeLinecap={dash === 'dotted' ? 'round' : undefined} />
+        </svg>
+    )
 }
 
 function RuleCard({
@@ -332,7 +357,12 @@ function RuleCard({
                         {rule.icon && <DynamicIcon name={rule.icon} className="w-3 h-3 shrink-0" />}
                         <span className="truncate" title={rule.name}>{rule.name}</span>
                     </span>
-                    {rule.style && (rule.style.fill || rule.style.frame || rule.style.chip === false) && (
+                    {rule.target === 'relationships' ? (
+                        <span className="ml-1.5 inline-flex items-center gap-1 align-middle text-[10.5px] text-ink-muted">
+                            <LineSwatch rule={rule} />
+                            {lineSummary(rule.style)}
+                        </span>
+                    ) : rule.style && (rule.style.fill || rule.style.frame || rule.style.chip === false) && (
                         <span className="ml-1.5 inline-flex items-center gap-1 align-middle text-[10.5px] text-ink-muted">
                             <span
                                 aria-hidden

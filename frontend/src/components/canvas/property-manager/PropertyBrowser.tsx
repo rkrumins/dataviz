@@ -19,8 +19,14 @@
  * elsewhere they are disabled and say why. With several entities selected on
  * the canvas, it offers to compare and edit them in the entity drawer.
  *
- * "Make it a field…" promotes a property to a field of the entity types that carry it, in the
- * data source's semantic layer (``PromoteFieldDialog``) — offered to who may edit the layer.
+ * "Make it a field…" promotes a property to a field of the entity types that carry it — or of the
+ * relationship types — in the data source's semantic layer (``PromoteFieldDialog``,
+ * ``PromoteRelationshipFieldDialog``) — offered to who may edit the layer.
+ *
+ * The same tab lists the properties of the relationships between the view's entities (``subject``
+ * ``relationships``): counted per relationship type, each coloured as the canvas draws it; found
+ * with or without a property — or with a value — by a Connections search; and changed in bulk the
+ * same way, on every relationship in the view or those holding the property.
  *
  * Its values are cleaned up the same way: **Clean up…** on a property, **Merge
  * similar values…** where values differ only in case or spaces, **Convert all
@@ -30,8 +36,8 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, ArrowDownWideNarrow, ArrowRightLeft, ChevronRight, CircleSlash, Combine, Copy, CopyPlus, Database, Ellipsis, Layers, ListChecks, Loader2,
-    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, Trash2, WandSparkles,
+    AlertTriangle, ArrowDownWideNarrow, ArrowRightLeft, ChevronRight, CircleSlash, Combine, Copy, CopyPlus, Database, Ellipsis, Info, Layers, ListChecks, Loader2,
+    Pencil, Plus, ScanSearch, Search, Sparkles, Tag, Tags, TextCursorInput, Trash2, WandSparkles, Waypoints,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
@@ -46,27 +52,33 @@ import { useSemanticLayerAccess } from '@/features/ontology/lib/useSemanticLayer
 import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
 import { useCurrentBranchId, useGraphId } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { getEdgeVisual } from '@/hooks/useEntityVisual'
 import {
     useDraftPropertyJobs, usePropertyCatalogOverlay, usePropertyJobsStore, type CatalogOverlayEntry, type OpRequest,
 } from '@/store/propertyJobsStore'
 import type { ValueKind, ValueMapping } from '@/services/versioningApiService'
-import type { Predicate, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
+import type { CatalogSubject, Predicate, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
 
 import { fieldClass } from '../search/builder/editors/shared'
+import { edgeTypeName } from '../search/panel/vocabulary/edgeWords'
 
 import { similarGroups } from './op/cleanup'
+import { ANY_RELATIONSHIP, relationshipsWith } from './op/opModel'
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyJobsPanel } from './PropertyJobsPanel'
-import { PromoteFieldDialog } from './PromoteFieldDialog'
+import { PromoteFieldDialog, PromoteRelationshipFieldDialog } from './PromoteFieldDialog'
 import { ReusableChangesPanel } from './ReusableChangesPanel'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
-import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
+import { EntityTypeChips, RelationshipTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
 import { KIND_LABEL, storedType } from './propertyValueTypes'
 
 
 export interface PropertyBrowserProps {
     viewId: string
+    /** Whose properties: the view's entities (the default), or the relationships between them. */
+    subject?: CatalogSubject
     onCreateRuleFromPredicate: (predicate: Predicate, suggestedName: string) => void
     /** Open + run a predicate in the Advanced Search panel (canvas-owned). */
     onSearchPredicate?: (predicate: Predicate) => void
@@ -92,10 +104,18 @@ const ROW_ACTIONS = cn(
 /** A row's name and its badges: the badges wrap under the name when the row is narrow. */
 const ROW_TITLE = 'flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1'
 
+/** What a catalog's counts count, in words. */
+const WORDS: Record<CatalogSubject, { one: string; many: string }> = {
+    entities: { one: 'entity', many: 'entities' },
+    relationships: { one: 'relationship', many: 'relationships' },
+}
+
 
 export function PropertyBrowser({
-    viewId, onCreateRuleFromPredicate, onSearchPredicate,
+    viewId, subject = 'entities', onCreateRuleFromPredicate, onSearchPredicate,
 }: PropertyBrowserProps) {
+    const edges = subject === 'relationships'
+    const words = WORDS[subject]
     const { notify } = useAppNotifications()
     // Open + run a constructed predicate in the real Advanced Search panel.
     const search: SearchHandler | undefined = useMemo(() => {
@@ -111,19 +131,26 @@ export function PropertyBrowser({
             .catch(() => notify('error', `Couldn't copy “${key}”`))
     }
 
-    const { catalog, reading, error, unavailable, refresh } = usePropertyCatalog(viewId)
+    const { catalog, reading, error, unavailable, refresh } = usePropertyCatalog(viewId, subject)
+    // The entities the relationships run between: their count, once the view's entities are read.
+    const ends = usePropertyCatalog(edges ? viewId : '', 'entities').catalog
+    const endCount = edges && ends?.status === 'complete' ? ends.entities : null
     const [query, setQuery] = useState('')
     const [sort, setSort] = useState<SortMode>('usage')
     const [shown, setShown] = useState(ROWS_PAGE)
 
     // The draft's bulk changes — running and ended — and what they do to each property.
     const jobs = useDraftPropertyJobs(useGraphId(), useCurrentBranchId())
-    const overlay = usePropertyCatalogOverlay(jobs)
+    const overlay = usePropertyCatalogOverlay(jobs, edges)
     // Where editing isn't offered the change actions go; where it is but
-    // can't be kept yet, they stay disabled with the reason.
+    // can't be kept yet, they stay disabled with the reason. A change of
+    // relationships reaches those holding its property — or, none named,
+    // every one in the view; Where offers the other.
     const editing = useEntityEditing()
-    const change = (request: OpRequest) =>
-        editing.offered ? () => usePropertyJobsStore.getState().requestOp(request) : undefined
+    const ask = (request: OpRequest) => usePropertyJobsStore.getState().requestOp(edges
+        ? { ...request, target: request.key ? { kind: 'relationshipsWithKey', key: request.key } : { kind: 'viewRelationships' } }
+        : request)
+    const change = (request: OpRequest) => (editing.offered ? () => ask(request) : undefined)
     const selected = useCanvasStore((s) => s.selectedNodeIds.filter((id) => !id.startsWith('logical:')).length)
     // A property made a field of its types, in the semantic layer — by who may edit the layer.
     const layerId = useWorkspacesStore((s) => s.getActiveDataSource()?.ontologyId ?? null)
@@ -142,23 +169,23 @@ export function PropertyBrowser({
         const keys = new Set<string>()
         for (const t of jobs) {
             if (t.job?.status === 'failed' || t.job?.status === 'cancelled') continue
-            if (t.entityKind === 'edge') continue           // the catalog lists entities' properties
+            if ((t.entityKind === 'edge') !== edges) continue    // the catalog lists its own subject's properties
             const k = t.op.kind === 'rename' || t.op.kind === 'copy' ? t.op.to : t.op.kind === 'remove' ? undefined : t.op.key
             if (k && !knownKeys.has(k)) keys.add(k)
         }
         return [...keys].sort()
-    }, [jobs, knownKeys])
+    }, [jobs, knownKeys, edges])
     // The value a new property is set to (for its preview chip).
     const stagedValueByKey = useMemo(() => {
         const m = new Map<string, string>()
         for (const t of jobs) {
-            if (t.entityKind === 'edge') continue
+            if ((t.entityKind === 'edge') !== edges) continue
             if ((t.op.kind === 'set' || t.op.kind === 'fillEmpty') && t.op.value !== undefined && !m.has(t.op.key)) {
                 m.set(t.op.key, String(t.op.value))
             }
         }
         return m
-    }, [jobs])
+    }, [jobs, edges])
 
     const q = query.trim().toLowerCase()
     // The catalog lists keys most-carried first; A–Z is the other order.
@@ -176,7 +203,16 @@ export function PropertyBrowser({
     )
 
     if (unavailable) {
-        return (
+        return edges ? (
+            <div className="flex items-start gap-2.5 px-3.5 py-3.5 rounded-xl border border-glass-border bg-canvas-elevated text-[11.5px] text-ink-muted leading-snug">
+                <Info className="mt-px w-3.5 h-3.5 shrink-0" aria-hidden />
+                <span>
+                    <span className="block font-semibold text-ink">Relationship properties can't be listed here</span>
+                    This data source doesn't count its relationships' properties for a view. A Connections search
+                    still finds them — and changes them in bulk from its results.
+                </span>
+            </div>
+        ) : (
             <div className="px-3 py-5 rounded-xl border border-glass-border text-center text-[11px] text-ink-muted">
                 Property insights aren't available for this view here.
             </div>
@@ -184,19 +220,31 @@ export function PropertyBrowser({
     }
     if (!catalog) {
         return error ? (
-            <div className="flex flex-col gap-2 px-3 py-4 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300">
-                <span>Couldn't read this view's properties — {error}</span>
-                <button type="button" onClick={refresh} className="self-start underline hover:text-rose-200">
-                    Try again
-                </button>
+            <div role="alert" className="flex items-start gap-2.5 px-3.5 py-3.5 rounded-xl bg-rose-500/[0.07] border border-rose-500/30 text-[11.5px] leading-snug">
+                <AlertTriangle className="mt-px w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400" aria-hidden />
+                <span className="flex-1 min-w-0 flex flex-col items-start gap-2">
+                    <span className="text-rose-700 dark:text-rose-300">Couldn't read this view's {edges ? 'relationship properties' : 'properties'} — {error}</span>
+                    <button
+                        type="button"
+                        onClick={refresh}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-rose-500/10 text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 transition-colors"
+                    >
+                        Try again
+                    </button>
+                </span>
             </div>
         ) : (
             <div className="flex flex-col items-center gap-2 px-3 py-6 text-[11px] text-ink-muted">
                 <span className="inline-flex items-center gap-2">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Reading every entity in this view…
+                    Reading every {words.one} in this view…
                 </span>
-                <ProgressBar value={reading ?? 0} label="Reading every entity in this view" className="w-40" />
+                <ProgressBar value={reading ?? 0} label={`Reading every ${words.one} in this view`} className="w-40" />
+                {edges && (
+                    <span className="text-[10.5px] text-ink-muted/80">
+                        The relationships between {endCount !== null ? `the ${endCount.toLocaleString()}` : 'the'} entities in this view, every one counted
+                    </span>
+                )}
             </div>
         )
     }
@@ -209,7 +257,10 @@ export function PropertyBrowser({
             <div className="flex flex-col gap-3">
                 <PropertyJobsPanel jobs={jobs} />
                 <ReusableChangesPanel viewId={viewId} />
-                <EmptyHero onNew={change({})} blocked={editing.blocked} />
+                {edges
+                    ? <RelationshipsEmptyHero relationships={catalog.entities} entities={endCount}
+                        onNew={catalog.entities > 0 ? change({}) : undefined} blocked={editing.blocked} />
+                    : <EmptyHero onNew={change({})} blocked={editing.blocked} />}
             </div>
         )
     }
@@ -218,12 +269,13 @@ export function PropertyBrowser({
 
     return (
         <div className="flex flex-col gap-3">
-            <PropertyInsightsHeader catalog={catalog} reading={reading} error={error} onRefresh={refresh} />
+            <PropertyInsightsHeader catalog={catalog} reading={reading} error={error} onRefresh={refresh}
+                subject={subject} entities={endCount} />
 
             <PropertyJobsPanel jobs={jobs} />
             <ReusableChangesPanel viewId={viewId} />
 
-            {selected >= 2 && (
+            {selected >= 2 && !edges && (
                 <button
                     type="button"
                     onClick={() => useCanvasStore.getState().openNodesDrawer(useCanvasStore.getState().selectedNodeIds)}
@@ -246,21 +298,23 @@ export function PropertyBrowser({
                         type="text"
                         value={query}
                         onChange={(e) => { setQuery(e.target.value); setShown(ROWS_PAGE) }}
-                        placeholder="Filter properties and tags…"
-                        aria-label="Filter properties and tags"
+                        placeholder={edges ? 'Filter properties…' : 'Filter properties and tags…'}
+                        aria-label={edges ? 'Filter relationship properties' : 'Filter properties and tags'}
                         className={cn(fieldClass, 'pl-9')}
                     />
                 </div>
-                <SortToggle sort={sort} onChange={setSort} />
+                <SortToggle sort={sort} onChange={setSort} noun={words.many} />
                 {editing.offered && (
                     <HoverTip
-                        label="Change a property on many entities"
-                        detail={editing.blocked ?? 'Set, fill, rename, copy or remove it — on a layer, inside a container, a search’s matches, or the whole view'}
+                        label={`Change a property on many ${words.many}`}
+                        detail={editing.blocked ?? (edges
+                            ? 'Set, fill, rename, copy or remove it — on every relationship in the view, or those holding it'
+                            : 'Set, fill, rename, copy or remove it — on a layer, inside a container, a search’s matches, or the whole view')}
                         className="shrink-0 inline-flex"
                     >
                         <button
                             type="button"
-                            onClick={() => usePropertyJobsStore.getState().requestOp({})}
+                            onClick={() => ask({})}
                             disabled={!!editing.blocked}
                             className="inline-flex items-center gap-1.5 px-2.5 h-9 rounded-lg text-[12px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors disabled:opacity-50 disabled:shadow-none disabled:hover:bg-accent-lineage"
                         >
@@ -285,27 +339,29 @@ export function PropertyBrowser({
                                 onUpdate={change({ kind: 'set', key })}
                                 onRemove={change({ kind: 'remove', key })}
                                 blocked={editing.blocked}
-                                onCreateRule={() => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
+                                onCreateRule={edges ? undefined : () => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
                             />
                         ))}
                         {rows.map((property) => (
                             <PropertyRow
                                 key={property.key}
                                 property={property}
+                                subject={subject}
                                 entities={entities}
                                 exact={catalog.status === 'complete'}
                                 onSearch={search}
                                 overlay={overlay.get(property.key)}
                                 onUpdate={change({ kind: 'set', key: property.key })}
+                                onRename={edges ? change({ kind: 'rename', key: property.key }) : undefined}
                                 onDuplicate={change({ kind: 'copy', key: property.key })}
                                 onRemove={change({ kind: 'remove', key: property.key })}
                                 onCleanUp={change({ kind: 'normalize', key: property.key })}
-                                onMerge={editing.offered ? (map) => usePropertyJobsStore.getState().requestOp(
+                                onMerge={editing.offered ? (map) => ask(
                                     { kind: 'mapValues', key: property.key, ...(map ? { map } : {}) }) : undefined}
-                                onConvert={editing.offered ? (toKind) => usePropertyJobsStore.getState().requestOp(
+                                onConvert={editing.offered ? (toKind) => ask(
                                     { kind: 'convert', key: property.key, toKind }) : undefined}
                                 blocked={editing.blocked}
-                                onCreateRule={() => onCreateRuleFromPredicate(
+                                onCreateRule={edges ? undefined : () => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
                                 onCopy={() => copyKey(property.key)}
                                 onPromote={canEditLayer ? () => setPromoting(property) : undefined}
@@ -363,7 +419,10 @@ export function PropertyBrowser({
 
             {promoting && (
                 <PanelErrorBoundary resetKeys={[promoting.key]} onClose={() => setPromoting(null)}>
-                    <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />
+                    {edges
+                        ? <PromoteRelationshipFieldDialog propertyKey={promoting.key} types={promoting.byEntityType}
+                            kinds={promoting.kinds} onClose={() => setPromoting(null)} />
+                        : <PromoteFieldDialog property={promoting} onClose={() => setPromoting(null)} />}
                 </PanelErrorBoundary>
             )}
 
@@ -376,13 +435,13 @@ export function PropertyBrowser({
 // Sort toggle (segmented)
 // ---------------------------------------------------------------------------
 
-function SortToggle({ sort, onChange }: { sort: SortMode; onChange: (s: SortMode) => void }) {
+function SortToggle({ sort, onChange, noun }: { sort: SortMode; onChange: (s: SortMode) => void; noun: string }) {
     return (
         <div className="shrink-0 inline-flex rounded-lg p-0.5 bg-canvas-base border border-glass-border">
             {(['usage', 'name'] as SortMode[]).map((s) => (
                 <HoverTip
                     key={s}
-                    label={s === 'name' ? 'Sort the properties by name' : 'Sort the properties by how many entities carry each'}
+                    label={s === 'name' ? 'Sort the properties by name' : `Sort the properties by how many ${noun} carry each`}
                     className="inline-flex"
                 >
                     <button
@@ -447,6 +506,58 @@ function EmptyHero({ onNew, blocked }: { onNew?: () => void; blocked: string | n
 }
 
 
+/** The relationships between the view's entities carry no property — or there are none to carry one. */
+function RelationshipsEmptyHero({ relationships, entities, onNew, blocked }: {
+    relationships: number
+    /** The entities they run between, when known. */
+    entities: number | null
+    onNew?: () => void
+    blocked: string | null
+}) {
+    const among = entities !== null ? `the ${entities.toLocaleString()} entities in this view` : 'the entities in this view'
+    const cta = onNew && (
+        <button
+            type="button"
+            onClick={onNew}
+            disabled={!!blocked}
+            className="relative inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg text-[12.5px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors disabled:opacity-50 disabled:shadow-none disabled:hover:bg-accent-lineage"
+        >
+            <Plus className="w-4 h-4" /> Give them a property
+        </button>
+    )
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+                'relative overflow-hidden rounded-2xl p-5 flex flex-col items-center text-center gap-3',
+                'bg-gradient-to-br from-accent-lineage/[0.08] via-canvas-elevated/30 to-cyan-500/[0.06]',
+                'border border-glass-border/60',
+            )}
+        >
+            <div className="pointer-events-none absolute -top-12 -right-12 w-40 h-40 rounded-full bg-accent-lineage/10 blur-3xl" />
+            <div className="relative w-12 h-12 rounded-2xl flex items-center justify-center bg-gradient-to-br from-accent-lineage/35 to-cyan-500/20 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]">
+                <Waypoints className="w-6 h-6 text-accent-lineage" />
+            </div>
+            <div className="relative">
+                <div className="text-[15px] font-display font-semibold text-ink">
+                    {relationships > 0 ? 'No relationship properties yet' : 'No relationships here yet'}
+                </div>
+                <p className="mt-1 text-[12px] text-ink-muted leading-snug max-w-[300px]">
+                    {relationships > 0
+                        ? <>The {relationships.toLocaleString()} {relationships === 1 ? 'relationship' : 'relationships'} between {among} hold
+                            nothing of their own yet. Give them a property — on your draft, however many.</>
+                        : <>None of {among} are connected to one another. Once they are, every property their
+                            relationships carry is listed here.</>}
+                </p>
+            </div>
+            {cta && (blocked ? <HoverTip label={blocked} className="relative inline-flex">{cta}</HoverTip> : cta)}
+        </motion.div>
+    )
+}
+
+
 // ---------------------------------------------------------------------------
 // Property row (expandable: usage, kinds, range, values, actions)
 // ---------------------------------------------------------------------------
@@ -471,11 +582,14 @@ function valueLabels(values: SearchCatalogValue[]): string[] {
 
 /** ``key`` is ``value``, compared as the kind it is stored as. A list's
  *  element matches the lists holding it: list comparisons are
- *  element-wise. */
-function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
+ *  element-wise. ``edges``: every relationship in the view whose ``key``
+ *  is ``value`` — a Connections search. */
+function valuePredicate(key: string, v: SearchCatalogValue, edges = false): Predicate {
     const valueType = v.kind === 'Integer' || v.kind === 'Float' ? 'number'
         : v.kind === 'Boolean' ? 'boolean' : 'string'
-    return { kind: 'property', key, op: 'eq', value: v.value, valueType } as Predicate
+    return edges
+        ? { ...ANY_RELATIONSHIP, edgePredicate: { kind: 'edgeProperty', key, op: 'eq', value: v.value, valueType } } as Predicate
+        : { kind: 'property', key, op: 'eq', value: v.value, valueType } as Predicate
 }
 
 /** One value, as its kind and itself: the text "1" and the number 1 are two values. */
@@ -488,15 +602,20 @@ function dominantKind(kinds: Readonly<Record<string, number>>): ValueKind {
 }
 
 function PropertyRow({
-    property, entities, exact, overlay, onUpdate, onDuplicate, onRemove, onCleanUp, onMerge, onConvert, blocked, onCreateRule, onCopy, onSearch, onPromote,
+    property, subject = 'entities', entities, exact, overlay, onUpdate, onRename, onDuplicate, onRemove, onCleanUp, onMerge, onConvert, blocked, onCreateRule, onCopy,
+    onSearch, onPromote,
 }: {
     property: SearchCatalogProperty
-    /** Entities in the view — what coverage is a share of. */
+    /** Whose property: an entity's, or a relationship's — counted, searched and coloured as one. */
+    subject?: CatalogSubject
+    /** Entities in the view — or relationships — what coverage is a share of. */
     entities: number
     /** The catalog is complete: its counts are exact, not "so far". */
     exact: boolean
     overlay?: CatalogOverlayEntry
     onUpdate?: () => void
+    /** Move it to a new name. */
+    onRename?: () => void
     /** Copy its values to a new property. */
     onDuplicate?: () => void
     onRemove?: () => void
@@ -507,7 +626,8 @@ function PropertyRow({
     /** Store every value as one kind. */
     onConvert?: (toKind: ValueKind) => void
     blocked: string | null
-    onCreateRule: () => void
+    /** Tag what holds it as a display rule. */
+    onCreateRule?: () => void
     onCopy: () => void
     onSearch?: SearchHandler
     /** Make it a field of the types that carry it, in the semantic layer. */
@@ -515,6 +635,10 @@ function PropertyRow({
 }) {
     const [expanded, setExpanded] = useState(false)
     const key = property.key
+    const edges = subject === 'relationships'
+    const words = WORDS[subject]
+    // A relationship type is coloured as the canvas draws it.
+    const schema = useSchemaStore((s) => s.schema)
     const { type, mixed } = storedType(property.kinds)
     // Values that differ only in case or in spaces around them: a merge waiting to be made.
     const similar = useMemo(() => similarGroups(property.values), [property.values])
@@ -555,7 +679,7 @@ function PropertyRow({
     const searchLabel = onSearch
         ? (label: string) => {
             const v = values[labels.indexOf(label)]
-            if (v) onSearch(valuePredicate(key, v), `${key} = ${label}`)
+            if (v) onSearch(valuePredicate(key, v, edges), `${edges ? 'relationships with ' : ''}${key} = ${label}`)
         }
         : undefined
     const pendingRemove = overlay?.kinds.has('remove')
@@ -609,10 +733,11 @@ function PropertyRow({
                             <RowMenu name={key} actions={[
                                 { icon: <Copy className="w-3.5 h-3.5" />, label: 'Copy the name', onSelect: onCopy },
                                 onUpdate && { icon: <Pencil className="w-3.5 h-3.5" />, label: 'Change', onSelect: onUpdate, blocked },
+                                onRename && { icon: <TextCursorInput className="w-3.5 h-3.5" />, label: 'Rename…', onSelect: onRename, blocked },
                                 onDuplicate && { icon: <CopyPlus className="w-3.5 h-3.5" />, label: 'Duplicate as…', onSelect: onDuplicate, blocked },
                                 onCleanUp && { icon: <WandSparkles className="w-3.5 h-3.5" />, label: 'Clean up…', onSelect: onCleanUp, blocked },
                                 onPromote && { icon: <ListChecks className="w-3.5 h-3.5" />, label: 'Make it a field…', onSelect: onPromote },
-                                { icon: <Plus className="w-3.5 h-3.5" />, label: 'Create rule', onSelect: onCreateRule },
+                                onCreateRule && { icon: <Plus className="w-3.5 h-3.5" />, label: 'Create rule', onSelect: onCreateRule },
                                 onRemove && { icon: <Trash2 className="w-3.5 h-3.5" />, label: 'Remove', onSelect: onRemove, blocked, danger: true },
                             ]} />
                         </div>
@@ -642,7 +767,7 @@ function PropertyRow({
                     {byType.length > 0 && (
                         <div className="flex items-center gap-1.5 text-[10px] text-ink-muted min-w-0">
                             <span className="shrink-0">Used by</span>
-                            <EntityTypeChips types={byType.map(([t]) => t)} />
+                            {edges ? <RelationshipTypeChips types={byType.map(([t]) => t)} /> : <EntityTypeChips types={byType.map(([t]) => t)} />}
                         </div>
                     )}
 
@@ -658,7 +783,20 @@ function PropertyRow({
                     {/* Quick actions — construct + run a query in Advanced Search,
                         or tag matches as a display rule. */}
                     <div className="flex flex-wrap gap-2">
-                        {onSearch && (
+                        {onSearch && (edges ? (
+                            <>
+                                <QuickActionCard
+                                    icon={<ScanSearch className="w-3.5 h-3.5" />}
+                                    label="Find relationships with this"
+                                    onClick={() => onSearch(relationshipsWith(key), `relationships with ${key}`)}
+                                />
+                                <QuickActionCard
+                                    icon={<CircleSlash className="w-3.5 h-3.5" />}
+                                    label="Find relationships without this"
+                                    onClick={() => onSearch(relationshipsWith(key, true), `relationships without ${key}`)}
+                                />
+                            </>
+                        ) : (
                             <>
                                 <QuickActionCard
                                     icon={<ScanSearch className="w-3.5 h-3.5" />}
@@ -671,13 +809,15 @@ function PropertyRow({
                                     onClick={() => onSearch({ kind: 'hasProperty', key, negate: true } as Predicate, `entities missing ${key}`)}
                                 />
                             </>
+                        ))}
+                        {onCreateRule && (
+                            <QuickActionCard
+                                icon={<Tags className="w-3.5 h-3.5" />}
+                                label="Tag matches as rule"
+                                tone="accent"
+                                onClick={onCreateRule}
+                            />
                         )}
-                        <QuickActionCard
-                            icon={<Tags className="w-3.5 h-3.5" />}
-                            label="Tag matches as rule"
-                            tone="accent"
-                            onClick={onCreateRule}
-                        />
                         {similar.length > 0 && onMerge && !blocked && (
                             <QuickActionCard
                                 icon={<Combine className="w-3.5 h-3.5" />}
@@ -703,13 +843,18 @@ function PropertyRow({
                     <UsageGauge
                         total={property.count}
                         viewTotal={entities}
-                        byEntityType={byType.map(([t, count]) => ({ type: t, count }))}
+                        noun={words}
+                        byEntityType={byType.map(([t, count]) => (edges
+                            ? { type: t, count, label: edgeTypeName(t), color: getEdgeVisual({ schema }, t).strokeColor }
+                            : { type: t, count }))}
                         onTypeClick={onSearch ? (t) => onSearch(
-                            { kind: 'group', op: 'and', children: [
-                                { kind: 'hasProperty', key, negate: false },
-                                { kind: 'entityType', op: 'in', values: [t] },
-                            ] } as Predicate,
-                            `${key} on ${t}`,
+                            edges
+                                ? { kind: 'edges', edgeTypes: [t], edgePredicate: { kind: 'edgeHasProperty', key, negate: false } } as Predicate
+                                : { kind: 'group', op: 'and', children: [
+                                    { kind: 'hasProperty', key, negate: false },
+                                    { kind: 'entityType', op: 'in', values: [t] },
+                                ] } as Predicate,
+                            `${key} on ${edges ? edgeTypeName(t) : t}`,
                         ) : undefined}
                     />
 
@@ -721,7 +866,7 @@ function PropertyRow({
                                     <span className="font-semibold">{KIND_LABEL[kind] ?? kind}</span>
                                     {' '}on {n.toLocaleString()}
                                 </span>
-                            ))} entities. A search compares each kind as its own — pick the kind you mean.
+                            ))} {words.many}. A search compares each kind as its own — pick the kind you mean.
                             {onConvert && !blocked && (
                                 <button
                                     type="button"
@@ -782,13 +927,18 @@ function PropertyRow({
                         </p>
                     )}
 
-                    {property.residual > 0 && (
+                    {property.residual > 0 && (edges ? (
+                        <p className="text-[11px] text-ink-muted leading-snug">
+                            Held in the relationship's JSON by {property.residual.toLocaleString()} — rather than as a
+                            property of its own. A search still reads it there, and compares it exactly.
+                        </p>
+                    ) : (
                         <p className="text-[11px] text-ink-muted leading-snug">
                             {property.residual.toLocaleString()} {property.residual === 1 ? 'entity holds' : 'entities hold'} it
                             past the graph's native-property budget, as raw text — search still
                             compares those values exactly, only more slowly.
                         </p>
-                    )}
+                    ))}
                 </div>
             )}
         </div>
@@ -805,7 +955,7 @@ function PendingNewRow({
     onUpdate?: () => void
     onRemove?: () => void
     blocked: string | null
-    onCreateRule: () => void
+    onCreateRule?: () => void
 }) {
     return (
         <div className="group relative rounded-2xl border border-emerald-500/40 bg-canvas-elevated shadow-sm">
@@ -821,7 +971,7 @@ function PendingNewRow({
                             {onUpdate && <RowAction icon={<Pencil className="w-3.5 h-3.5" />} label="Update" onClick={onUpdate} blocked={blocked} />}
                             <RowMenu name={propertyKey} actions={[
                                 onUpdate && { icon: <Pencil className="w-3.5 h-3.5" />, label: 'Update', onSelect: onUpdate, blocked },
-                                { icon: <Plus className="w-3.5 h-3.5" />, label: 'Create rule', onSelect: onCreateRule },
+                                onCreateRule && { icon: <Plus className="w-3.5 h-3.5" />, label: 'Create rule', onSelect: onCreateRule },
                                 onRemove && { icon: <Trash2 className="w-3.5 h-3.5" />, label: 'Remove', onSelect: onRemove, blocked, danger: true },
                             ]} />
                         </div>

@@ -92,6 +92,22 @@ class TestValidation:
                                        "op": "between", "value": [0.5, 1]}))
 
 
+class _SampledProvider:
+    """Answers discovery's statements from scripted ``(type, properties)`` edges: the types,
+    then each type's sample up to its limit."""
+
+    def __init__(self, edges):
+        self.edges, self.statements = edges, []
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        self.statements.append(cypher)
+        if "db.relationshipTypes()" in cypher:
+            return SimpleNamespace(result_set=[[t] for t in dict.fromkeys(t for t, _ in self.edges)])
+        edge_type = cypher.split("[r:", 1)[1].split("]", 1)[0]
+        rows = [[t, SimpleNamespace(properties=p)] for t, p in self.edges if t == edge_type]
+        return SimpleNamespace(result_set=rows[:params["lim"]])
+
+
 class TestWhatReadersSee:
     def test_discovery_finds_a_users_keys_in_the_json(self):
         edges = [
@@ -101,12 +117,7 @@ class TestWhatReadersSee:
             ("AGGREGATED", {"weight": 3}),
         ]
 
-        class _Provider:
-            async def _ro_query(self, cypher, *, params=None, timeout=None):
-                return SimpleNamespace(result_set=[
-                    [t, SimpleNamespace(properties=p)] for t, p in edges])
-
-        out = asyncio.run(_discover_edge_metadata(_Provider()))
+        out = asyncio.run(_discover_edge_metadata(_SampledProvider(edges)))
         flows = out["FLOWS_TO"]
         assert flows["keys"] == ["confidence", "id", "mode", "rows"]
         assert flows["storedAs"] == {"confidence": "native", "id": "native",
@@ -114,9 +125,36 @@ class TestWhatReadersSee:
         assert flows["valueSamplesByKey"]["mode"] == ["batch", "stream"]
         assert out["AGGREGATED"]["storedAs"] == {"weight": "native"}
 
+    def test_each_relationship_type_is_sampled_on_its_own(self, monkeypatch):
+        """One type with millions of edges never leaves another unseen: the sample is shared
+        between the types, each read on its own."""
+        from backend.app.providers import falkordb_deep_search as fds
+        settings = SimpleNamespace(discover_edge_sample_cap=100, discover_value_samples_per_key=5)
+        monkeypatch.setattr(fds, "get_deep_search_settings", lambda: settings)
+        edges = ([("CONTAINS", {"id": f"c{i}"}) for i in range(1000)]
+                 + [("FEEDS", {"id": "f1", "properties": json.dumps({"job": "nightly"})})])
+        provider = _SampledProvider(edges)
+        out = asyncio.run(_discover_edge_metadata(provider))
+        assert out["FEEDS"]["keys"] == ["id", "job"]
+        assert out["CONTAINS"]["sampled"] == 50            # its share of the cap, never all
+        assert all("LIMIT $lim" in c for c in provider.statements[1:])
+
     def test_a_paths_edges_show_a_users_properties(self):
         assert _edge_properties({"id": "e1", "confidence": 0.9,
                                  "properties": '{"mode": "stream"}'}) == {
             "mode": "stream", "id": "e1", "confidence": 0.9}
         assert _edge_properties({"properties": "not json"}) == {}
         assert _edge_properties(None) == {}
+
+    def test_a_name_both_hold_reads_as_every_reader_reads_it(self):
+        """A key held natively and in the JSON: the JSON's value, as ``_edge_from_row`` takes
+        it — but the relationship's own id and confidence are always the platform's."""
+        from backend.app.providers.falkordb_provider import _edge_from_row, edge_user_properties
+        native = {"id": "e1", "confidence": 0.9, "mode": "stale", "lag": 3,
+                  "properties": '{"mode": "stream", "id": "theirs"}'}
+        assert _edge_properties(native) == {"mode": "stream", "lag": 3, "id": "e1",
+                                            "confidence": 0.9}
+        props, bag = edge_user_properties("FEEDS", native)
+        assert props == {"mode": "stream", "lag": 3, "id": "theirs"}
+        assert bag == {"mode": "stream", "id": "theirs"}
+        assert _edge_from_row("a", "b", "FEEDS", native).properties == props

@@ -1,7 +1,8 @@
 /**
  * displayRuleMatchStore — computed (non-persisted) display-rule results:
- * which on-screen entities each rule tags, and how many entities it
- * matches in the whole view.
+ * which on-screen entities each rule tags (and which on-screen
+ * relationships each relationship rule styles), and how many it matches in
+ * the whole view.
  *
  * The persisted rules themselves live in the view blueprint
  * (referenceModelStore.displayRules). ``useDisplayRuleEngine`` fills this
@@ -22,7 +23,7 @@ import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 
 import type { RuleCount } from '@/services/ruleCounts'
-import type { DisplayRuleConfig, DisplayRuleStyle } from '@/types/schema'
+import type { DisplayRuleConfig, DisplayRuleStyle, DisplayRuleTarget } from '@/types/schema'
 
 
 /** The visual payload a matched node needs to render one chip. */
@@ -34,6 +35,8 @@ export interface DisplayRuleTag {
     icon?: string
     /** How the rule paints what it matches; absent, its chip alone. */
     style?: DisplayRuleStyle
+    /** A rule that styles relationships' lines; absent, one that tags entities. */
+    target?: DisplayRuleTarget
 }
 
 /** How one entity's card is painted by the rules that match it: the first
@@ -49,6 +52,8 @@ export interface DisplayRuleLook {
 interface DisplayRuleMatchState {
     /** ruleId → the loaded entities that rule matches. */
     matchUrnsByRule: ReadonlyMap<string, ReadonlySet<string>>
+    /** Relationship rule id → the loaded relationships (by id) it matches. */
+    matchEdgesByRule: ReadonlyMap<string, ReadonlySet<string>>
     /** ruleId → how many entities it matches in the whole view (exact
      *  once ``complete``). */
     countsByRule: ReadonlyMap<string, RuleCount>
@@ -70,6 +75,12 @@ interface DisplayRuleMatchState {
     /** Fold in one membership answer: for each rule asked about, the
      *  evaluated URNs it matches now — and no longer the others. */
     applyMembership: (
+        ruleIds: ReadonlyArray<string>,
+        evaluated: ReadonlyArray<string>,
+        matches: Readonly<Record<string, ReadonlyArray<string>>>,
+    ) => void
+    /** The same for relationship rules: the evaluated relationship ids each matches now. */
+    applyEdgeMembership: (
         ruleIds: ReadonlyArray<string>,
         evaluated: ReadonlyArray<string>,
         matches: Readonly<Record<string, ReadonlyArray<string>>>,
@@ -99,8 +110,28 @@ const EMPTY_TAGS: ReadonlyArray<DisplayRuleTag> = Object.freeze([])
 const EMPTY_LOOK: DisplayRuleLook = Object.freeze({})
 
 
+/** ``held`` with each of ``ruleIds`` answered for ``evaluated``: its matches among them now,
+ *  and no longer the others; what was not asked about kept. */
+function folded(
+    held: ReadonlyMap<string, ReadonlySet<string>>,
+    ruleIds: ReadonlyArray<string>,
+    evaluated: ReadonlyArray<string>,
+    matches: Readonly<Record<string, ReadonlyArray<string>>>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+    const next = new Map(held)
+    for (const id of ruleIds) {
+        const updated = new Set(next.get(id) ?? [])
+        for (const key of evaluated) updated.delete(key)
+        for (const key of matches[id] ?? []) updated.add(key)
+        next.set(id, updated)
+    }
+    return next
+}
+
+
 export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => ({
     matchUrnsByRule: EMPTY_MATCHES,
+    matchEdgesByRule: EMPTY_MATCHES,
     countsByRule: EMPTY_COUNTS,
     ruleMeta: EMPTY_META,
     membershipError: null,
@@ -109,26 +140,23 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
     retryToken: 0,
 
     applyMembership: (ruleIds, evaluated, matches) => {
-        set((s) => {
-            const next = new Map(s.matchUrnsByRule)
-            for (const id of ruleIds) {
-                const updated = new Set(next.get(id) ?? [])
-                for (const urn of evaluated) updated.delete(urn)
-                for (const urn of matches[id] ?? []) updated.add(urn)
-                next.set(id, updated)
-            }
-            return { matchUrnsByRule: next }
-        })
+        set((s) => ({ matchUrnsByRule: folded(s.matchUrnsByRule, ruleIds, evaluated, matches) }))
+    },
+
+    applyEdgeMembership: (ruleIds, evaluated, matches) => {
+        set((s) => ({ matchEdgesByRule: folded(s.matchEdgesByRule, ruleIds, evaluated, matches) }))
     },
 
     setCounts: (counts) => set({ countsByRule: counts }),
 
     clearRule: (ruleId) => {
         set((s) => {
-            if (!s.matchUrnsByRule.has(ruleId)) return {}
-            const next = new Map(s.matchUrnsByRule)
-            next.delete(ruleId)
-            return { matchUrnsByRule: next }
+            if (!s.matchUrnsByRule.has(ruleId) && !s.matchEdgesByRule.has(ruleId)) return {}
+            const urns = new Map(s.matchUrnsByRule)
+            const edges = new Map(s.matchEdgesByRule)
+            urns.delete(ruleId)
+            edges.delete(ruleId)
+            return { matchUrnsByRule: urns, matchEdgesByRule: edges }
         })
     },
 
@@ -136,7 +164,10 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
         set({
             ruleMeta: rules
                 .filter((r) => r.enabled)
-                .map((r) => ({ id: r.id, name: r.name, color: r.color, icon: r.icon, style: r.style })),
+                .map((r) => ({
+                    id: r.id, name: r.name, color: r.color, icon: r.icon, style: r.style,
+                    ...(r.target === 'relationships' ? { target: r.target } : {}),
+                })),
         })
     },
 
@@ -144,10 +175,12 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
         const keep = new Set(keepIds)
         set((s) => {
             const matches = new Map([...s.matchUrnsByRule].filter(([id]) => keep.has(id)))
+            const edges = new Map([...s.matchEdgesByRule].filter(([id]) => keep.has(id)))
             const counts = new Map([...s.countsByRule].filter(([id]) => keep.has(id)))
             const changed = matches.size !== s.matchUrnsByRule.size
+                || edges.size !== s.matchEdgesByRule.size
                 || counts.size !== s.countsByRule.size
-            return changed ? { matchUrnsByRule: matches, countsByRule: counts } : {}
+            return changed ? { matchUrnsByRule: matches, matchEdgesByRule: edges, countsByRule: counts } : {}
         })
     },
 
@@ -159,7 +192,8 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
     })),
 
     clear: () => set({
-        matchUrnsByRule: EMPTY_MATCHES, countsByRule: EMPTY_COUNTS, ruleMeta: EMPTY_META,
+        matchUrnsByRule: EMPTY_MATCHES, matchEdgesByRule: EMPTY_MATCHES, countsByRule: EMPTY_COUNTS,
+        ruleMeta: EMPTY_META,
         membershipError: null, countsError: null, membershipNote: null,
     }),
 }))
@@ -179,8 +213,9 @@ function tagsOf(s: DisplayRuleMatchState, urn: string | undefined): ReadonlyArra
     if (!urn || s.ruleMeta.length === 0) return EMPTY_TAGS
     const tags: DisplayRuleTag[] = []
     for (const meta of s.ruleMeta) {
-        // A rule styled without its chip paints the card and says nothing.
-        if (meta.style?.chip === false) continue
+        // A rule styled without its chip paints the card and says nothing; one
+        // that styles relationships says it on their lines.
+        if (meta.style?.chip === false || meta.target === 'relationships') continue
         if (s.matchUrnsByRule.get(meta.id)?.has(urn)) tags.push(meta)
     }
     return tags.length === 0 ? EMPTY_TAGS : tags
@@ -203,7 +238,7 @@ function lookOf(s: DisplayRuleMatchState, urn: string | undefined): DisplayRuleL
     let frameKind: DisplayRuleLook['frameKind']
     for (const meta of s.ruleMeta) {
         const style = meta.style
-        if (!style || (!style.fill && !style.frame)) continue
+        if (!style || (!style.fill && !style.frame) || meta.target === 'relationships') continue
         if (!s.matchUrnsByRule.get(meta.id)?.has(urn)) continue
         if (style.fill && fillColor === undefined) fillColor = meta.color
         if (style.frame && frameKind === undefined) {

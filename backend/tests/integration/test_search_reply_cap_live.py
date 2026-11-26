@@ -63,6 +63,8 @@ async def provider(capped):
         auth_enabled=False,
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    # The ontology resolved, as the engine resolves it before any search.
+    p.set_resolved_edge_metadata({"FEEDS": {"isLineage": True}}, ["FEEDS"])
     await p._ensure_connected()
     for label in ("Domain", "Container", "Dataset"):
         await p._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.urn)")
@@ -76,6 +78,15 @@ async def provider(capped):
             "CREATE (root)-[:CONTAINS]->(:Container {urn: r.c, displayName: r.c})"
             "-[:CONTAINS]->(:Dataset {urn: r.d, displayName: r.d, propertiesRaw: $raw})",
             {"rows": rows, "raw": raw})
+    # And a relationship from each dataset to the next, its properties all in its JSON — as a
+    # relationship written before they were kept natively holds them.
+    bag = json.dumps({"job": "nightly"})
+    for start in range(0, N - 1, 3_000):
+        rows = [{"a": f"urn:dataset:{i}", "b": f"urn:dataset:{i + 1}"}
+                for i in range(start, min(N - 1, start + 3_000))]
+        await p._graph.query(
+            "UNWIND $rows AS r MATCH (a:Dataset {urn: r.a}) MATCH (b:Dataset {urn: r.b}) "
+            "CREATE (a)-[:FEEDS {id: r.a, properties: $bag}]->(b)", {"rows": rows, "bag": bag})
     try:
         yield p
     finally:
@@ -152,3 +163,38 @@ async def test_every_container_past_one_reply_is_tallied(provider):
     root = counts.pop("urn:root")
     assert root == N
     assert set(counts.values()) == {1}
+
+
+async def _catalog(provider, subject, tag):
+    from backend.app.providers.falkordb_search.catalog import execute_catalog_session
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.common.models.search import SearchScope
+
+    scope = SearchScope.model_validate({"viewId": "v", "scopeMode": "data_source",
+                                        "entityTypes": ["Dataset"]})
+    context = SearchRunContext(data_version=tag, scope_hash=tag)
+    sid, out = None, None
+    for _ in range(400):
+        out = await execute_catalog_session(provider, scope, context=context, wait_ms=0,
+                                            session_id=sid, subject=subject)
+        sid = out["sessionId"]
+        if out["status"] == "complete":
+            return out
+    raise AssertionError("the catalog never finished")
+
+
+async def test_the_catalog_counts_every_raw_key_past_one_reply(provider):
+    out = await _catalog(provider, "entities", "catalog")
+    owner = {p["key"]: p for p in out["properties"]}["owner"]
+    assert out["entities"] == N
+    assert owner["count"] == N and owner["residual"] == N
+    assert owner["values"] == [{"value": "finance", "kind": "String", "count": N}]
+
+
+async def test_the_relationship_catalog_counts_every_bag_past_one_reply(provider):
+    out = await _catalog(provider, "relationships", "relationship-catalog")
+    job = {p["key"]: p for p in out["properties"]}["job"]
+    assert out["entities"] == N - 1
+    assert out["entityTypes"] == [{"type": "FEEDS", "count": N - 1}]
+    assert job["count"] == N - 1 and job["residual"] == N - 1
+    assert job["values"] == [{"value": "nightly", "kind": "String", "count": N - 1}]

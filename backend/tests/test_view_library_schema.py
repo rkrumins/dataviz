@@ -42,3 +42,16 @@ async def test_the_schema_describes_everything_an_export_writes(test_client: Asy
     check(query, defs["SavedQuery"], "query")
     assert (pack["format"], pack["version"]) == \
         (schema["properties"]["format"]["const"], schema["properties"]["version"]["const"])
+
+
+async def test_the_schema_describes_a_rule_that_styles_relationships(test_client: AsyncClient):
+    from backend.tests.test_view_library import _relationship_rule
+
+    defs = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["$defs"]
+    view_id = await _view(test_client)
+    lines = _relationship_rule("r1", "Streams", style={"chip": False, "dash": "dotted", "width": 3})
+    assert (await test_client.put(f"/api/v1/views/{view_id}/library/rules/r1", json=lines)).status_code == 200
+    [rule] = (await test_client.get(f"/api/v1/views/{view_id}/library/export")).json()["displayRules"]
+    assert set(rule) <= set(defs["DisplayRule"]["properties"])
+    assert set(rule["style"]) <= set(defs["DisplayRuleStyle"]["properties"])
+    assert defs["DisplayRule"]["properties"]["target"]["default"] == "entities"

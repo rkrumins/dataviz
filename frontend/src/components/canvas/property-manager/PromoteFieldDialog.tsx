@@ -1,9 +1,16 @@
 /**
- * PromoteFieldDialog — "Make it a field…": an ad-hoc property, made a field of the entity types that
- * carry it, in the data source's semantic layer. Prefilled from what the catalog read of it: the key
- * (the field's id is the property it reads and writes), a type from the kinds it is stored as,
- * candidate allowed values when it holds few, and the types it is on. A field can then be required,
- * kept to allowed values, and is typed — what publishing a draft holds its values to.
+ * PromoteFieldDialog — "Make it a field…": an ad-hoc property, made a field of the types that carry
+ * it, in the data source's semantic layer — of entity types (`PromoteFieldDialog`, from the catalog
+ * read of it) or of relationship types (`PromoteRelationshipFieldDialog`). Prefilled from what is
+ * known of it: the key (the field's id is the property it reads and writes), a type from the kinds it
+ * is stored as, candidate allowed values when it holds few, and the types it is on. A field can then
+ * be required, kept to allowed values, and is typed — what publishing a draft holds its values to.
+ *
+ * The field is stored as the semantic layer stores one (`fieldSchemaToBackend`), and the types'
+ * definitions are sent whole — every type, each with all its fields — since the server replaces
+ * them. A relationship type's field has no display options, as its type editor offers none; a
+ * relationship's envelope (`id`, `confidence`, `properties`, `gvHash`) is never a field, and a
+ * built-in type (a roll-up) takes none.
  *
  * Where the field goes follows the semantic layer's lifecycle, said before anything is written:
  * - a draft layer is changed in place;
@@ -17,7 +24,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Info, ListChecks, Lock, X } from 'lucide-react'
+import { ArrowRight, Ban, Info, ListChecks, Lock, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -28,10 +35,12 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useOntologyDefinition } from '@/hooks/useOntologyDefinition'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { caseFold } from '@/features/ontology/lib/caseFold'
-import { humanizeId } from '@/features/ontology/lib/ontology-parsers'
+import { fieldSchemaToBackend, humanizeId } from '@/features/ontology/lib/ontology-parsers'
+import { NON_DRAWABLE_EDGE_TYPES } from '@/services/ontologyPreflightService'
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { EntityFieldDefinition } from '@/types/schema'
 import type { SearchCatalogProperty } from '@/types/search'
+import { EDGE_ENVELOPE_KEYS } from './op/opModel'
 import { storedType } from './propertyValueTypes'
 
 /** A key holding at most this many distinct values offers them all as allowed values. */
@@ -54,9 +63,69 @@ type Target =
   | { kind: 'inPlace'; ontology: OntologyDefinitionResponse; assigned: OntologyDefinitionResponse }
   | { kind: 'newVersion'; ontology: OntologyDefinitionResponse }
 
+/** Whose types the field is made on. */
+type Of = 'entity' | 'relationship'
+
+/** Their types as the dialog names them, and where the semantic layer keeps them. */
+const WORDS: Record<Of, { type: string; types: string; defs: 'entityTypeDefinitions' | 'relationshipTypeDefinitions' }> = {
+  entity: { type: 'entity type', types: 'entity types', defs: 'entityTypeDefinitions' },
+  relationship: { type: 'relationship type', types: 'relationship types', defs: 'relationshipTypeDefinitions' },
+}
+
+/** The property made a field, and what is known of it. */
+interface Subject {
+  of: Of
+  key: string
+  /** How many carry it, by type as they are stored. */
+  byType: Readonly<Record<string, number>>
+  /** How many hold it, by the kind its value is stored as (`Integer`, `String`, …). */
+  kinds: Readonly<Record<string, number>>
+  /** How many hold it, in all. */
+  count: number
+  /** The values it holds, offered as its allowed values. */
+  candidates: readonly string[]
+}
+
+/** A property of entities, made a field of the entity types that carry it — from the catalog. */
 export function PromoteFieldDialog({ property, onClose }: { property: SearchCatalogProperty; onClose: () => void }) {
+  const subject = useMemo<Subject>(() => ({
+    of: 'entity',
+    key: property.key,
+    byType: property.byEntityType,
+    kinds: property.kinds,
+    count: property.count,
+    candidates: property.distinctExact && property.distinct <= CANDIDATES_MAX
+      ? [...new Set(property.values.map((v) => (typeof v.value === 'string' ? v.value.trim() : JSON.stringify(v.value))).filter(Boolean))]
+      : [],
+  }), [property])
+  return <PromoteDialog subject={subject} onClose={onClose} />
+}
+
+/** A property relationships carry, made a field of their relationship types. */
+export function PromoteRelationshipFieldDialog({ propertyKey, types, kinds, onClose }: {
+  /** The property, as relationships hold it. */
+  propertyKey: string
+  /** The relationship types that carry it, as they are stored, with how many of each do. */
+  types: Readonly<Record<string, number>>
+  /** How many hold it, by the kind its value is stored as (`Integer`, `Float`, `String`, `Boolean`, `List`). */
+  kinds: Readonly<Record<string, number>>
+  onClose: () => void
+}) {
+  const subject = useMemo<Subject>(() => ({
+    of: 'relationship',
+    key: propertyKey,
+    byType: types,
+    kinds,
+    count: Object.values(types).reduce((n, c) => n + c, 0),
+    candidates: [],
+  }), [propertyKey, types, kinds])
+  return <PromoteDialog subject={subject} onClose={onClose} />
+}
+
+function PromoteDialog({ subject, onClose }: { subject: Subject; onClose: () => void }) {
   const { notify } = useAppNotifications()
   const navigate = useNavigate()
+  const words = WORDS[subject.of]
   const wsId = useWorkspacesStore((s) => s.activeWorkspaceId)
   const dataSource = useWorkspacesStore((s) => s.getActiveDataSource())
   const ontologyId = dataSource?.ontologyId ?? null
@@ -81,28 +150,35 @@ export function PromoteFieldDialog({ property, onClose }: { property: SearchCata
   }, [ontologyId, isLoading, ontology, versions.isLoading, versions.data])
   const editing = target.kind === 'inPlace' || target.kind === 'newVersion' ? target.ontology : null
 
-  // ── The field, prefilled from the catalog ──
-  const key = property.key
+  // ── The field, prefilled from what is known of the property ──
+  const key = subject.key
+  // A relationship's envelope is what every relationship is, not a property it carries.
+  const envelope = subject.of === 'relationship' && EDGE_ENVELOPE_KEYS.has(key)
   const [name, setName] = useState(() => humanizeId(key))
   const [type, setType] = useState<EntityFieldDefinition['type']>(() => {
-    const t = storedType(property.kinds).type
+    const t = storedType(subject.kinds).type
     return t === 'number' ? 'number' : t === 'boolean' ? 'boolean' : t === 'list' ? 'tags' : 'string'
   })
   const [required, setRequired] = useState(false)
   const [allowed, setAllowed] = useState<{ values: string[]; allowOther: boolean }>({ values: [], allowOther: false })
-  const candidates = useMemo(() => (property.distinctExact && property.distinct <= CANDIDATES_MAX
-    ? [...new Set(property.values.map((v) => (typeof v.value === 'string' ? v.value.trim() : JSON.stringify(v.value))).filter(Boolean))]
-    : []), [property])
+  const candidates = subject.candidates
 
   // The types it is on, as the semantic layer declares them (matched case-insensitively).
-  const defs = useMemo(() => ((editing?.entityTypeDefinitions ?? {}) as Defs), [editing])
-  const onTypes = useMemo(() => Object.entries(property.byEntityType).sort((a, b) => b[1] - a[1]).map(([t, count]) => {
+  const defs = useMemo(() => ((editing?.[words.defs] ?? {}) as Defs), [editing, words.defs])
+  const onTypes = useMemo(() => Object.entries(subject.byType).sort((a, b) => b[1] - a[1]).map(([t, count]) => {
     const declared = Object.keys(defs).find((d) => caseFold(d) === caseFold(t)) ?? null
-    const fields = ((declared ? defs[declared]?.fields : null) ?? []) as Array<Record<string, unknown>>
-    return { type: t, count, declared, already: fields.some((f) => f.id === key) }
-  }), [property.byEntityType, defs, key])
+    const def = declared ? defs[declared] : undefined
+    const fields = (Array.isArray(def?.fields) ? def.fields : []) as Array<Record<string, unknown>>
+    // A built-in relationship type (a roll-up) is the platform's own: it takes no fields.
+    const builtIn = subject.of === 'relationship'
+      && (!!(def?.is_system ?? def?.isSystem) || NON_DRAWABLE_EDGE_TYPES.has(t.toUpperCase()))
+    // A relationship type reads by its name ("Feeds"), its id beside it; an entity type by its id.
+    const label = subject.of === 'relationship' ? (typeof def?.name === 'string' && def.name) || humanizeId(declared ?? t) : declared ?? t
+    return { type: t, count, declared, label, builtIn, already: fields.some((f) => f.id === key) }
+  }), [subject.byType, subject.of, defs, key])
+  const open = (t: (typeof onTypes)[number]) => !!t.declared && !t.already && !t.builtIn
   const [unchecked, setUnchecked] = useState<ReadonlySet<string>>(new Set())
-  const chosen = onTypes.filter((t) => t.declared && !t.already && !unchecked.has(t.type))
+  const chosen = onTypes.filter((t) => open(t) && !unchecked.has(t.type))
   const toggleType = (t: string) => setUnchecked((s) => { const n = new Set(s); if (n.has(t)) n.delete(t); else n.add(t); return n })
 
   const mutations = useOntologyMutations()
@@ -117,26 +193,28 @@ export function PromoteFieldDialog({ property, onClose }: { property: SearchCata
   const openLayer = (id: string) => { onClose(); navigate(schemaUrl(id)) }
 
   const save = async () => {
-    if (!editing || chosen.length === 0 || !name.trim()) return
+    if (!editing || envelope || chosen.length === 0 || !name.trim()) return
     setSaving(true)
     setError(null)
     try {
+      // Every type as stored, each with all its fields: the server replaces the definitions.
       const next: Defs = { ...defs }
       for (const t of chosen) {
         const def = next[t.declared!] ?? {}
-        const fields = ((def.fields as Array<Record<string, unknown>>) ?? [])
+        const fields = (Array.isArray(def.fields) ? def.fields : []) as Array<Record<string, unknown>>
         next[t.declared!] = {
           ...def,
-          fields: [...fields, {
+          fields: [...fields, fieldSchemaToBackend({
             id: key, name: name.trim(), type, required,
-            show_in_node: false, show_in_panel: true, show_in_tooltip: false, display_order: fields.length,
-            ...(allowed.values.length ? { allowed_values: allowed.values } : {}),
-            ...(allowed.values.length && allowed.allowOther ? { allow_other: true } : {}),
-          }],
+            showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: fields.length,
+            ...(allowed.values.length ? { allowedValues: allowed.values, allowOther: allowed.allowOther } : {}),
+          })],
         }
       }
-      const saved = await mutations.update.mutateAsync({ id: editing.id, req: { entityTypeDefinitions: next } })
-      const where = chosen.map((t) => t.declared).join(', ')
+      const saved = await mutations.update.mutateAsync({ id: editing.id, req: { [words.defs]: next } })
+      const where = subject.of === 'relationship'
+        ? `${chosen.map((t) => t.label).join(', ')} relationships`
+        : chosen.map((t) => t.declared).join(', ')
       if (target.kind === 'inPlace' && target.ontology.id === target.assigned.id) {
         notify('success', `${name.trim()} is a field of ${where} in “${saved.name}”.`,
           { label: 'Open the semantic layer', onClick: () => navigate(schemaUrl(saved.id)) })
@@ -160,7 +238,11 @@ export function PromoteFieldDialog({ property, onClose }: { property: SearchCata
   const problem = !editing ? null
     : !name.trim() ? 'Name the field'
       : onTypes.every((t) => !t.declared) ? 'None of the types it is on are in the semantic layer'
-        : chosen.length === 0 ? 'Pick a type to add it to' : null
+        : !onTypes.some(open) ? `None of the ${words.types} it is on can take it`
+          : chosen.length === 0 ? 'Pick a type to add it to' : null
+  const plan = (
+    <>Adds the field <span className="font-mono text-ink">{key}</span> to {chosen.length.toLocaleString()} {chosen.length === 1 ? words.type : words.types}</>
+  )
 
   if (typeof document === 'undefined') return null
   return createPortal(
@@ -185,82 +267,106 @@ export function PromoteFieldDialog({ property, onClose }: { property: SearchCata
                 Make <span className="font-mono">{key}</span> a field
               </h3>
               <p className="mt-0.5 text-[11.5px] text-ink-muted">
-                A field of its entity types, in the semantic layer: typed, and optionally required or kept to allowed values — what publishing a draft holds it to.
+                A field of its {words.types}, in the semantic layer: typed, and optionally required or kept to allowed values — what publishing a draft holds it to.
               </p>
             </div>
             <IconButton icon={X} label="Close" shortcut="Esc" onClick={onClose} />
           </div>
 
           <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-5 py-4 space-y-4">
-            <Where target={target} onOpen={openLayer} />
-
-            {editing && (
-              <>
-                <div className="grid grid-cols-[1fr_auto] gap-2">
-                  <label className="space-y-1">
-                    <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">Name</span>
-                    <input value={name} onChange={(e) => setName(e.target.value)} aria-label="Field name"
-                      className="w-full rounded-lg border border-glass-border bg-canvas px-2.5 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30" />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">Type</span>
-                    <select value={type} onChange={(e) => setType(e.target.value as EntityFieldDefinition['type'])} aria-label="Field type"
-                      className="rounded-lg border border-glass-border bg-canvas px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30">
-                      {TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </label>
+            {envelope ? (
+              <div role="alert" className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-3 text-[12px] leading-snug text-amber-900 dark:text-amber-100">
+                <Ban className="mt-px h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                <div className="min-w-0">
+                  <p className="font-semibold">
+                    <span className="font-mono">{key}</span> can’t be a field
+                  </p>
+                  <p className="mt-0.5 text-amber-800/90 dark:text-amber-200/90">
+                    It is part of every relationship itself — kept by the platform, not a property relationships carry. Pick a property they hold instead.
+                  </p>
                 </div>
-                <p className="-mt-2 text-[11px] text-ink-muted">
-                  Reads and writes the property <span className="font-mono text-ink">{key}</span>
-                  {storedType(property.kinds).mixed && ' — stored as more than one kind today; values not of the type are warned of while editing'}.
-                </p>
+              </div>
+            ) : (
+              <Where target={target} onOpen={openLayer} />
+            )}
 
-                <div>
-                  <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted mb-1">On</span>
+            {editing && !envelope && (
+              <>
+                <section>
+                  <Step n={1} title="The field" />
+                  <div className="grid grid-cols-[1fr_auto] gap-2">
+                    <label className="space-y-1">
+                      <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">Name</span>
+                      <input value={name} onChange={(e) => setName(e.target.value)} aria-label="Field name"
+                        className="w-full rounded-lg border border-glass-border bg-canvas px-2.5 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30" />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">Type</span>
+                      <select value={type} onChange={(e) => setType(e.target.value as EntityFieldDefinition['type'])} aria-label="Field type"
+                        className="rounded-lg border border-glass-border bg-canvas px-2 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent-lineage/30">
+                        {TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  <p className="mt-2 text-[11px] text-ink-muted">
+                    Reads and writes the property <span className="font-mono text-ink">{key}</span>
+                    {storedType(subject.kinds).mixed && ' — stored as more than one kind today; values not of the type are warned of while editing'}.
+                  </p>
+                </section>
+
+                <section>
+                  <Step n={2} title="On" hint={`The ${words.types} that carry it`} />
                   <div className="space-y-1">
                     {onTypes.map((t) => (
-                      <label key={t.type} className={cn('flex items-center gap-2 text-[12px]', t.declared && !t.already ? 'cursor-pointer text-ink' : 'text-ink-muted')}>
-                        <input type="checkbox" disabled={!t.declared || t.already}
-                          checked={!!t.declared && !t.already && !unchecked.has(t.type)} onChange={() => toggleType(t.type)}
+                      <label key={t.type} className={cn('flex items-center gap-2 text-[12px]', open(t) ? 'cursor-pointer text-ink' : 'text-ink-muted')}>
+                        <input type="checkbox" disabled={!open(t)}
+                          checked={open(t) && !unchecked.has(t.type)} onChange={() => toggleType(t.type)}
                           className="h-3.5 w-3.5 rounded accent-indigo-500" />
-                        <span className="font-medium">{t.declared ?? t.type}</span>
-                        <span className="text-[11px] text-ink-muted tabular-nums">{t.count.toLocaleString()} carry it</span>
-                        {t.already && <span className="text-[11px] text-ink-muted">· a field already</span>}
-                        {!t.declared && <span className="text-[11px] text-ink-muted">· not a type of this semantic layer</span>}
+                        <span className="font-medium">{t.label}</span>
+                        {subject.of === 'relationship' && (t.declared ?? t.type) !== t.label && (
+                          <code className="text-[10.5px] font-mono text-ink-muted">{t.declared ?? t.type}</code>
+                        )}
+                        <span className="text-[11px] text-ink-muted tabular-nums">{t.count.toLocaleString()} {t.count === 1 ? 'carries' : 'carry'} it</span>
+                        {t.builtIn ? <span className="text-[11px] text-ink-muted">· built in — it takes no fields</span>
+                          : t.already ? <span className="text-[11px] text-ink-muted">· a field already</span>
+                            : !t.declared && <span className="text-[11px] text-ink-muted">· not a type of this semantic layer</span>}
                       </label>
                     ))}
                   </div>
-                </div>
+                </section>
 
-                <label className="flex items-start gap-2 cursor-pointer select-none">
-                  <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} className="mt-0.5 h-3.5 w-3.5 rounded accent-indigo-500" />
-                  <span className="text-[12px] text-ink">
-                    Required
-                    <span className="block text-[11px] text-ink-muted">
-                      {property.count.toLocaleString()} hold it now. A draft that adds one of these types without it, or empties it, can’t be published — existing ones are judged only when they change.
+                <section>
+                  <Step n={3} title="Rules" hint="Optional" />
+                  <label className="flex items-start gap-2 cursor-pointer select-none">
+                    <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} className="mt-0.5 h-3.5 w-3.5 rounded accent-indigo-500" />
+                    <span className="text-[12px] text-ink">
+                      Required
+                      <span className="block text-[11px] text-ink-muted">
+                        {subject.count.toLocaleString()} {subject.of === 'entity' ? 'hold' : subject.count === 1 ? 'relationship holds' : 'relationships hold'} it now. A draft that adds {subject.of === 'relationship' ? 'a relationship' : 'one'} of these types without it, or empties it, can’t be published — existing ones are judged only when they change.
+                      </span>
                     </span>
-                  </span>
-                </label>
+                  </label>
 
-                <div>
-                  <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted mb-1">Allowed values</span>
-                  <AllowedValuesEditor values={allowed.values} allowOther={allowed.allowOther} candidates={candidates}
-                    onChange={(values, allowOther) => setAllowed({ values, allowOther })} label={`Allowed values of ${name || key}`} />
-                  {candidates.length > 0 && allowed.values.length === 0 && (
-                    <button type="button" onClick={() => setAllowed({ values: candidates, allowOther: false })}
-                      className="mt-1.5 text-[11px] font-semibold text-accent-lineage hover:underline">
-                      Allow just the {candidates.length} values it holds
-                    </button>
-                  )}
-                </div>
+                  <div className="mt-3">
+                    <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted mb-1">Allowed values</span>
+                    <AllowedValuesEditor values={allowed.values} allowOther={allowed.allowOther} candidates={candidates}
+                      onChange={(values, allowOther) => setAllowed({ values, allowOther })} label={`Allowed values of ${name || key}`} />
+                    {candidates.length > 0 && allowed.values.length === 0 && (
+                      <button type="button" onClick={() => setAllowed({ values: [...candidates], allowOther: false })}
+                        className="mt-1.5 text-[11px] font-semibold text-accent-lineage hover:underline">
+                        Allow just the {candidates.length} values it holds
+                      </button>
+                    )}
+                  </div>
+                </section>
               </>
             )}
           </div>
 
-          {(target.kind === 'inPlace' || target.kind === 'newVersion') && (
+          {!envelope && (target.kind === 'inPlace' || target.kind === 'newVersion') && (
             <div className="flex items-center gap-2 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-5 py-3">
-              <span role={error ? 'alert' : undefined} className={cn('min-w-0 flex-1 text-[11.5px]', error ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
-                {error ?? problem ?? ''}
+              <span role={error ? 'alert' : undefined} aria-live="polite" className={cn('min-w-0 flex-1 text-[11.5px]', error ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
+                {error ?? problem ?? plan}
               </span>
               <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
               <Button size="sm" variant="primary" disabled={!!problem} loading={saving} onClick={() => void save()}>
@@ -272,6 +378,19 @@ export function PromoteFieldDialog({ property, onClose }: { property: SearchCata
       </div>
     </>,
     document.body,
+  )
+}
+
+/** A step of the dialog: its number, what it asks, and a word on it. */
+function Step({ n, title, hint }: { n: number; title: string; hint?: string }) {
+  return (
+    <div className="mb-1.5 flex items-center gap-2">
+      <span aria-hidden className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-accent-lineage/15 text-[10px] font-semibold tabular-nums text-accent-lineage">
+        {n}
+      </span>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-secondary">{title}</span>
+      {hint && <span className="min-w-0 truncate text-[11px] text-ink-muted">{hint}</span>}
+    </div>
   )
 }
 

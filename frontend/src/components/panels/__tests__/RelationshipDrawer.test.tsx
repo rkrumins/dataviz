@@ -10,11 +10,15 @@
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactElement } from 'react'
+import { MemoryRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GraphEdge } from '@/providers/GraphDataProvider'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { useWorkspacesStore } from '@/store/workspaces'
 
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
@@ -36,6 +40,9 @@ const h = vi.hoisted(() => ({
   /** What the view's discovery sample says relationships of each type carry. */
   edgeKeys: {} as Record<string, string[]>,
   edgeSamples: {} as Record<string, unknown[]>,
+  /** The data source's semantic layer, and whether this person may edit it. */
+  layer: null as Record<string, unknown> | null,
+  canEditLayer: true,
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
@@ -92,6 +99,8 @@ vi.mock('@/hooks/useViewSchema', () => ({
   useViewRelationshipTypes: () => h.relTypes,
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
 }))
+vi.mock('@/hooks/useOntologyDefinition', () => ({ useOntologyDefinition: () => ({ ontology: h.layer, isLoading: false }) }))
+vi.mock('@/features/ontology/lib/useSemanticLayerAccess', () => ({ useSemanticLayerAccess: () => ({ canEdit: h.canEditLayer }) }))
 
 import { RelationshipDrawer } from '../RelationshipDrawer'
 
@@ -140,6 +149,8 @@ beforeEach(() => {
   h.restore = vi.fn()
   h.edgeKeys = {}
   h.edgeSamples = {}
+  h.layer = null
+  h.canEditLayer = true
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -717,5 +728,62 @@ describe('RelationshipDrawer — the fields its type defines', () => {
     expect(screen.queryByRole('button', { name: 'Add confidence' })).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Add frequency' }))
     expect(screen.getByPlaceholderText('e.g. daily')).toBeInTheDocument()
+  })
+})
+
+/** A property its type has no field for is made one from its row — a field of the relationship's
+ *  type, in the semantic layer — by who may edit the layer, read-only or edited. */
+describe('RelationshipDrawer — make a property a field', () => {
+  const feeds = (fields: unknown[] = []) => ({ id: 'FLOWS_TO', name: 'Feeds', sourceTypes: [], targetTypes: [], isLineage: true, fields })
+  const withLayer = (ui: ReactElement) => render(
+    <QueryClientProvider client={new QueryClient()}><MemoryRouter>{ui}</MemoryRouter></QueryClientProvider>)
+
+  beforeEach(() => {
+    h.layer = { id: 'ont1', name: 'Finance', version: 1, isPublished: false, isSystem: false, deletedAt: null,
+      entityTypeDefinitions: {}, relationshipTypeDefinitions: { FLOWS_TO: { name: 'Feeds', fields: [] } } }
+    useWorkspacesStore.setState({
+      activeWorkspaceId: 'ws1', activeDataSourceId: 'ds1',
+      workspaces: [{ id: 'ws1', dataSources: [{ id: 'ds1', isPrimary: true, ontologyId: 'ont1' }] }],
+    } as never)
+  })
+
+  it('opens the dialog on the property, for the relationship\'s type — on the published graph too', async () => {
+    const user = userEvent.setup()
+    h.relTypes = [feeds()]
+    setup(rel('e1'))
+    withLayer(<RelationshipDrawer />)
+    await user.click(screen.getByRole('button', { name: 'Make owner a field' }))
+    const dialog = screen.getByRole('dialog', { name: 'Make owner a field' })
+    expect(within(dialog).getByRole('checkbox', { name: /Feeds/ })).toBeChecked()
+    expect(within(dialog).getByText('1 carries it')).toBeInTheDocument()
+    expect(within(dialog).getByRole('combobox', { name: 'Field type' })).toHaveValue('string')
+    expect(within(dialog).getByText(/Adds the field/)).toHaveTextContent('Adds the field owner to 1 relationship type')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Make owner a field' })).toBeNull()
+  })
+
+  it('is offered in a draft as the properties are edited', () => {
+    h.relTypes = [feeds()]
+    setup(rel('e1'))
+    withLayer(<RelationshipDrawer canEdit />)
+    expect(screen.getByRole('button', { name: 'Make owner a field' })).toBeInTheDocument()
+  })
+
+  it('is not offered on a field already, on a type the layer does not declare, nor to who may not edit the layer', () => {
+    h.relTypes = [feeds([{ id: 'owner', name: 'Owner', type: 'string', required: false, showInNode: false, showInPanel: true, showInTooltip: false, displayOrder: 0 }])]
+    setup(rel('e1'))
+    const { unmount } = withLayer(<RelationshipDrawer />)
+    expect(screen.getByText('owner')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Make owner a field' })).toBeNull()
+    unmount()
+
+    h.relTypes = []
+    withLayer(<RelationshipDrawer />)
+    expect(screen.queryByRole('button', { name: 'Make owner a field' })).toBeNull()
+
+    h.relTypes = [feeds()]
+    h.canEditLayer = false
+    withLayer(<RelationshipDrawer />)
+    expect(screen.queryByRole('button', { name: 'Make owner a field' })).toBeNull()
   })
 })

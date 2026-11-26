@@ -2857,7 +2857,7 @@
       "type": "object"
     },
     "SearchCatalogRequest": {
-      "description": "``POST /search/catalog``: every property the view's entities carry \u2014\non how many, stored as which kinds, with which values \u2014 read from every\nentity in its scope, not a sample. A large view takes more than one\nrequest: send it again with the returned ``sessionId`` until ``status``\nis ``complete``.",
+      "description": "``POST /search/catalog``: every property the view's entities carry \u2014\non how many, stored as which kinds, with which values \u2014 read from every\nentity in its scope, not a sample. A large view takes more than one\nrequest: send it again with the returned ``sessionId`` until ``status``\nis ``complete``.\n\n``subject`` ``relationships`` lists the properties of the relationships\nbetween the entities in its scope instead (never a rollup): the answer\nhas the same shape \u2014 ``entities`` counts relationships, ``entityTypes``\nand ``byEntityType`` are relationship types, ``residual`` counts those\nheld in a relationship's JSON \u2014 and no tags.",
       "properties": {
         "refresh": {
           "default": false,
@@ -2880,6 +2880,16 @@
           ],
           "default": null,
           "title": "Sessionid"
+        },
+        "subject": {
+          "default": "entities",
+          "description": "``entities`` (the default) or ``relationships``.",
+          "enum": [
+            "entities",
+            "relationships"
+          ],
+          "title": "Subject",
+          "type": "string"
         },
         "valuesFor": {
           "anyOf": [
@@ -2991,6 +3001,15 @@
             "complete"
           ],
           "title": "Status",
+          "type": "string"
+        },
+        "subject": {
+          "default": "entities",
+          "enum": [
+            "entities",
+            "relationships"
+          ],
+          "title": "Subject",
           "type": "string"
         },
         "tagged": {
@@ -3726,9 +3745,45 @@
       "title": "SearchHit",
       "type": "object"
     },
-    "SearchMembershipRequest": {
-      "description": "``POST /search/membership``: which of these entities \u2014 the ones on\nscreen \u2014 match which rules. Answers only for entities inside the view's\nscope; one outside it never matches, whatever it holds.",
+    "SearchMembershipEdge": {
+      "description": "A relationship on screen: its id \u2014 the canvas's, the one an edge read answers with \u2014 and\nits ends, which it is found through (by their urns), never by a scan of every edge.",
       "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "target": {
+          "minLength": 1,
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "source",
+        "target"
+      ],
+      "title": "SearchMembershipEdge",
+      "type": "object"
+    },
+    "SearchMembershipRequest": {
+      "description": "``POST /search/membership``: which of these entities \u2014 the ones on\nscreen \u2014 match which rules, and which of these relationships match which\nrules that style relationships (a rule whose predicate is a Connections\nsearch). Answers only inside the view's scope; an entity outside it never\nmatches, whatever it holds, nor a relationship with an end outside it.",
+      "properties": {
+        "edges": {
+          "description": "The relationships on screen the Connections rules are asked about.",
+          "items": {
+            "$ref": "#/$defs/SearchMembershipEdge"
+          },
+          "maxItems": 1000,
+          "title": "Edges",
+          "type": "array"
+        },
         "items": {
           "items": {
             "$ref": "#/$defs/SearchRuleItem"
@@ -3752,8 +3807,7 @@
       },
       "required": [
         "scope",
-        "items",
-        "urns"
+        "items"
       ],
       "title": "SearchMembershipRequest",
       "type": "object"
@@ -3771,6 +3825,17 @@
           ],
           "default": null,
           "title": "Dataversion"
+        },
+        "edgeMatches": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Connections rule id \u2192 the ids of the requested relationships it matches (both ends in scope).",
+          "title": "Edgematches",
+          "type": "object"
         },
         "elapsedMs": {
           "default": 0,

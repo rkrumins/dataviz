@@ -19,8 +19,10 @@ catalog.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from pydantic import TypeAdapter, ValidationError as PydanticValidationError
@@ -40,7 +42,9 @@ from backend.app.services.advanced_search_service import (
 )
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
-from backend.common.models.search import EdgesPredicate, Predicate, unwrap_edges
+from backend.common.models.search import (
+    EdgesPredicate, Predicate, SearchQuery, SearchScope, unwrap_edges,
+)
 from backend.common.models.view_library import (
     LIBRARY_QUERIES_MAX,
     LIBRARY_REUSABLE_CHANGES_MAX,
@@ -64,6 +68,8 @@ from backend.common.models.view_library import (
 
 _PREDICATE = TypeAdapter(Predicate)
 
+logger = logging.getLogger(__name__)
+
 
 class LibraryError(Exception):
     """A request the library refuses: ``status`` is the HTTP answer."""
@@ -82,14 +88,16 @@ def _now() -> str:
 # Predicates
 # ---------------------------------------------------------------------------
 
-def _check_predicate(raw: Any, *, rule: bool) -> Any:
+def _check_predicate(raw: Any, *, rule: bool, relationships: bool = False) -> Any:
     """``raw`` validated as a search's predicate is — its shape, its typed
     values, its size — or a 422 naming what is wrong. A rule also refuses
     ``withinHops`` and paths: they describe a route through the graph, and a
     rule is asked about one entity at a time — as it does lineage
     relationships of more than one hop. And it refuses what the engines
     that count and tag it would (``_rule_compile_problem``): saved, such a
-    rule failed every time the canvas asked about it."""
+    rule failed every time the canvas asked about it. ``relationships``: a
+    rule that styles relationships, whose predicate is a Connections search —
+    and only such a rule's is."""
     try:
         model = _PREDICATE.validate_python(raw)
     except PydanticValidationError as exc:
@@ -97,6 +105,15 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
         where = ".".join(str(p) for p in first.get("loc", ()))
         raise LibraryError(422, f"invalid predicate{f' at {where}' if where else ''}: "
                                 f"{first.get('msg', 'not a predicate')}") from exc
+    if rule:
+        edges = isinstance(unwrap_edges(model), EdgesPredicate)
+        if edges and not relationships:
+            raise LibraryError(422, "A display rule tags entities, and a Connections search "
+                                    "returns relationships — apply the rule to relationships, "
+                                    "or make it from its From or To condition instead.")
+        if relationships and not edges:
+            raise LibraryError(422, "A rule applied to relationships is a Connections search: "
+                                    "the relationships whose ends and edge meet it.")
     try:
         # A Connections search inside a group of its own is still one —
         # stored as sent, it is checked as itself.
@@ -120,13 +137,24 @@ def _rule_compile_problem(model: Any) -> Optional[str]:
     """What the membership and count engines would refuse in ``model``: a
     regex or fulltext match, a descendantOf under OR or NOT… Its own shape
     only — the edge types are stand-ins, so a graph whose ontology is still
-    loading refuses nothing here."""
+    loading refuses nothing here. A Connections search is compiled as its
+    statement is, from either end (``edges.edge_context``)."""
     from backend.app.providers.falkordb_deep_search import _Compiler
+    from backend.app.providers.falkordb_search.edges import edge_context
     # A name path is resolved where the rule runs, against the graph; its
     # shape is all that is checked here, so each stands in as one urn.
-    model = _with_resolved_refs(model, {id(ref): ["urn:stand-in"] for _, ref in _path_refs(model)})
+    model = unwrap_edges(_with_resolved_refs(
+        model, {id(ref): ["urn:stand-in"] for _, ref in _path_refs(model)}))
     try:
-        _Compiler(lineage_edge_types={"_"}, containment_edge_types={"_"}).compile(model)
+        if isinstance(model, EdgesPredicate):
+            stand_in = SimpleNamespace(
+                _get_lineage_edge_types=lambda: ["_"], _get_containment_edge_types=lambda: ["_"],
+                _name_property=None, _entity_type_levels={})
+            query = SearchQuery(predicate=model, scope=SearchScope(view_id="_", scope_mode="data_source"))
+            for side in ("source", "target"):
+                edge_context(stand_in, query, {"anchor": side, "far_labels": None, "far_roots": None})
+        else:
+            _Compiler(lineage_edge_types={"_"}, containment_edge_types={"_"}).compile(model)
     except CompileError as exc:
         return str(exc)
     return None
@@ -142,7 +170,8 @@ def _flag_invalid(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for rule in rules:
         try:
-            _check_predicate(rule.get("predicate"), rule=True)
+            _check_predicate(rule.get("predicate"), rule=True,
+                             relationships=rule.get("target") == "relationships")
             out.append(rule)
         except LibraryError as exc:
             out.append({**rule, "invalid": exc.detail})
@@ -156,13 +185,23 @@ def _has_route(model: Any) -> bool:
 
 
 def _entity_types_of(model: Any) -> List[str]:
-    """The entity types an ``entityType`` leaf of the tree names."""
+    """The entity types an ``entityType`` leaf of the tree names — a Connections
+    search's at either end too."""
     out: List[str] = []
     if getattr(model, "kind", None) == "entityType":
         out.extend(getattr(model, "values", None) or [])
+    if isinstance(model, EdgesPredicate):
+        for end in (model.source_where, model.target_where):
+            out.extend(_entity_types_of(end))
     for child in getattr(model, "children", None) or []:
         out.extend(_entity_types_of(child))
     return out
+
+
+def _relationship_types_of(model: Any) -> List[str]:
+    """The relationship types a Connections search names."""
+    model = unwrap_edges(model)
+    return list(model.edge_types or []) if isinstance(model, EdgesPredicate) else []
 
 
 def _canonical(predicate: Any) -> str:
@@ -259,8 +298,8 @@ async def _write_rules(session: AsyncSession, view_id: str, branch_id: Optional[
 async def put_rule(session: AsyncSession, view_id: str, branch_id: Optional[str],
                    rule: DisplayRule) -> List[Dict[str, Any]]:
     """Add ``rule``, or replace the one with its id where it stands."""
-    _check_predicate(rule.predicate, rule=True)
-    stored = rule.model_dump(by_alias=True, exclude_none=True)
+    _check_predicate(rule.predicate, rule=True, relationships=rule.target == "relationships")
+    stored = rule.stored()
     stored.setdefault("createdAt", _now())
 
     def change(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -567,18 +606,53 @@ async def _view_entity_types(session: AsyncSession, view: ViewORM,
     return frozenset(t.lower() for t in layout_types | content_types)
 
 
-def _type_warnings(model: Any, allowed: FrozenSet[str]) -> List[str]:
-    if not allowed:
-        return []
-    missing = sorted({t for t in _entity_types_of(model) if t.lower() not in allowed})
-    if not missing:
-        return []
-    return [f"Refers to entity types this view doesn't show: {', '.join(missing)}"]
+async def _view_relationship_types(session: AsyncSession, view: ViewORM) -> FrozenSet[str]:
+    """The relationship types the view's ontology has (lower-cased) — or none when it defines
+    none, or can't be read: then no rule is warned about its relationship types."""
+    from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+    from backend.app.ontology.service import LocalOntologyService
+    try:
+        resolved = await LocalOntologyService(SQLAlchemyOntologyRepository(session)).resolve(
+            workspace_id=view.workspace_id, data_source_id=view.data_source_id)
+    except Exception:
+        logger.warning("library import: the view's ontology couldn't be read", exc_info=True)
+        return frozenset()
+    return frozenset(str(t).lower() for t in (
+        *(resolved.relationship_type_definitions or {}), *(resolved.containment_edge_types or []),
+        *(resolved.lineage_edge_types or [])))
+
+
+def _names_relationship_types(items: List[Any]) -> bool:
+    """Whether a rule or query among ``items`` names relationship types."""
+    for raw in items:
+        try:
+            if _relationship_types_of(_PREDICATE.validate_python(raw.get("predicate"))):
+                return True
+        except (AttributeError, PydanticValidationError):
+            continue                 # refused on its own when it is planned
+    return False
+
+
+def _type_warnings(model: Any, allowed: FrozenSet[str],
+                   relationships: FrozenSet[str] = frozenset()) -> List[str]:
+    """What ``model`` names that the view doesn't have: entity types it doesn't show, and
+    relationship types its ontology doesn't define."""
+    out: List[str] = []
+    missing = sorted({t for t in _entity_types_of(model) if t.lower() not in allowed}) if allowed else []
+    if missing:
+        out.append(f"Refers to entity types this view doesn't show: {', '.join(missing)}")
+    missing = (sorted({t for t in _relationship_types_of(model) if t.lower() not in relationships})
+               if relationships else [])
+    if missing:
+        out.append(f"Refers to relationship types this view's ontology doesn't have: "
+                   f"{', '.join(missing)}")
+    return out
 
 
 def _plan(kind: str, incoming: List[Dict[str, Any]], existing: List[Dict[str, Any]],
           strategy: ImportStrategy, allowed: FrozenSet[str], limit: int,
-          validate: Callable[[Dict[str, Any]], Tuple[Dict[str, Any], Any]]
+          validate: Callable[[Dict[str, Any]], Tuple[Dict[str, Any], Any]],
+          relationships: FrozenSet[str] = frozenset(),
           ) -> Tuple[List[LibraryImportItem], List[Dict[str, Any]]]:
     """What an import does with each incoming item of one kind — and the
     items it adds, ids new and names made unique."""
@@ -598,7 +672,7 @@ def _plan(kind: str, incoming: List[Dict[str, Any]], existing: List[Dict[str, An
             items.append(LibraryImportItem(kind=kind, source_id=source_id, name=name or "(unnamed)",
                                            action="refuse", reason=exc.detail))
             continue
-        warnings = _type_warnings(model, allowed)
+        warnings = _type_warnings(model, allowed, relationships)
         if strategy == "merge" and (name.lower(), _canonical(item["predicate"])) in known:
             items.append(LibraryImportItem(kind=kind, source_id=source_id, name=name,
                                            action="skip", reason="Already in this view.",
@@ -627,8 +701,12 @@ async def import_pack(session: AsyncSession, view: ViewORM, branch_id: Optional[
     name and criteria is skipped; a taken name gets a number); ``replace``
     removes the view's rules and queries first; ``copy`` adds everything.
     Every item added gets a new id. An item naming entity types the view
-    doesn't show is added with a warning: it matches nothing here."""
+    doesn't show, or relationship types its ontology doesn't have, is added
+    with a warning: it matches nothing here."""
     allowed = await _view_entity_types(session, view, branch_id)
+    relationships = (await _view_relationship_types(session, view)
+                     if _names_relationship_types([*pack.display_rules, *pack.saved_queries])
+                     else frozenset())
     rules_now = await read_rules(session, view, branch_id)
     query_rows = await _query_rows(session, view.id)
     queries_now = [{"name": r.name, "predicate": json.loads(r.predicate or "{}")}
@@ -639,8 +717,9 @@ async def import_pack(session: AsyncSession, view: ViewORM, branch_id: Optional[
             rule = DisplayRule.model_validate({**raw, "id": str(raw.get("id") or "incoming")})
         except PydanticValidationError as exc:
             raise LibraryError(422, _first_error(exc)) from exc
-        model = _check_predicate(rule.predicate, rule=True)
-        stored = rule.model_dump(by_alias=True, exclude_none=True)
+        model = _check_predicate(rule.predicate, rule=True,
+                                 relationships=rule.target == "relationships")
+        stored = rule.stored()
         stored.setdefault("createdAt", _now())
         return stored, model
 
@@ -653,9 +732,9 @@ async def import_pack(session: AsyncSession, view: ViewORM, branch_id: Optional[
         return body.model_dump(by_alias=True, exclude_none=True), model
 
     rule_items, new_rules = _plan("rule", pack.display_rules, rules_now, strategy, allowed,
-                                  LIBRARY_RULES_MAX, rule_of)
+                                  LIBRARY_RULES_MAX, rule_of, relationships)
     query_items, new_queries = _plan("query", pack.saved_queries, queries_now, strategy, allowed,
-                                     LIBRARY_QUERIES_MAX, query_of)
+                                     LIBRARY_QUERIES_MAX, query_of, relationships)
     items = rule_items + query_items
     result = LibraryImportResult(
         strategy=strategy, dry_run=dry_run, items=items,
