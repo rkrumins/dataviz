@@ -601,6 +601,10 @@ class VersionedBranchProvider:
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         raise NotImplementedError(self._deep_search_gap)
 
+    async def relationships_at(self, urns, *, edge_types=None, except_types=(), limit):
+        """What a draft's relationship counts read of main's store — the same gap."""
+        raise NotImplementedError(self._deep_search_gap)
+
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
         """Node/edge counts + per-type breakdowns from the composed branch state.

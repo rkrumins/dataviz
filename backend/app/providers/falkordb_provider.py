@@ -55,7 +55,9 @@ from backend.common.models.graph import ChildrenBatchParent, TraceClosureResult,
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError, children_batch_by_query
-from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.derived_artifacts import (
+    DERIVED_EDGE_TYPES, is_derived_edge_type, is_derived_label,
+)
 from backend.common.moments import from_cell
 from backend.common.property_patch import apply_properties_patch
 from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
@@ -7183,6 +7185,47 @@ class FalkorDBProvider(GraphDataProvider):
             for s, t, rel_type, props in rows:
                 out.setdefault((s, t), []).append((str(rel_type), dict(props or {})))
         return out
+
+    async def relationships_at(self, urns: Sequence[str], *,
+                               edge_types: Optional[Sequence[str]] = None,
+                               except_types: Sequence[str] = (), limit: int) -> List[GraphEdge]:
+        """Every relationship stored from or to any of ``urns``, each once, up to ``limit`` — fewer
+        is all of them: of ``edge_types`` (as named; None: every type but ``except_types``), never
+        a roll-up. Each urn is seeked by its label's URN index, both directions, and an urn the
+        graph doesn't hold has none (as :meth:`relationships_between`): never an unlabeled scan."""
+        await self._ensure_connected()
+        if limit <= 0:
+            return []
+        types: List[str] = []
+        if edge_types is not None:
+            types = [t for t in self._alias_rel_types(list(edge_types))
+                     if t and not is_derived_edge_type(t)]
+            if not types:
+                return []
+        rel = f"[r:{'|'.join(_sanitize_label(t) for t in types)}]" if types else "[r]"
+        skip = sorted({str(t).upper() for t in (*DERIVED_EDGE_TYPES, *except_types)})
+        where = "" if types else " AND NOT toUpper(type(r)) IN $_skip"
+
+        async def read(label: str, bucket: List[str], outgoing: bool) -> list:
+            pattern = (f"MATCH (a:{label})-{rel}->(b) WHERE a.urn IN $_urns" if outgoing
+                       else f"MATCH (a)-{rel}->(b:{label}) WHERE b.urn IN $_urns")
+            res = await self._ro_query(
+                f"{pattern}{where} RETURN a.urn, b.urn, type(r), properties(r) LIMIT $_limit",
+                params={"_urns": bucket, "_skip": skip, "_limit": limit}, op="edges.at")
+            return res.result_set or []
+
+        buckets = [(label, bucket) for label, bucket in await self._label_buckets(list(urns))
+                   if label]                               # an urn not in the graph: none
+        answers = await asyncio.gather(*(read(label, bucket, outgoing)
+                                         for label, bucket in buckets for outgoing in (True, False)))
+        # One between two of ``urns`` (or from one to itself) is read from both ends: once.
+        out: Dict[Tuple[str, str, str, str], GraphEdge] = {}
+        for rows in answers:
+            for s, t, rel_type, props in rows:
+                props = dict(props or {})
+                out.setdefault((s, t, str(rel_type), str(props.get("id"))),
+                               _edge_from_row(s, t, str(rel_type), props))
+        return list(out.values())[:limit]
 
     async def _edges_between_pairs(
         self,
