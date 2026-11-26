@@ -19,7 +19,7 @@ from backend.app.services.versioning import config as vconfig
 from backend.common.models.search import SearchOptions, SearchQuery, SearchScope
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
 from backend.tests.integration.test_fork_overlay_delta import _d, _run
-from backend.tests.test_draft_search import RULES, Main, catalog_of
+from backend.tests.test_draft_search import P_EDGES, RULES, Main, catalog_of
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
@@ -300,6 +300,46 @@ def test_the_draft_as_it_was_holds_its_relationships_as_it_wrote_them():
         assert moved["e:t1>c1"]["properties"] == {}
         assert (moved["e:t1>c1"]["sourceUrn"], moved["e:t1>c1"]["targetUrn"]) == ("t1", "c1")
         assert moved["e:c3>c1"] is None
+    _run(case)
+
+
+def test_relationship_counts_fold_a_later_commit_in_reading_only_what_it_wrote():
+    """A relationship rule's count is the draft's commit after commit; a later commit that
+    rewrites a relationship and moves an end (c1 no longer gold) is folded in — that
+    relationship read as the draft held it before, that entity as it was."""
+    async def case(svc):
+        gid, main, draft = await _seeded(svc)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="lineage",
+                            containment_edge_types=CONT,
+                            ops=[_lineage("c2", "c1", weight=1), _lineage("c1", "c4", weight=2)])
+        items = [("flows", P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"]})),
+                 ("to_gold", P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "targetWhere": {
+                     "kind": "property", "key": "tier", "op": "eq", "value": "gold"}})),
+                 ("from_gold", P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "sourceWhere": {
+                     "kind": "property", "key": "tier", "op": "eq", "value": "gold"}}))]
+        assert await _counts(await _overlay(svc, gid, main, draft), items) == \
+            await _truth(svc, gid, draft, items)
+
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="again",
+                            containment_edge_types=CONT,
+                            ops=[_lineage("c2", "c1", op="update", weight=3),
+                                 _node("c1", "Column", op="update", tier="silver", rows=10)])
+        edges_read, nodes_read = [], []
+        edges_as_of, nodes_as_of = svc.draft_edges_as_of, svc.draft_nodes_as_of
+
+        async def edges_spy(**kw):
+            edges_read.append(sorted(kw["entity_ids"]))
+            return await edges_as_of(**kw)
+
+        async def nodes_spy(**kw):
+            nodes_read.append(sorted(kw["entity_ids"]))
+            return await nodes_as_of(**kw)
+
+        svc.draft_edges_as_of, svc.draft_nodes_as_of = edges_spy, nodes_spy
+        assert await _counts(await _overlay(svc, gid, main, draft), items) == \
+            await _truth(svc, gid, draft, items)
+        assert edges_read == [["e:c2>c1"]], "folded in: only the relationship the commit wrote"
+        assert nodes_read and all(ids == ["c1"] for ids in nodes_read)
     _run(case)
 
 

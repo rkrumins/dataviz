@@ -1165,7 +1165,13 @@ curl -s -b "$JAR" -o pii.csv \
   `GRAPHVER_DRAFT_SEARCH_MAX_DELTA` (200,000), by a count that stops just
   past it: what an entity costs is bounded by the cap, however many
   relationships it holds. Once those and the changed entities pass it, the
-  count is main's, flagged. Not on a fork. Draft *rules* are kept per draft.
+  count is main's, flagged. A later commit is folded in, as for entity rules:
+  only the relationships and entities it wrote are read, each as the draft
+  held it before the commit and as it holds it now — unless the commits
+  deleted a relationship or an entity, wrote or retyped one of the
+  hierarchy, gave an entity another urn or wrote more than half the draft,
+  or the rules' relationship types now resolve otherwise: then it is read
+  whole. Not on a fork. Draft *rules* are kept per draft.
 - **No live updates**: other open sessions see a rule change when they next
   load the View.
 - **An import's dry run needs edit permission**: readers can't preview one.

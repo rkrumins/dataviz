@@ -1160,8 +1160,8 @@ class RelDraft(Draft):
     """A draft over ``REL_EDGES`` (or ``edges``): its patch set names each relationship it added,
     changed (with where main holds it) or removed, and serves each one's value."""
 
-    def __init__(self, nodes=REL_NODES, edges=REL_EDGES):
-        super().__init__(nodes, edges)
+    def __init__(self, nodes=REL_NODES, edges=REL_EDGES, cascade=False):
+        super().__init__(nodes, edges, cascade)
 
     def truth(self) -> StubDeepSearchProvider:
         return StubDeepSearchProvider(nodes=list(self.nodes.values()),
@@ -1473,3 +1473,216 @@ async def test_the_counts_service_moves_a_relationship_rules_count_by_the_drafts
         request, run_context=CONTEXT)
     count = out.counts["to_gold"]
     assert (count.count, count.status, count.approximate, count.note) == (3, "complete", False, None)
+
+
+# ---------------------------------------------------------------------------
+# A relationship rule's count, folded commit after commit
+# ---------------------------------------------------------------------------
+
+async def _settled(draft, scope, items, main=None):
+    """Each rule's count on the draft, its correction run to the end across requests."""
+    overlay = _overlay(draft, main or RelMain(REL_NODES, COUNT_EDGES))
+    for _ in range(50):
+        deltas = await overlay.deep_search_count_deltas(scope, items, context=CONTEXT, wait_ms=0)
+        if deltas["status"] == "complete":
+            break
+    counts, deltas = await _count(overlay, scope, items)
+    return counts, deltas
+
+
+async def test_a_later_commit_to_a_relationship_is_folded_in_not_read_again():
+    """The second commit changes one relationship again: only it is read, as the draft held it
+    before the commit and as it holds it now — main's relationships at no entity."""
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    counts, _ = await _settled(draft, SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 1}}])
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.edges_as_of == [(["e:c1>c3"], 1)]
+    assert main.at == [] and deltas["progress"] == {"scanned": 1, "total": 1}
+
+
+async def test_a_later_commit_that_moves_an_end_folds_in_the_relationships_there():
+    """c2 is silver again: main's relationships at c2 and the patch set's there from the first
+    commit (c1 → c2, moved from x1) are counted out as they matched before and in as now."""
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c2": {**draft.main["c2"], "tier": "silver"}})
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert [urns for urns, *_ in main.at] == [["c2"]]
+    assert draft.edges_as_of == [] and (["id-c2"], 1) in draft.as_of
+
+
+async def test_a_later_commit_no_rule_reads_reads_no_relationship():
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c3": {**draft.nodes["c3"], "note": "reviewed"}})
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert main.at == [] and deltas["progress"]["total"] == 1
+
+
+@pytest.mark.parametrize("batch", [1, 1000])
+async def test_a_relationship_between_two_ends_a_fold_moved_counts_once(monkeypatch, batch):
+    """c2 and c3 both move (c3 → c2 runs between them), in one step or apart."""
+    monkeypatch.setattr(draft_search, "BATCH", batch)
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c2": {**draft.main["c2"], "tier": "silver"},
+                  "c3": {**draft.main["c3"], "tier": "gold"}})
+    counts, deltas = await _settled(draft, SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.as_of, "folded in"
+
+
+@pytest.mark.parametrize("change", ["deletion", "node_deleted", "containment", "retype",
+                                    "renamed", "over_half"])
+async def test_what_a_fold_cant_read_past_is_read_whole(change):
+    """A deleted relationship or node, one written in the hierarchy or retyped out of it, a node
+    named anew, a window over half the draft: the second commit's correction reads the draft
+    whole."""
+    draft, items = _count_draft(), list(COUNT_RULES.items())
+    await _settled(draft, SCOPE, items)
+    if change == "deletion":
+        draft.commit({}, drop_edges=[_edge("c3", "c2", "FLOWS_TO")])
+    elif change == "node_deleted":
+        draft.commit({"c3": None})                   # its relationships left as they are
+    elif change == "containment":
+        draft.commit({}, add_edges=[_edge("t2", "c2")])
+    elif change == "retype":
+        draft.commit({}, add_edges=[{**_edge("t1", "c2"), "type": "FLOWS_TO"}])
+    elif change == "renamed":
+        draft.commit({"c3": {**draft.nodes["c3"], "tier": "silver"}})
+        window = draft.draft_search_window
+
+        async def renamed(**kw):
+            return {**await window(**kw), "renamed": True}
+
+        draft.draft_search_window = renamed
+    else:
+        # Six of the 11 items the draft now has (its five relationships, six entities of D).
+        draft.commit({u: {**draft.nodes[u], "note": "x"}
+                      for u in ("t1", "t2", "c1", "c2", "c3", "x1")})
+    main = RelMain(REL_NODES, COUNT_EDGES)
+    counts, deltas = await _settled(draft, SCOPE, items, main)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert draft.edges_as_of == []
+    assert deltas["progress"]["total"] == len(draft_search._relationship_items(
+        (await _overlay(draft)._delta_())))
+
+
+async def test_a_correction_past_the_cap_is_never_folded_from(monkeypatch):
+    draft, items = _count_draft(), [("gold_and_table", COUNT_RULES["gold_and_table"])]
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 8)
+    _, deltas = await _settled(draft, SCOPE, items)
+    assert deltas["approximate"]                         # past it: main's count, said so
+    monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", 200_000)
+    draft.commit({"c3": {**draft.nodes["c3"], "note": "x"}})
+    counts, deltas = await _settled(draft, SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert deltas["progress"]["total"] == 8, "read whole"
+
+
+async def test_a_change_to_what_a_rules_class_takes_is_never_folded_across():
+    """The lineage class names another type: the correction's line is another one."""
+    class Retyped(RelMain):
+        def _get_lineage_edge_types(self):
+            return ["FLOWS_TO", "USES"]
+
+    draft, items = _count_draft(), [("from_big", COUNT_RULES["from_big"])]
+    await _settled(draft, SCOPE, items)
+    draft.commit({"c3": {**draft.nodes["c3"], "note": "x"}})
+    _, deltas = await _settled(draft, SCOPE, items, Retyped(REL_NODES, COUNT_EDGES))
+    assert deltas["progress"]["total"] == 8 and draft.edges_as_of == []
+
+
+async def test_the_relationship_catalog_is_never_folded():
+    draft = _rel_draft()
+    await _overlay(draft, RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    draft.commit({}, add_edges=[
+        {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "batch", "lag": 1}}])
+    out = await _overlay(draft, RelMain()).deep_search_catalog(
+        SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
+    want = _rel_stats(list(draft.nodes.values()), list(draft.edges.values()), SCOPE)
+    assert out["entities"] == sum(want.entities.values())
+    assert draft.edges_as_of == []
+
+
+_FOLD_NODES = ["t1", "t2", "c1", "c2", "c3", "x1"]
+_FOLD_LINKS = [("c1", "c2"), ("c2", "c1"), ("c3", "c2"), ("c1", "x1"), ("t1", "t2"),
+               ("t2", "c1"), ("c2", "c3"), ("c1", "c3"), ("c3", "c1")]
+
+
+def _random_commit(draft: RelDraft, rnd) -> None:
+    """One commit of a few writes: entities' values (back to main's at times), relationships
+    added, changed, re-pointed or retyped — and now and then what a fold can't read past (a
+    deletion, the hierarchy)."""
+    nodes: Dict[str, Optional[Dict[str, Any]]] = {}
+    adds: List[Dict[str, Any]] = []
+    drops: List[Dict[str, Any]] = []
+    for _ in range(rnd.randint(1, 3)):
+        live = [u for u in _FOLD_NODES if u in draft.nodes and u not in nodes]
+        roll = rnd.random()
+        if roll < 0.4 and live:
+            u = rnd.choice(live)
+            if rnd.random() < 0.25 and u in draft.main:
+                nodes[u] = dict(draft.main[u])
+            else:
+                key, value = rnd.choice([("tier", "gold"), ("tier", "silver"), ("tier", "bronze"),
+                                         ("rows", 1), ("rows", 9), ("rows", 30), ("note", "n")])
+                nodes[u] = {**draft.nodes[u], key: value}
+        elif roll < 0.85:
+            src, tgt = rnd.choice(_FOLD_LINKS)
+            if src in draft.nodes and tgt in draft.nodes:
+                eid = rnd.choice([f"e:{src}>{tgt}", *[e for e in draft.edges
+                                                       if draft.edges[e]["type"] != "CONTAINS"]])
+                adds.append({"id": eid, "source": src, "target": tgt,
+                             "type": rnd.choice(["FLOWS_TO", "FLOWS_TO", "USES"]),
+                             "properties": {"mode": rnd.choice(["stream", "batch"]),
+                                            "lag": rnd.randint(1, 3)}})
+        elif roll < 0.93:
+            links = [e for e in draft.edges.values() if e["type"] != "CONTAINS"]
+            if links:
+                drops.append(rnd.choice(links))
+        elif roll < 0.97:
+            adds.append(_edge("t2", rnd.choice(["c1", "c2"])))
+        elif "c3" in draft.nodes and "c3" not in nodes:
+            nodes["c3"] = None
+    adds = list({e["id"]: e for e in adds}.values())
+    drops = [e for e in drops if e["id"] not in {a["id"] for a in adds}]
+    draft.commit(nodes, add_edges=adds, drop_edges=drops)
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("batch", [1, 2, 1000])
+@pytest.mark.parametrize("scope", [SCOPE, TYPED], ids=["roots", "types"])
+async def test_relationship_counts_folded_commit_after_commit_are_the_drafts(
+        monkeypatch, seed, batch, scope):
+    """Random commits, one after another: after each, every rule's count on the draft is the
+    draft's own — whether its correction folded the commit in or read the draft whole."""
+    import random
+
+    monkeypatch.setattr(draft_search, "BATCH", batch)
+    rnd = random.Random(seed * 7 + batch)
+    draft, items = RelDraft(REL_NODES, COUNT_EDGES, cascade=seed % 2 == 0), list(COUNT_RULES.items())
+    folds = 0
+    for n in range(10):
+        _random_commit(draft, rnd)
+        before = len(draft.as_of) + len(draft.edges_as_of)
+        counts, deltas = await _settled(draft, scope, items)
+        assert deltas["approximate"] == {}, (seed, n)
+        assert counts == await _truth_counts(draft, scope, items), (seed, n)
+        folds += len(draft.as_of) + len(draft.edges_as_of) > before
+    assert folds, "some commit was folded in"
