@@ -8857,16 +8857,27 @@ class GraphVersioningService:
     async def draft_search_window(self, *, graph_id: str, branch_id: str,
                                   commit_id: Optional[str], since_seq: Optional[int] = None,
                                   limit: int = 0,
-                                  containment_types: Optional[Sequence[str]] = None) -> Dict[str, object]:
+                                  containment_types: Optional[Sequence[str]] = None,
+                                  edge_ids: bool = False) -> Dict[str, object]:
         """What a draft's search answers fold in one step (``providers.draft_search``): the seq of
         the draft's commit ``commit_id`` — its head, as :meth:`overlay_version` read it — and,
         given ``since_seq``, the nodes the draft's commits after that seq wrote, by entity id
         (``None`` past ``limit``), and whether those commits wrote an edge that may move a node
-        (``edges``): one of ``containment_types`` (any case), or one whose row names no type (a
-        delete) — any edge, without them. An edge of another type moves nothing a fold reads.
-        Index-backed, as :meth:`_changed_in_window` is: a commit writes rows only for what it
-        changed."""
-        out: Dict[str, object] = {"seq": None, "nodes": None, "edges": False}
+        (``edges``): one of ``containment_types`` (any case), one whose row names no type (a
+        delete), or one that was of such a type, or of none, before them (retyped out of the
+        hierarchy) — any edge, without them. An edge of another type moves nothing a fold reads;
+        past ``limit`` edges, what they were before isn't read, and they may.
+
+        With ``containment_types``, ``renamed``: a node they wrote holds a urn there that it held
+        in no row before them (one they created aside) — where it sits, and the ends its edges
+        are named by, move with it. ``edge_ids``: the edges they wrote too, by entity id
+        (``edgeIds``; ``None`` past ``limit``) — what a fold of relationship counts reads.
+        "Before them" is as the draft read it at ``since_seq``: its own rows, else main at its
+        branch point. Index-backed, as :meth:`_changed_in_window` is: a commit writes rows only
+        for what it changed."""
+        out: Dict[str, object] = {"seq": None, "nodes": None, "edges": False, "renamed": False}
+        if edge_ids:
+            out["edgeIds"] = None
         async with self._session() as s:
             if commit_id:
                 out["seq"] = await s.scalar(select(CommitORM.commit_seq).where(
@@ -8882,12 +8893,87 @@ class GraphVersioningService:
 
             nodes = (await s.execute(select(NodeVersionORM.entity_id).where(
                 *window(NodeVersionORM)).distinct().limit(limit + 1))).scalars().all()
+            out["nodes"] = sorted(nodes) if len(nodes) <= limit else None
+            written: Sequence[str] = ()
+            if edge_ids or containment_types is not None:
+                written = (await s.execute(select(EdgeVersionORM.entity_id).where(
+                    *window(EdgeVersionORM)).distinct().limit(limit + 1))).scalars().all()
+                if edge_ids:
+                    out["edgeIds"] = sorted(written) if len(written) <= limit else None
             moves = () if containment_types is None else (or_(
                 EdgeVersionORM.edge_type.is_(None),
                 func.upper(EdgeVersionORM.edge_type).in_([t.upper() for t in containment_types])),)
             out["edges"] = await s.scalar(select(EdgeVersionORM.entity_id).where(
                 *window(EdgeVersionORM), *moves).limit(1)) is not None
-            out["nodes"] = sorted(nodes) if len(nodes) <= limit else None
+            if containment_types is None or out["edges"]:
+                return out
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            base_seq = branch.base_commit_seq or 0
+
+            async def before(ids: Sequence[str]) -> Dict[str, Optional[dict]]:
+                held = await self._skeletons_at(s, graph_id, branch_id, ids, since_seq)
+                rest = [i for i in ids if i not in held]
+                if rest:
+                    held.update(await self._skeletons_at(s, graph_id, main_id, rest, base_seq))
+                return held
+
+            if len(written) > limit:
+                out["edges"] = True
+                return out
+            kinds = {t.upper() for t in containment_types}
+            out["edges"] = any(v is not None and (not v.get("edgeType")
+                                                  or str(v["edgeType"]).upper() in kinds)
+                               for v in (await before(written)).values())
+            if out["edges"] or not out["nodes"]:
+                return out
+            was = {eid: v.get("urn") or f"gv:{eid}"
+                   for eid, v in (await before(out["nodes"])).items() if v is not None}
+            held = (await s.execute(select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                *window(NodeVersionORM), NodeVersionORM.op != "delete").distinct())).all()
+            out["renamed"] = any(eid in was and (urn or f"gv:{eid}") != was[eid]
+                                 for eid, urn in held)
+        return out
+
+    async def draft_edges_as_of(self, *, graph_id: str, branch_id: str,
+                                entity_ids: Sequence[str], seq: int) -> Dict[str, Optional[dict]]:
+        """Each of ``entity_ids`` (edges) the draft held apart from main as of its commit ``seq``,
+        as :meth:`draft_nodes_as_of` gives nodes: what the draft had written of it by then, or —
+        main changed it after the draft's branch point and the draft had not — main's value at the
+        branch point, which the draft reads instead (None when main didn't hold it then).
+        ``{edge id: reader-shaped edge, or None when not a live edge}``, its ends named as the
+        draft names them (main's at the branch point, for main's); an id the draft read as main
+        does is absent. What a fold of relationship counts subtracts (``providers.draft_search``)."""
+        ids = list(dict.fromkeys(entity_ids))
+        if not ids:
+            return {}
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            base_seq = branch.base_commit_seq or 0
+            head_seq = graph.main_head_commit_seq if graph is not None else base_seq
+            own = await self._values_at(s, graph_id, branch_id, ids, seq)
+            mains: Dict[str, Optional[dict]] = {}
+            rest = [i for i in ids if i not in own]
+            if rest and head_seq > base_seq:
+                advanced: set = set()
+                for chunk in _chunks(rest, _IN_LIST_MAX):
+                    advanced.update((await s.execute(select(EdgeVersionORM.entity_id).where(
+                        EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id == main_id,
+                        EdgeVersionORM.entity_id.in_(chunk), EdgeVersionORM.commit_seq > base_seq,
+                        EdgeVersionORM.commit_seq <= head_seq).distinct())).scalars().all())
+                if advanced:
+                    at_base = await self._values_at(s, graph_id, main_id, sorted(advanced), base_seq)
+                    mains = {i: at_base.get(i) for i in advanced}
+            urns = await self._current_urns(s, graph_id, branch_id, _payload_ends(own))
+            base_urns = (await self._current_urns(s, graph_id, main_id, _payload_ends(mains),
+                                                  as_of_seq=base_seq) if mains else {})
+        out: Dict[str, Optional[dict]] = {}
+        for held, named in ((own, urns), (mains, base_urns)):
+            for eid, v in held.items():
+                out[eid] = (_graphedge_dict(eid, v, named)
+                            if isinstance(v, dict) and _is_edge_payload(v) else None)
         return out
 
     async def draft_nodes_as_of(self, *, graph_id: str, branch_id: str,

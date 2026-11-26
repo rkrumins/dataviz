@@ -104,8 +104,10 @@ Every new capability ships behind its own switch, off by default.
   search, or a saved one in the library. On a draft, a rule's look and count are the draft's — for
   the relationships it changed and for those at the items it changed. A draft's count reads the
   published relationships only at items it moves into or out of a rule's From or To, and what an
-  item costs is bounded by the cap however many relationships it holds. Existing rules are
-  unchanged.
+  item costs is bounded by the cap however many relationships it holds. A later commit is folded
+  in: the count reads only the relationships and items that commit wrote, unless it deleted
+  something, changed the hierarchy, renamed an item or wrote more than half the draft (then the
+  draft is read whole). Existing rules are unchanged.
 
 ### Changed
 
