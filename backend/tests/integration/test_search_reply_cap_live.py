@@ -198,3 +198,11 @@ async def test_the_relationship_catalog_counts_every_bag_past_one_reply(provider
     assert out["entityTypes"] == [{"type": "FEEDS", "count": N - 1}]
     assert job["count"] == N - 1 and job["residual"] == N - 1
     assert job["values"] == [{"value": "nightly", "kind": "String", "count": N - 1}]
+
+
+async def test_every_relationship_at_a_hub_past_one_reply_is_read(provider):
+    """What a draft's relationship counts read of main at the entities it changed: the root
+    holds 12,000 children, more than one reply — every one comes back, each once."""
+    edges = await provider.relationships_at(["urn:root"], edge_types=["CONTAINS"], limit=N + 1)
+    assert len(edges) == N
+    assert {e.target_urn for e in edges} == {f"urn:container:{i}" for i in range(N)}
