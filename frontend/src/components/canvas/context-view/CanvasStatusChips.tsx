@@ -12,9 +12,11 @@
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
- *  - "N placements not found here" — entities placed in the view that this
- *    graph doesn't hold (typically a view brought in from another
- *    environment); popover lists them and says what to do.
+ *  - "N placements point at entities no longer in this source" — entities
+ *    placed in the view that this source doesn't hold now (deleted, given a
+ *    new URN, or placed in another environment: from here it is only known
+ *    that they aren't here); popover lists them and offers to clean them up,
+ *    in a draft — or the way into one.
  *
  * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
  * the end of the layer strip (LineageGuide).
@@ -45,6 +47,11 @@ const CHIP_CLASS =
   'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
+
+/** A view-health offer's button: what repairs the view, said once, never done for the reader. */
+export const HEALTH_ACTION_CLASS =
+  'w-full px-2.5 py-1.5 rounded-md text-[11.5px] font-medium text-accent-lineage bg-accent-lineage/10 ' +
+  'hover:bg-accent-lineage/15 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40'
 
 /** A placement in the view whose entity this graph doesn't hold. */
 export interface NotFoundPlacement {
@@ -79,6 +86,8 @@ export function CanvasStatusChips({
   selectedExternal,
   onPreviewExternal,
   notFoundPlacements = [],
+  onCleanUpNotFound,
+  onOpenDraft,
   canEdit = false,
 }: {
   /** Flows from a drawn row whose other end is outside the view: none in a
@@ -118,6 +127,10 @@ export function CanvasStatusChips({
   onPreviewExternal?: () => void
   /** Placements the load asked the graph for and didn't get: kept in the view, marked not found. */
   notFoundPlacements?: NotFoundPlacement[]
+  /** In a draft: remove those placements, as one change. */
+  onCleanUpNotFound?: () => void
+  /** Outside a draft, for a reader who can open one: the way into it. */
+  onOpenDraft?: () => void
   /** The viewer can edit the view. Without it the chips state the facts, and
    *  leave out what editing the view would do about them. */
   canEdit?: boolean
@@ -368,7 +381,11 @@ export function CanvasStatusChips({
               <SearchX className="w-3 h-3 text-amber-500" />
               {/* The space is for screen readers: the flex gap separates them on screen. */}
               <span className="tabular-nums">{notFoundPlacements.length.toLocaleString()}</span>{' '}
-              <span>{notFoundPlacements.length === 1 ? 'placement' : 'placements'} not found here</span>
+              <span>
+                {notFoundPlacements.length === 1
+                  ? 'placement points at an entity no longer in this source'
+                  : 'placements point at entities no longer in this source'}
+              </span>
             </button>
           </PopoverPrimitive.Trigger>
           <PopoverPrimitive.Portal>
@@ -378,10 +395,11 @@ export function CanvasStatusChips({
               sideOffset={6}
               className="z-[9999] w-80 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl shadow-black/40 p-2"
             >
-              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed in this view, but not in this graph</p>
+              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed here, but not in this source</p>
               <p className="px-1.5 pt-0.5 pb-2 text-[11px] text-ink-muted leading-relaxed">
-                Usually a view brought in from another environment. They’re kept, and appear as soon as the entity
-                arrives here.{canEdit && ' To remove them, edit the view and see Assignments.'}
+                This source doesn’t hold these entities now — they may have been deleted, given a new URN, or
+                placed in another environment. Until they’re cleaned up they stay placed, and show again if they
+                come back.
               </p>
               <div className="max-h-64 overflow-y-auto custom-scrollbar">
                 {notFoundPlacements.slice(0, UNASSIGNED_LIST_CAP).map(p => (
@@ -395,6 +413,25 @@ export function CanvasStatusChips({
                 <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted">
                   +{(notFoundPlacements.length - UNASSIGNED_LIST_CAP).toLocaleString()} more
                 </p>
+              )}
+              {(onCleanUpNotFound || onOpenDraft) && (
+                <div className="mt-2 pt-2 px-1.5 border-t border-glass-border/60">
+                  {onCleanUpNotFound && (
+                    <p className="pb-2 text-[11px] text-ink-muted leading-relaxed">
+                      {`Removes ${notFoundPlacements.length === 1 ? 'this placement' : `these ${notFoundPlacements.length.toLocaleString()} placements`} from this view, as one change you can undo. The data is unchanged.`}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    className={HEALTH_ACTION_CLASS}
+                    onClick={() => {
+                      setNotFoundOpen(false)
+                      ;(onCleanUpNotFound ?? onOpenDraft)?.()
+                    }}
+                  >
+                    {onCleanUpNotFound ? 'Clean them up' : 'Open a draft to clean them up'}
+                  </button>
+                </div>
               )}
             </PopoverPrimitive.Content>
           </PopoverPrimitive.Portal>

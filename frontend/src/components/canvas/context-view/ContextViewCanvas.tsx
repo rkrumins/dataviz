@@ -4077,7 +4077,7 @@ export function ContextViewCanvas({
   // names (stagedChangesStore).
   const stageMapping = useCallback((
     targetId: string, before: NormalizedReferenceLayout, after: NormalizedReferenceLayout,
-    action: 'map' | 'unmap' | 'own-column', summary: string,
+    action: 'map' | 'unmap' | 'own-column' | 'clean-up', summary: string,
   ): string => {
     const touch = layerOps.touchedBy(before, after)
     const was = layerOps.layoutPart(before, touch)
@@ -7373,16 +7373,35 @@ export function ContextViewCanvas({
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   // Placements that point at nothing here (recorded by the load: see useGraphHydration). Only
   // what the load asked for and didn't get, still placed, and still absent: an entity that has
-  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported.
+  // arrived since (a draft's deleted-entity ghost, an expanded child) is not reported. Never a temp
+  // urn (a save drops a discarded create's), nor a column's own entity: that column says so itself.
   const placementsCheck = useCanvasStore((s) => s.placementsNotFound)
   const notFoundPlacements = useMemo(() => {
     if (!placementsCheck || placementsCheck.viewId !== activeViewId || hydrationStatus !== 'ready' || traceActive) return []
     const assignments = activeReferenceLayout.assignments
     const layerNames = new Map(sortedLayers.map((l) => [l.id, l.name]))
+    const anchors = new Set(sortedLayers.map((l) => l.anchorUrn).filter(Boolean))
     return placementsCheck.urns
-      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
+      .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn) && !assignmentOps.isTempUrn(urn) && !anchors.has(urn))
       .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
   }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
+  // Outside a draft, a repair offers the way into one — to someone who can open it.
+  const openDraftOffer = !isDraft && canManage && versioningEnabled && canEnterEdit && editModeEnabled ? handleEnterEdit : undefined
+  // Clean them up: their placements go, as ONE change — its Undo puts back only them.
+  const cleanUpNotFound = useCallback(() => {
+    if (traceWriteLockedRef.current()) return
+    const before = currentLayout()
+    const urns = notFoundPlacements.map((p) => p.urn).filter((urn) => before.assignments[urn])
+    if (urns.length === 0) return
+    const what = `${urns.length.toLocaleString()} ${urns.length === 1 ? 'placement that pointed at an entity' : 'placements that pointed at entities'} no longer in this source`
+    const id = stageMapping('view:placements-not-found', before, assignmentOps.unassignEntities(before, urns), 'clean-up', `Removed ${what}`)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: viewNotice(`Removed ${what}.`),
+      action: discardAction(id),
+      durationMs: MOVE_NOTICE_MS,
+    })
+  }, [notFoundPlacements, currentLayout, stageMapping])
   const unassignedEntities = useMemo(() =>
     unassignedNodes.map((n) => ({
       id: n.id,
@@ -8679,6 +8698,9 @@ export function ContextViewCanvas({
           unresolvedEdgeCount={!overlay.active && showMissingConnectionIndicators ? unresolvedEdgeCount : 0}
           unassignedEntities={unassignedEntities}
           notFoundPlacements={notFoundPlacements}
+          // A repair is a layout change: offered in a draft, and outside one the way into a draft.
+          onCleanUpNotFound={layerEditsAllowed && !subsetFollows ? cleanUpNotFound : undefined}
+          onOpenDraft={openDraftOffer}
           onOpenEntity={openNodeDrawer}
           aggDetailShown={aggDetailStatus.shown}
           aggDetailTotal={aggDetailStatus.total}
