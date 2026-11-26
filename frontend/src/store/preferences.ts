@@ -314,6 +314,14 @@ interface PreferencesState {
   setViewSortOverride: (viewId: string, layerId: string, mode: LayerNodeSortAlgo | null) => void
   clearViewSortOverrides: (viewId: string) => void
 
+  /**
+   * Per VIEW, how many top-level entities it didn't place when the reader said
+   * "Not now" to them: the canvas says nothing more until that number changes.
+   * Device-local, and pruned to the most recent ~50 views.
+   */
+  unplacedRootsDismissed: Record<string, number>
+  dismissUnplacedRoots: (viewId: string, count: number) => void
+
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
@@ -620,6 +628,16 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (!(viewId in state.viewSortOverrides)) return state
         const { [viewId]: _drop, ...rest } = state.viewSortOverrides
         return { viewSortOverrides: rest }
+      }),
+
+      unplacedRootsDismissed: {},
+      dismissUnplacedRoots: (viewId, count) => set((state) => {
+        // Re-inserted last, so insertion order is recency; the oldest views beyond 50 go.
+        const others = { ...state.unplacedRootsDismissed }
+        delete others[viewId]
+        const keys = Object.keys(others)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - 49))) delete others[stale]
+        return { unplacedRootsDismissed: { ...others, [viewId]: count } }
       }),
 
       // Onboarding

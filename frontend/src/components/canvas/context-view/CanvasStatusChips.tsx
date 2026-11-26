@@ -12,6 +12,11 @@
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
+ *  - "N Domains aren't in this view" — top-level entities of the types the
+ *    view is about that it doesn't place (UnplacedRootsChip): a column each,
+ *    all into one column, or not now.
+ *  - "The X column's entity is gone" — a column whose entity this source
+ *    doesn't hold, while it is folded or scrolled out of sight; Show.
  *  - "N placements point at entities no longer in this source" — entities
  *    placed in the view that this source doesn't hold now (deleted, given a
  *    new URN, or placed in another environment: from here it is only known
@@ -41,6 +46,7 @@ import { Unlink, Layers, ListPlus, Focus, SearchX, Waypoints } from 'lucide-reac
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { UnplacedRootsChip, type UnplacedRootsChipProps } from './UnplacedRootsChip'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
@@ -90,6 +96,7 @@ export function CanvasStatusChips({
   onOpenDraft,
   goneColumns = [],
   onShowColumn,
+  unplacedRoots,
   canEdit = false,
 }: {
   /** Flows from a drawn row whose other end is outside the view: none in a
@@ -137,6 +144,8 @@ export function CanvasStatusChips({
   goneColumns?: Array<{ id: string; name: string }>
   /** Bring a column into view. */
   onShowColumn?: (layerId: string) => void
+  /** Top-level entities of the types the view is about that it doesn't place, and what to do. */
+  unplacedRoots?: UnplacedRootsChipProps | null
   /** The viewer can edit the view. Without it the chips state the facts, and
    *  leave out what editing the view would do about them. */
   canEdit?: boolean
@@ -154,7 +163,7 @@ export function CanvasStatusChips({
   const showNotFound = notFoundPlacements.length > 0
   const showGone = goneColumns.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound && !showGone) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound && !showGone && !unplacedRoots) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -380,6 +389,8 @@ export function CanvasStatusChips({
           </PopoverPrimitive.Portal>
         </PopoverPrimitive.Root>
       )}
+
+      {unplacedRoots && <UnplacedRootsChip {...unplacedRoots} />}
 
       {showGone && (
         <div className={CHIP_CLASS}>

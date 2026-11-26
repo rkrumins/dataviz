@@ -786,6 +786,25 @@ export interface TopLevelNodesResult {
     orphanCount: number
 }
 
+/** `POST /nodes/top-level/unplaced`: the types a view is about, and the urns it places of them. */
+export interface UnplacedTopLevelRequest {
+    entityTypes: EntityType[]
+    placedUrns: URN[]
+    /** The first page's size (1..200, default 50). */
+    limit?: number
+}
+
+/** The top-level entities of those types the view doesn't place. */
+export interface UnplacedTopLevelResult {
+    /** The first of them, by name. */
+    nodes: GraphNode[]
+    /** How many, by entity type. */
+    byType: Record<string, number>
+    totalCount: number
+    /** False: the read stopped at its ceiling, and the counts are a lower bound. */
+    complete: boolean
+}
+
 // ============================================
 // Provider Interface
 // ============================================
@@ -1029,6 +1048,17 @@ export interface GraphDataProvider {
      * behavior this method was introduced to replace.
      */
     getTopLevelNodes(query: TopLevelNodesQuery): Promise<TopLevelNodesResult>
+
+    /**
+     * The top-level entities of some types a view doesn't place — how many,
+     * by type, and the first of them by name (`POST /nodes/top-level/unplaced`,
+     * the draft's on a branch). A view's health check asks it once per load.
+     * Optional capability: without it, the check says nothing.
+     */
+    getUnplacedTopLevel?(
+        request: UnplacedTopLevelRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<UnplacedTopLevelResult>
 
     // ==========================================
     // Lineage Traversal
