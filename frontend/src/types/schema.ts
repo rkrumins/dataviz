@@ -361,8 +361,17 @@ export interface ViewLayerConfig {
    *
    * Purely a rendering promotion: the anchor still carries its own assignment,
    * so a client that doesn't know this field renders the column the old way.
+   * The two always change together (layerMutations `mapLayerToEntity` / `unmapLayer`).
    */
   anchorUrn?: string;
+
+  /**
+   * The column's name is its anchor's: the header shows the entity's live
+   * display name while the column is mapped, and `name` holds the last one
+   * seen (what any other reader of `name` shows). Set when a column is mapped
+   * while nobody had named it; a rename clears it.
+   */
+  nameFromAnchor?: boolean;
 
   /**
    * The layer's own properties — an owner, a purpose, an SLA: whatever the

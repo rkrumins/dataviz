@@ -28,6 +28,38 @@ export function columnKind(
   return 'handPicked'
 }
 
+/** Why a column is not offered mapping to an entity — said on its card and in its menu. */
+export const MAP_REFUSED_SEVERAL = 'Holds several top-level entities'
+export const MAP_REFUSED_GROUPS = 'Holds groups'
+
+/**
+ * What mapping a column to an entity it offers — a view change. Mapped, a column's "+" and its
+ * drops put things INSIDE its entity (data changes), so mapping is never offered where that would
+ * change what someone already arranged without their noticing:
+ *
+ *   • map     — a hand-picked column holding at most one entity (or none): "Map this column to…".
+ *   • mapped  — a column mapped to an entity: "Show ‹it› as a row" (`canUnmap`, while its entity is
+ *               there to show) and "Map to another entity…".
+ *   • refused — a hand-picked column of several roots, or of groups: says why.
+ *   • null    — a column of types or rules: its rule would keep pulling every entity of its type
+ *               into the entity's column (why the wizard's mapped columns have no types).
+ */
+export type MapOffer =
+  | { kind: 'map' }
+  | { kind: 'mapped'; canUnmap: boolean }
+  | { kind: 'refused'; reason: string }
+
+export function mapOffer(
+  layer: Pick<ViewLayerConfig, 'anchorUrn' | 'entityTypes' | 'rules' | 'logicalNodes'>,
+  ctx: { kind: ColumnKind; /** The column's top-level rows. */ roots: number },
+): MapOffer | null {
+  if (layer.anchorUrn) return { kind: 'mapped', canUnmap: ctx.kind === 'mapped' }
+  if (ctx.kind !== 'handPicked') return null
+  if ((layer.logicalNodes?.length ?? 0) > 0) return { kind: 'refused', reason: MAP_REFUSED_GROUPS }
+  if (ctx.roots > 1) return { kind: 'refused', reason: MAP_REFUSED_SEVERAL }
+  return { kind: 'map' }
+}
+
 /** "App", "App and Service", "App, Service and Job". */
 const listOf = (names: readonly string[]) =>
   names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
