@@ -89,6 +89,7 @@ class Main(StubDeepSearchProvider):
         self.versions: List[str] = []
         self.catalog_complete = True
         self.between: List[Any] = []
+        self.at: List[Any] = []
 
     def physical_graph_id(self):
         return "falkor:main"
@@ -115,6 +116,19 @@ class Main(StubDeepSearchProvider):
             if (e["source"], e["target"]) in wanted:
                 out.setdefault((e["source"], e["target"]), []).append((e["type"], self._stored(e)))
         return out
+
+    async def relationships_at(self, urns, *, edge_types=None, except_types=(), limit):
+        """As FalkorDB reads them: at each of ``urns`` main holds, both ways, each once."""
+        from backend.app.providers.falkordb_provider import _edge_from_row
+        from backend.common.derived_artifacts import is_derived_edge_type
+        self.at.append((list(urns), edge_types, list(except_types), limit))
+        held, skip = set(urns) & set(self._by_urn), {t.upper() for t in except_types}
+        named = None if edge_types is None else {t.upper() for t in edge_types}
+        found = [_edge_from_row(e["source"], e["target"], e["type"], self._stored(e))
+                 for e in self._edges if (e["source"] in held or e["target"] in held)
+                 and not is_derived_edge_type(e["type"])
+                 and (e["type"].upper() in named if named is not None else e["type"].upper() not in skip)]
+        return found[:limit]
 
     async def deep_search_count(self, query, *, context=None, advance=True):
         self.versions.append(context.data_version)
@@ -1041,8 +1055,13 @@ def test_what_cant_be_answered_on_the_drafts_values_is_said():
                                 set()) == draft_search.PLATFORM_FIELD
     assert draft_search.inexact(RULES["gold"], {"x"}, frozenset({"x"})) == \
         draft_search.NAMES_CHANGED
-    # A rule that styles relationships is counted on the published graph.
-    assert draft_search.inexact(EDGE_RULES["streams"], set()) == draft_search.RELATIONSHIP_COUNT
+    # A rule that styles relationships is answered by its ends: an edge filter is its own values.
+    assert draft_search.inexact(EDGE_RULES["streams"], set()) is None
+    assert draft_search.inexact(EDGE_RULES["to_gold"], set()) is None
+    assert draft_search.inexact(P_EDGES({"kind": "edges", "sourceWhere": {"kind": "isOrphan"}}),
+                                set()) == draft_search.RELATIONSHIPS
+    assert draft_search.inexact(EDGE_RULES["to_gold"], {"x"}, frozenset({"x"})) == \
+        draft_search.NAMES_CHANGED
 
 
 # ---------------------------------------------------------------------------
@@ -1072,17 +1091,18 @@ def _rel_stats(nodes, edges, scope) -> CatalogStats:
 
 
 class RelMain(Main):
-    """Main holding ``REL_EDGES``: its relationship catalog, and its relationships read between
-    their ends as FalkorDB stores them — each user property in the JSON bag."""
+    """Main holding ``REL_EDGES`` (or ``edges``): its relationship catalog, and its relationships
+    read between their ends (and at an entity) as FalkorDB stores them — each user property in
+    the JSON bag."""
 
-    def __init__(self):
-        super().__init__(nodes=REL_NODES, edges=REL_EDGES)
+    def __init__(self, nodes=REL_NODES, edges=REL_EDGES):
+        super().__init__(nodes=nodes, edges=edges)
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False, subject="entities"):
         assert subject == "relationships"
         from backend.app.providers.falkordb_search.session import store_for
-        stats = _rel_stats(REL_NODES, REL_EDGES, scope)
+        stats = _rel_stats(self._nodes, self._edges, scope)
         session = Session(f"rcat-{uuid.uuid4().hex[:8]}", "catalog:relationships",
                           context.data_version, None, 0, [], [], 1, scanned=1,
                           count=sum(stats.entities.values()), status=COMPLETE)
@@ -1091,11 +1111,11 @@ class RelMain(Main):
 
 
 class RelDraft(Draft):
-    """A draft over ``REL_EDGES``: its patch set names each relationship it added, changed (with
-    where main holds it) or removed, and serves each one's value."""
+    """A draft over ``REL_EDGES`` (or ``edges``): its patch set names each relationship it added,
+    changed (with where main holds it) or removed, and serves each one's value."""
 
-    def __init__(self):
-        super().__init__(REL_NODES, REL_EDGES)
+    def __init__(self, nodes=REL_NODES, edges=REL_EDGES):
+        super().__init__(nodes, edges)
 
     def truth(self) -> StubDeepSearchProvider:
         return StubDeepSearchProvider(nodes=list(self.nodes.values()),
@@ -1104,7 +1124,7 @@ class RelDraft(Draft):
 
     async def branch_overlay_delta(self, *, graph_id, branch_id):
         delta = await super().branch_overlay_delta(graph_id=graph_id, branch_id=branch_id)
-        main_edges = {e["id"]: e for e in REL_EDGES}
+        main_edges = {e["id"]: e for e in self.main_edges}
         delta["edgesUpsert"], delta["edgesRemove"] = [], []
         for eid, e in self.edges.items():
             held = main_edges.get(eid)
@@ -1173,3 +1193,190 @@ async def test_a_relationship_catalog_of_a_draft_too_large_is_mains_said_so(monk
         SCOPE, context=CONTEXT, wait_ms=2000, subject="relationships")
     assert draft_search.TOO_LARGE_RELATIONSHIP_CATALOG.format(n=1) in out["notes"]
     assert {p["key"] for p in out["properties"]} == {"mode", "lag", "owner"}
+
+
+# ---------------------------------------------------------------------------
+# A relationship rule's count
+# ---------------------------------------------------------------------------
+
+#: Main's relationships for relationship rules' counts: two types of link and the hierarchy, with
+#: properties — one to an entity outside the view (x1), one with both ends the draft changes.
+COUNT_EDGES = REL_EDGES + [
+    {**_edge("c3", "c2", "FLOWS_TO"), "properties": {"mode": "stream"}},
+    {**_edge("t1", "t2", "FLOWS_TO"), "properties": {"mode": "batch"}},
+    {**_edge("t2", "c1", "USES"), "properties": {"mode": "stream"}},
+]
+
+_GOLD = {"kind": "property", "key": "tier", "op": "eq", "value": "gold"}
+_STREAM = {"kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}
+
+COUNT_RULES = {
+    "links": P_EDGES({"kind": "edges"}),
+    "to_gold": EDGE_RULES["to_gold"],
+    "streams": EDGE_RULES["streams"],
+    "stream_to_gold": P_EDGES({"kind": "edges", "edgePredicate": _STREAM, "targetWhere": _GOLD}),
+    "gold_either_way": P_EDGES({"kind": "edges", "edgeTypes": ["FLOWS_TO"], "direction": "either",
+                                "sourceWhere": _GOLD}),
+    "gold_and_table": P_EDGES({"kind": "edges", "edgeClass": "any", "direction": "either",
+                               "sourceWhere": _GOLD,
+                               "targetWhere": {"kind": "entityType", "op": "in", "values": ["table"]}}),
+    "from_big": P_EDGES({"kind": "edges", "edgeClass": "lineage", "sourceWhere": {
+        "kind": "property", "key": "rows", "op": "gt", "value": 8, "valueType": "number"}}),
+    "holds_gold": P_EDGES({"kind": "edges", "edgeClass": "containment", "targetWhere": _GOLD}),
+}
+
+
+def _count_draft() -> RelDraft:
+    """A draft that changes entities at the ends of relationships it doesn't change — c2 now
+    gold, c3 no longer, c1's rows; c3 → c2 has both ends changed — and adds (c4 under t2, and c4
+    → c1), changes (c1 → c3's values; e:c1>x1 moved to c1 → c2) and removes (c2 → c3)
+    relationships."""
+    draft = RelDraft(REL_NODES, COUNT_EDGES)
+    draft.commit({"c1": {**draft.main["c1"], "rows": 1},
+                  "c2": {**draft.main["c2"], "tier": "gold"},
+                  "c3": {**draft.main["c3"], "tier": "bronze"},
+                  "c4": {"entityType": "Column", "displayName": "phone", "tier": "gold", "rows": 30}},
+                 add_edges=[_edge("t2", "c4"),
+                            {**_edge("c4", "c1", "FLOWS_TO"), "properties": {"mode": "stream"}},
+                            {**_edge("c1", "c3", "FLOWS_TO"), "properties": {"mode": "stream", "lag": 9}},
+                            {"id": "e:c1>x1", "source": "c1", "target": "c2", "type": "FLOWS_TO",
+                             "properties": {"mode": "batch"}}],
+                 drop_edges=[_edge("c2", "c3", "FLOWS_TO")])
+    return draft
+
+
+async def _main_counts(main, scope, items):
+    return {rid: (await main.deep_search_count(SearchQuery(predicate=p, scope=scope),
+                                               context=CONTEXT))["count"] for rid, p in items}
+
+
+@pytest.mark.parametrize("scope", [SCOPE, TYPED], ids=["roots", "types"])
+async def test_relationship_counts_are_the_drafts(scope):
+    """Main's count moved by every relationship whose match the draft changes — those it adds,
+    changes or removes, and those at an entity it changes — beside an entity rule's."""
+    draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+    items = [*COUNT_RULES.items(), ("gold", RULES["gold"])]
+    counts, deltas = await _count(_overlay(draft, main), scope, items)
+    assert deltas["status"] == "complete" and deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, scope, items)
+    mains = await _main_counts(RelMain(REL_NODES, COUNT_EDGES), scope, items)
+    assert (mains["to_gold"], counts["to_gold"]) == (2, 3)
+    assert {rid for rid in counts if counts[rid] != mains[rid]} >= {
+        "to_gold", "streams", "stream_to_gold", "gold_either_way", "from_big", "gold"}
+    # Main's relationships at what the draft changed: of the rules' types, never a roll-up — and
+    # never at an entity the draft created, which main doesn't hold.
+    assert [(urns, types, skip) for urns, types, skip, _ in main.at] == \
+        [(["c1", "c2", "c3"], None, [])]
+
+
+async def test_relationship_counts_of_a_draft_that_removes_an_entity():
+    """A relationship at an entity the draft removed matches nothing on the draft, whether the
+    patch set removes it too (t1 → c1) or not (c1 → c3, c1 → x1, t2 → c1)."""
+    draft, main = RelDraft(REL_NODES, COUNT_EDGES), RelMain(REL_NODES, COUNT_EDGES)
+    draft.commit({"c1": None}, drop_edges=[_edge("t1", "c1")])
+    items = list(COUNT_RULES.items())
+    counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+    assert deltas["approximate"] == {}
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert counts["streams"] == 1                       # c3 → c2; t2 → c1 went with c1
+
+
+async def test_a_relationship_rule_read_takes_only_the_rules_types():
+    """Named types and classes are one read's types; every link is every type but the
+    hierarchy's, unless a rule takes it too."""
+    draft = _count_draft()
+    for rules, want in (([COUNT_RULES["to_gold"], COUNT_RULES["from_big"]], (["FLOWS_TO"], [])),
+                        ([COUNT_RULES["holds_gold"], COUNT_RULES["to_gold"]],
+                         (["CONTAINS", "FLOWS_TO"], [])),
+                        ([COUNT_RULES["streams"]], (None, ["CONTAINS"])),
+                        ([COUNT_RULES["streams"], COUNT_RULES["holds_gold"]], (None, [])),
+                        ([COUNT_RULES["gold_and_table"]], (None, []))):
+        assert draft_search._edge_types_read(_overlay(draft, RelMain()), rules) == want
+        main = RelMain(REL_NODES, COUNT_EDGES)
+        items = [(f"r{i}", p) for i, p in enumerate(rules)]
+        counts, _ = await _count(_overlay(draft, main), SCOPE, items)
+        assert counts == await _truth_counts(draft, SCOPE, items)
+        assert [(types, skip) for _, types, skip, _ in main.at] == [want]
+
+
+async def test_a_relationship_rule_whose_end_follows_relationships_keeps_mains_count():
+    draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+    items = [("from_root", P_EDGES({"kind": "edges", "sourceWhere": {
+                 "kind": "degree", "direction": "in", "op": "eq", "value": 0}})),
+             ("to_gold", COUNT_RULES["to_gold"])]
+    counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+    assert deltas["approximate"] == {"from_root": draft_search.RELATIONSHIPS}
+    mains = await _main_counts(RelMain(REL_NODES, COUNT_EDGES), SCOPE, items)
+    assert counts["from_root"] == mains["from_root"]
+    assert counts["to_gold"] == (await _truth_counts(draft, SCOPE, items))["to_gold"]
+
+
+async def test_a_relationship_rule_whose_class_cant_be_read_keeps_mains_count():
+    class NoOntology(RelMain):
+        def _get_lineage_edge_types(self):
+            raise RuntimeError("no ontology")
+
+    draft = _count_draft()
+    items = [("from_big", COUNT_RULES["from_big"]), ("to_gold", COUNT_RULES["to_gold"])]
+    counts, deltas = await _count(_overlay(draft, NoOntology(REL_NODES, COUNT_EDGES)), SCOPE, items)
+    assert deltas["approximate"] == {"from_big": draft_search.NOT_DRAFT_AWARE}
+    assert counts["to_gold"] == (await _truth_counts(draft, SCOPE, items))["to_gold"]
+
+
+async def test_relationship_counts_past_the_cap_are_mains_said_so(monkeypatch):
+    """Five relationships the patch set names and three entities main holds that it changed: past
+    the cap to plan, none of it is read; within it, past it once main's relationships at those
+    entities are — main's count, said so, never a wrong number."""
+    items = [("to_gold", COUNT_RULES["to_gold"]), ("gold", RULES["gold"])]
+    for cap, read in ((7, False), (8, True)):
+        monkeypatch.setattr(vconfig, "DRAFT_SEARCH_MAX_DELTA", cap)
+        draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+        counts, deltas = await _count(_overlay(draft, main), SCOPE, items)
+        note = draft_search.TOO_LARGE_RELATIONSHIPS.format(n=cap)
+        assert deltas["approximate"] == {"to_gold": note}, cap
+        assert deltas["status"] == "complete"
+        assert counts["to_gold"] == 2                           # main's
+        assert counts["gold"] == (await _truth_counts(draft, SCOPE, items))["gold"]
+        assert [limit for *_, limit in main.at] == ([cap - 5 + 1] if read else [])
+    assert note == ("Your draft changed more than 8 relationships and entities at their ends, so "
+                    "these counts show the published graph.")
+
+
+async def test_relationship_counts_are_read_a_step_at_a_time_across_requests(monkeypatch):
+    monkeypatch.setattr(draft_search, "BATCH", 1)
+    draft, main = _count_draft(), RelMain(REL_NODES, COUNT_EDGES)
+    overlay = _overlay(draft, main)
+    items = list(COUNT_RULES.items())
+    seen = []
+    for _ in range(20):
+        deltas = await overlay.deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=0)
+        seen.append((deltas["status"], deltas["progress"]["scanned"]))
+        if deltas["status"] == "complete":
+            break
+    assert seen == [*(("running", n) for n in range(1, 8)), ("complete", 8)]
+    counts, _ = await _count(overlay, SCOPE, items)
+    assert counts == await _truth_counts(draft, SCOPE, items)
+    assert [urns for urns, *_ in main.at] == [["c1"], ["c2"], ["c3"]]
+
+
+async def test_entity_and_relationship_counts_run_together():
+    """Running while either correction is, their progress summed."""
+    draft = _count_draft()
+    overlay = _overlay(draft, RelMain(REL_NODES, COUNT_EDGES))
+    items = [("gold", RULES["gold"]), ("to_gold", COUNT_RULES["to_gold"])]
+    deltas = await overlay.deep_search_count_deltas(SCOPE, items, context=CONTEXT, wait_ms=2000)
+    assert deltas["status"] == "complete"
+    # D's four entities; the five relationships the patch set names and three entities main holds.
+    assert deltas["progress"] == {"scanned": 4 + 8, "total": 4 + 8}
+    assert set(deltas["deltas"]) == {"gold", "to_gold"}
+
+
+async def test_the_counts_service_moves_a_relationship_rules_count_by_the_drafts():
+    draft = _count_draft()
+    request = SearchCountsRequest.model_validate({
+        "scope": {"viewId": "v"}, "waitMs": 2000,
+        "items": [{"id": "to_gold", "predicate": _json(COUNT_RULES["to_gold"])}]})
+    out = await _service(_overlay(draft, RelMain(REL_NODES, COUNT_EDGES))).counts(
+        request, run_context=CONTEXT)
+    count = out.counts["to_gold"]
+    assert (count.count, count.status, count.approximate, count.note) == (3, "complete", False, None)
