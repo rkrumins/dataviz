@@ -578,3 +578,78 @@ describe('moving a mapped column\'s entity to another column takes the mapping w
     expect(columnOfCard('Vault')).toBe('vault')
   }, 30000)
 })
+
+describe('deleting a mapped column: keep its entity in the data, or delete it with everything inside', () => {
+  const option = (kind: 'view' | 'data') => {
+    const el = document.querySelector<HTMLElement>(`[data-delete-choice="${kind}"]`)!
+    return {
+      el,
+      radio: el.querySelector<HTMLInputElement>('input[type="radio"]')!,
+      tag: el.querySelector('[data-change-tag]')?.textContent,
+      lines: [...el.querySelectorAll('li')].map((li) => li.textContent),
+    }
+  }
+  const askToDelete = async (h: TraceCanvasHarness) => {
+    await openLayerMenu(h, 'fin')
+    await click(h, menuItem('Delete layer…')!)
+    return screen.getByRole('dialog', { name: 'Delete the Finance column' })
+  }
+  const confirm = (dialog: HTMLElement) => within(dialog).getAllByRole('button').at(-1)!
+  /** Finance: Billing and Ledger inside it, and three relationships. */
+  const answer = (url: string) => (/\/graph\/nodes\/Finance\/delete-impact/.test(url) ? {
+    nodes: ['Finance', 'Billing', 'Ledger'].map((u) => ({ entityId: u, urn: u })),
+    edges: ['c1', 'c2', 'l1'].map((e) => ({ entityId: e })), nodeTotal: 3, edgeTotal: 3,
+  } : undefined)
+
+  beforeEach(() => { useBranchStore.setState({ graphId: null } as never) })
+
+  it('"Remove the column — keep Finance in the data": it says where Finance shows then — nowhere, in a curated view', async () => {
+    const h = await open()
+    const dialog = await askToDelete(h)
+    expect(dialog).toHaveTextContent('The column is Finance: its rows are what’s inside it. Choose what happens to Finance.')
+    expect(option('view').el).toHaveTextContent('Remove the column — keep Finance in the data')
+    expect(option('view').tag).toBe('Only this view')
+    expect(option('view').lines).toEqual(['Finance won’t be in this view.'])
+    expect(option('data').el).toHaveTextContent('Delete Finance and everything inside it')
+    await click(h, confirm(dialog))
+    expect(layerOf('fin')).toBeUndefined()
+    expect(document.getElementById('layer-node-Finance')).toBeNull()
+    expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Deleted layer “Finance”' })])
+    await press(h, notice(/^Removed the Finance column\./), 'Undo')
+    expect(layerOf('fin')).toMatchObject({ anchorUrn: 'Finance', nameFromAnchor: true })
+    expect(columnOfCard('Billing')).toBe('fin')
+  }, 30000)
+
+  it('in a view open to its data source, Finance shows where its type puts it', async () => {
+    const h = await renderCanvasWithTrace(mappingEstate(), {
+      focus: 'Ops', draft: true, deferTrace: true, entityTypes: ONTOLOGY, entityScope: 'all',
+    })
+    allowNesting()
+    await h.settle()
+    await askToDelete(h)
+    expect(option('view').lines).toEqual(['Finance will show in Domains, by its type.'])
+    await click(h, confirm(screen.getByRole('dialog')))
+    expect(columnOfCard('Finance')).toBe('domains')
+  }, 30000)
+
+  it('"Delete Finance and everything inside it": counted first, a data change, staged — Undo takes it all back', async () => {
+    const h = await open({ dataSourceId: 'ds-1', answer })
+    act(() => useBranchStore.setState({ graphId: 'harness-graph' } as never))
+    await h.settle()
+    const dialog = await askToDelete(h)
+    await click(h, option('data').radio)
+    expect(option('data').tag).toBe('Changes the data · every view')
+    expect(option('data').lines).toEqual([
+      'Finance and 2 inside it; 3 relationships.',
+      'Staged in this draft — nothing is deleted until you save it; every view follows once it’s published.',
+    ])
+    expect(confirm(dialog)).toHaveTextContent('Delete Finance')
+    await click(h, confirm(dialog))
+    expect(staged().map((c) => [c.type, c.targetUrn ?? c.targetId]).sort()).toEqual([['delete_entity', 'Finance'], ['layer_config', 'layer:fin']])
+    const done = notice(/^Removed the Finance column and staged deleting/)!
+    expect(done.message).toBe('Removed the Finance column and staged deleting Finance, with everything inside it. A data change — every view that shows it, once published.')
+    await press(h, done, 'Undo')
+    expect(staged()).toEqual([])
+    expect(layerOf('fin')?.anchorUrn).toBe('Finance')
+  }, 30000)
+})

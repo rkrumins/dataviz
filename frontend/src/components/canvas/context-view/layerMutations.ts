@@ -268,6 +268,18 @@ export function removeLayer(layers: ViewLayerConfig[], id: string): ViewLayerCon
 }
 
 /**
+ * A column taken out of the view: the layer — its groups go with it — and every placement in it.
+ * What was placed there then shows where its parent or a type column puts it, or not at all; the
+ * data is untouched. The SAME layout for a layer that is not there.
+ */
+export function deleteColumn(layout: NormalizedReferenceLayout, layerId: string): NormalizedReferenceLayout {
+  if (!layout.layers.some((l) => l.id === layerId)) return layout
+  const assignments: NormalizedReferenceLayout['assignments'] = {}
+  for (const [urn, entry] of Object.entries(layout.assignments)) if (entry.layerId !== layerId) assignments[urn] = entry
+  return { ...layout, layers: removeLayer(layout.layers, layerId), assignments }
+}
+
+/**
  * Move `draggedId` next to `targetId`, list-reorder semantics: dragging RIGHT drops it AFTER the
  * target, dragging LEFT drops it BEFORE — so the layer lands where you released it. No-op if either
  * id is missing or they're the same. Order re-normalized. The layer's nodes/edges follow for free —

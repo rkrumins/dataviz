@@ -15,7 +15,7 @@
  *  - the folded spine shows the total; the delete warning says what happens to
  *    the loaded entities.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -168,16 +168,6 @@ describe('LayerColumn — header totals', () => {
             expandedNodes: new Set(['logical:g']),
         })
         expect(pill().getAttribute('title')).toMatch(/^3 entities in the tree · 3 loaded · 3 in this layer/)
-    })
-
-    it('warns on delete what happens to the loaded entities', async () => {
-        renderColumn({ nodes: bigRoot(), onDeleteLayer: vi.fn() })
-        fireEvent.click(screen.getByRole('button', { name: 'Delete Domains' }))
-        // The confirm takes the focus, and its tip says what happens.
-        fireEvent.focus(screen.getByRole('button', { name: 'Yes, delete Domains' }))
-        expect(await screen.findByRole('tooltip')).toHaveTextContent(
-            "1 entity here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type",
-        )
     })
 
     it('shows the total on the folded spine', () => {

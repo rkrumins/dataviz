@@ -136,30 +136,11 @@ describe('LayerColumn header — the actions tray', () => {
     expect(tray()).not.toHaveAttribute('data-pinned')
   })
 
-  it('stays out while the delete confirm shows; a click elsewhere or Escape keeps the layer', () => {
+  it('its trash asks the canvas to delete the layer — whose dialog is the confirm, saying what happens', () => {
     const { actions } = renderHeader()
     fireEvent.click(screen.getByRole('button', { name: `Delete ${NAME}` }))
-    expect(tray()).toHaveAttribute('data-pinned', 'true')
-    expect(screen.getByRole('button', { name: `Yes, delete ${NAME}` })).toHaveFocus()
-
-    fireEvent.pointerDown(document.body)
-    expect(has(`Yes, delete ${NAME}`)).toBe(false)
-    expect(tray()).not.toHaveAttribute('data-pinned')
-
-    fireEvent.click(screen.getByRole('button', { name: `Delete ${NAME}` }))
-    fireEvent.keyDown(screen.getByRole('button', { name: `Yes, delete ${NAME}` }), { key: 'Escape' })
-    expect(has(`Yes, delete ${NAME}`)).toBe(false)
-    expect(tray()).not.toHaveAttribute('data-pinned')
-    expect(actions.onDeleteLayer).not.toHaveBeenCalled()
-  })
-
-  it('answers the confirm from inside it', () => {
-    const { actions } = renderHeader()
-    fireEvent.click(screen.getByRole('button', { name: `Delete ${NAME}` }))
-    const yes = screen.getByRole('button', { name: `Yes, delete ${NAME}` })
-    fireEvent.pointerDown(yes)
-    fireEvent.click(yes)
     expect(actions.onDeleteLayer).toHaveBeenCalledWith('L1')
+    expect(has(`Yes, delete ${NAME}`)).toBe(false)
   })
 
   it('stays out while the sort menu is open', async () => {

@@ -593,7 +593,6 @@ export const LayerColumn = React.memo(function LayerColumn({
     setDraftGroupName('')
     setIsNamingGroup(true)
   }
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
   // A column hovering this header: where it lands — after this one coming from the left, before it
   // from the right (reorderLayer's rule).
@@ -1936,19 +1935,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   // A sort menu unmounted open (the column folds, a rename starts) never says it closed.
   if (sortMenuOpen && (isCollapsed || isNamingGroup || isRenaming || !onSetSortMode)) setSortMenuOpen(false)
   // It stays out while something it opened is still open: the layer's menu
-  // (from ⋯, a right-click or the Layer Strip), the sort menu, the delete confirm.
-  const trayPinned = layerMenuOpen || sortMenuOpen || (confirmingDelete && trayHas('delete'))
-  // A confirm nobody answers would hold the tray over the name: a click
-  // anywhere else keeps the layer, as Escape does.
-  const confirmRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!confirmingDelete) return
-    const away = (e: PointerEvent) => {
-      if (!confirmRef.current?.contains(e.target as Node)) setConfirmingDelete(false)
-    }
-    document.addEventListener('pointerdown', away, true)
-    return () => document.removeEventListener('pointerdown', away, true)
-  }, [confirmingDelete])
+  // (from ⋯, a right-click or the Layer Strip), the sort menu.
+  const trayPinned = layerMenuOpen || sortMenuOpen
   const OverrideSortIcon = SORT_MODE_ICONS[sortMode]
   // Display › Header size: an open header's row, padding, icon and name — one
   // height for every column at a size (`layerHeaderTokens`).
@@ -2605,49 +2593,17 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
                     </TrayButton>
                   )}
-                  {/* Delete — trash → inline check/✗ confirm (the check's tip warns when the layer
-                      has entities: hand-placed ones fall back to the default layer, rule-placed
-                      ones become unassigned unless another layer claims their type). */}
+                  {/* Delete — the trash opens Delete layer…'s dialog, which says what happens to
+                      what the column shows before anything does: it is the confirm. */}
                   {trayHas('delete') && onDeleteLayer && (
-                    confirmingDelete ? (
-                      <div
-                        ref={confirmRef}
-                        className="flex items-center gap-0.5"
-                        onClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setConfirmingDelete(false) } }}
-                      >
-                        <TrayButton
-                          label={`Yes, delete ${layer.name}`}
-                          detail={loadedCount > 0
-                            ? `${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type`
-                            : undefined}
-                          // The trash it replaces took the focus with it.
-                          autoFocus
-                          onClick={() => { onDeleteLayer(layer.id); setConfirmingDelete(false) }}
-                          menuHasIt={!!onHeaderContextMenu}
-                          className="bg-rose-500/15 text-rose-500 hover:bg-rose-500/25"
-                        >
-                          <LucideIcons.Check className="w-3.5 h-3.5" />
-                        </TrayButton>
-                        <TrayButton
-                          label={`Keep ${layer.name}`}
-                          onClick={() => setConfirmingDelete(false)}
-                          menuHasIt={!!onHeaderContextMenu}
-                          className="text-ink-muted hover:bg-black/[0.06] dark:hover:bg-white/10"
-                        >
-                          <LucideIcons.X className="w-3.5 h-3.5" />
-                        </TrayButton>
-                      </div>
-                    ) : (
-                      <TrayButton
-                        label={`Delete ${layer.name}`}
-                        onClick={() => setConfirmingDelete(true)}
-                        menuHasIt={!!onHeaderContextMenu}
-                        className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-500"
-                      >
-                        <LucideIcons.Trash2 className="w-3.5 h-3.5" />
-                      </TrayButton>
-                    )
+                    <TrayButton
+                      label={`Delete ${layer.name}`}
+                      onClick={() => onDeleteLayer(layer.id)}
+                      menuHasIt={!!onHeaderContextMenu}
+                      className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-500"
+                    >
+                      <LucideIcons.Trash2 className="w-3.5 h-3.5" />
+                    </TrayButton>
                   )}
                   {onHeaderContextMenu && (
                     <HoverTip

@@ -20,7 +20,9 @@
  *                      column mapped to the Finance domain), Domains (several
  *                      top-level domains) and Apps (a type that needs a domain)
  *   views     with `create`: the view's data source has this many views the reader can see
- *             (so a data move names the others it reaches)
+ *             (so a data move names the others it reaches), and a delete's impact is read
+ *             from the graph (so Delete layer… counts what deleting from the data takes)
+ *   editing   with `create`: `off` — the draft takes no data edits (Editing is turned off)
  *   theme     `dark` for the dark palette
  *   persona   `business` (default `technical`)
  *   latency   ms each child page waits (default 0; `scale` defaults to 120)
@@ -276,6 +278,26 @@ const realFetch = globalThis.fetch
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
   if (!url.includes('/api/')) return realFetch(input, init)
+  // `create`: what deleting an entity takes — everything inside it, and its containment links.
+  const impact = CREATE ? /\/graph\/nodes\/([^/]+)\/delete-impact/.exec(url) : null
+  if (impact) {
+    const root = decodeURIComponent(impact[1])
+    const subtree = [root]
+    for (let i = 0; i < subtree.length; i++) subtree.push(...childrenOf(subtree[i]).map((c) => c.urn))
+    const body = {
+      nodes: subtree.map((urn) => ({ entityId: urn, urn })),
+      edges: subtree.slice(1).map((urn) => ({ entityId: `c:${parentOf(urn)}>${urn}` })),
+      nodeTotal: subtree.length, edgeTotal: subtree.length - 1,
+    }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  // …of a graph that resolves, so the draft keeps it; the rest of versioning has nothing yet.
+  if (CREATE && SOURCE && url.includes('/versioning/')) {
+    return url.includes('/versioning/resolve')
+      ? new Response(JSON.stringify({ graphId: 'harness-graph', mainBranchId: 'harness-main', mainHeadCommitSeq: 1 }),
+        { status: 200, headers: { 'content-type': 'application/json' } })
+      : new Response(JSON.stringify({ detail: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
+  }
   const view = {
     id: 'harness-view',
     config: { layout: { type: 'reference', referenceLayout: { layers: LAYERS, assignments: ASSIGNMENTS } }, content: { entityScope: 'curated' } },
@@ -292,10 +314,13 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── The stores ────────────────────────────────────────────────────────────
 usePersonaStore.setState({ mode: persona })
 usePreferencesStore.setState({ canvasDensity: 'comfortable' } as never)
-useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewMembershipEnabled: true, ...(CREATE ? { editModeEnabled: true, versioningEnabled: true } : {}) } } as never)
-// `create` edits: a draft is open.
+useFeaturesStore.setState({ values: {
+  ...DEFAULT_FEATURES, viewMembershipEnabled: true,
+  ...(CREATE ? { editModeEnabled: params.get('editing') !== 'off', versioningEnabled: true } : {}),
+} } as never)
+// `create` edits: a draft is open — of a versioned graph, with `views`, so a delete's impact is read.
 useBranchStore.setState((CREATE
-  ? { workspaceId: 'harness-ws', dataSourceId: SOURCE, viewId: 'harness-view', currentBranchId: 'harness-branch' }
+  ? { workspaceId: 'harness-ws', dataSourceId: SOURCE, viewId: 'harness-view', currentBranchId: 'harness-branch', ...(SOURCE ? { graphId: 'harness-graph' } : {}) }
   : { workspaceId: null, dataSourceId: null, viewId: null, currentBranchId: null }) as never)
 useSchemaStore.setState({
   activeViewId: 'harness-view',

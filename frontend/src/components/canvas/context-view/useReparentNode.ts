@@ -173,12 +173,18 @@ const nameOf = (id: string, fallback = id) =>
 /** A move's notice lives long enough to reach its Undo. */
 export const MOVE_NOTICE_MS = 8000
 
-/** Undo for a notice: discard the change it made — that one, by id, if it is still staged. */
-export const discardAction = (changeId: string): NotificationAction => ({
+/** Undo for a notice: discard the changes it made — those, by id, that are still staged. An action
+ *  recorded as one Undo `step` (stagedChangesStore `asOneStep`) is undone as that step while it is
+ *  the newest: that also brings back what it discarded, a new entity's create among them. */
+export const discardAction = (changeIds: string | readonly string[], step?: string): NotificationAction => ({
   label: 'Undo',
   onClick: () => {
     const s = useStagedChangesStore.getState()
-    if (s.changes.some((c) => c.id === changeId)) s.discard(changeId)
+    if (step && s.past[s.past.length - 1]?.id === step) { s.undo(); return }
+    const ids = typeof changeIds === 'string' ? [changeIds] : changeIds
+    const live = ids.filter((id) => s.changes.some((c) => c.id === id))
+    if (live.length === 1) s.discard(live[0])
+    else if (live.length > 1) s.discardMany(live)
   },
 })
 
