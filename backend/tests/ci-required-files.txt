@@ -135,6 +135,7 @@ tests/test_falkordb_native_query.py
 tests/test_falkordb_no_replicas.py
 tests/test_falkordb_ondemand_pairs.py
 tests/test_falkordb_read_router_evidence.py
+tests/test_falkordb_relationships_at.py
 tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
 tests/test_falkordb_run_guarded.py

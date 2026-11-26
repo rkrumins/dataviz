@@ -2208,6 +2208,10 @@ def _node_from_props(
 #: platform's JSON bag of properties (``r.properties``) and the projector's fingerprint.
 _EDGE_ENVELOPE_KEYS = frozenset({"id", "confidence", "properties", "gvHash"})
 
+#: Relationships ``relationships_at`` reads a statement: no more than a reply holds on the stock
+#: image (``RESULTSET_SIZE``, 10,000), which cuts one there without saying so.
+_EDGES_AT_PAGE = 10_000
+
 
 def _json_object(value: Any) -> Optional[Dict[str, Any]]:
     """``value`` as the platform's bag of properties — a JSON object in a string, as every
@@ -7207,12 +7211,25 @@ class FalkorDBProvider(GraphDataProvider):
         where = "" if types else " AND NOT toUpper(type(r)) IN $_skip"
 
         async def read(label: str, bucket: List[str], outgoing: bool) -> list:
+            # A page at a time in relationship-ID order: FalkorDB cuts a reply at its
+            # ``RESULTSET_SIZE`` rows without saying so, and a hub holds far more than one.
             pattern = (f"MATCH (a:{label})-{rel}->(b) WHERE a.urn IN $_urns" if outgoing
                        else f"MATCH (a)-{rel}->(b:{label}) WHERE b.urn IN $_urns")
-            res = await self._ro_query(
-                f"{pattern}{where} RETURN a.urn, b.urn, type(r), properties(r) LIMIT $_limit",
-                params={"_urns": bucket, "_skip": skip, "_limit": limit}, op="edges.at")
-            return res.result_set or []
+            page = min(limit, _EDGES_AT_PAGE)
+            rows: list = []
+            after = -1
+            while len(rows) < limit:
+                res = await self._ro_query(
+                    f"{pattern}{where} AND ID(r) > $_after WITH a, b, r ORDER BY ID(r) LIMIT $_page "
+                    "RETURN ID(r), a.urn, b.urn, type(r), properties(r)",
+                    params={"_urns": bucket, "_skip": skip, "_after": after, "_page": page},
+                    op="edges.at")
+                got = res.result_set or []
+                rows += [r[1:] for r in got]
+                if len(got) < page:
+                    break
+                after = got[-1][0]
+            return rows
 
         buckets = [(label, bucket) for label, bucket in await self._label_buckets(list(urns))
                    if label]                               # an urn not in the graph: none

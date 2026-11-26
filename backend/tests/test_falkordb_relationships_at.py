@@ -55,7 +55,7 @@ def test_each_label_is_seeked_by_its_urn_index_both_ways_and_an_unknown_urn_has_
     p, calls = _provider()
     _run(p.relationships_at(["urn:t1", "urn:d1", "urn:t2", "urn:gone"], edge_types=["FLOWS_TO"],
                             limit=10))
-    shapes = sorted(cypher.split(" RETURN")[0] for cypher, _ in calls)
+    shapes = sorted(cypher.split(" AND ID(r)")[0] for cypher, _ in calls)
     assert shapes == [
         "MATCH (a)-[r:FLOWS_TO]->(b:Dashboard) WHERE b.urn IN $_urns",
         "MATCH (a)-[r:FLOWS_TO]->(b:Table) WHERE b.urn IN $_urns",
@@ -64,7 +64,7 @@ def test_each_label_is_seeked_by_its_urn_index_both_ways_and_an_unknown_urn_has_
     ]
     assert sorted(tuple(params["_urns"]) for _, params in calls) == \
         [("urn:d1",), ("urn:d1",), ("urn:t1", "urn:t2"), ("urn:t1", "urn:t2")]
-    assert all(params["_limit"] == 10 for _, params in calls)
+    assert all(params["_page"] == 10 and params["_after"] == -1 for _, params in calls)
     assert not _run(p.relationships_at(["urn:gone"], limit=10)), "no unlabeled scan"
     assert len(calls) == 4
 
@@ -85,8 +85,8 @@ def test_every_type_is_every_type_but_a_rollup_and_those_left_out():
 def test_one_read_from_both_its_ends_is_once_and_the_limit_holds():
     def rows(cypher, params):
         # t1 → t2 is read out of t1 and into t2; t1 → t1 out of and into t1.
-        return [["urn:t1", "urn:t2", "FLOWS_TO", {"id": "e1", "confidence": 0.5}],
-                ["urn:t1", "urn:t1", "FLOWS_TO", {"id": "e2", "properties": '{"mode": "batch"}'}]]
+        return [[1, "urn:t1", "urn:t2", "FLOWS_TO", {"id": "e1", "confidence": 0.5}],
+                [2, "urn:t1", "urn:t1", "FLOWS_TO", {"id": "e2", "properties": '{"mode": "batch"}'}]]
 
     p, _calls = _provider(rows)
     edges = _run(p.relationships_at(["urn:t1", "urn:t2"], edge_types=["FLOWS_TO"], limit=10))
@@ -95,6 +95,30 @@ def test_one_read_from_both_its_ends_is_once_and_the_limit_holds():
     assert by_id["e1"].confidence == 0.5 and by_id["e2"].properties == {"mode": "batch"}
     assert (by_id["e1"].source_urn, by_id["e1"].target_urn) == ("urn:t1", "urn:t2")
     assert len(_run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=1))) == 1
+
+
+def test_a_hub_past_one_reply_is_read_a_page_at_a_time(monkeypatch):
+    """FalkorDB cuts a reply at its ``RESULTSET_SIZE`` rows without saying so: a hub's
+    relationships are read in relationship-ID order a page at a time, every one of them, and a
+    short page — never a cut reply — is what says that was all."""
+    from backend.app.providers import falkordb_provider as fp
+    monkeypatch.setattr(fp, "_EDGES_AT_PAGE", 3)
+    hub = [[i, "urn:t1", f"urn:x{i}", "FLOWS_TO", {"id": f"e{i}"}] for i in range(10)]
+
+    def rows(cypher, params):
+        if "a.urn IN $_urns" not in cypher:
+            return []                                    # nothing comes into the hub
+        later = [r for r in hub if r[0] > params["_after"]]
+        return later[:params["_page"]]
+
+    p, calls = _provider(rows)
+    edges = _run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=100))
+    assert sorted(e.id for e in edges) == sorted(f"e{i}" for i in range(10))
+    assert all("ORDER BY ID(r) LIMIT $_page" in cypher for cypher, _ in calls)
+    assert [params["_after"] for cypher, params in calls if "a.urn IN" in cypher] == [-1, 2, 5, 8]
+    # The limit still holds, across pages.
+    p, _ = _provider(rows)
+    assert len(_run(p.relationships_at(["urn:t1"], edge_types=["FLOWS_TO"], limit=4))) == 4
 
 
 def test_a_lagging_main_refuses_it_as_its_other_search_reads():
