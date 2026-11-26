@@ -88,12 +88,33 @@ class Main(StubDeepSearchProvider):
         super().__init__(nodes=nodes, edges=edges, lineage_edge_types=["FLOWS_TO"])
         self.versions: List[str] = []
         self.catalog_complete = True
+        self.between: List[Any] = []
 
     def physical_graph_id(self):
         return "falkor:main"
 
     def _get_containment_edge_types(self):
         return ["CONTAINS"]
+
+    def _get_lineage_edge_types(self):
+        return ["FLOWS_TO"]
+
+    def _stored(self, e: Dict[str, Any]) -> Dict[str, Any]:
+        """``properties(r)`` of a fixture edge as FalkorDB stores it — each user property in the
+        JSON bag."""
+        import json as _json
+        return {"id": e["id"], "gvHash": "h", "properties": _json.dumps(e.get("properties") or {}),
+                **({"confidence": e["confidence"]} if "confidence" in e else {})}
+
+    async def relationships_between(self, pairs):
+        """As FalkorDB reads them: by the two ends, never by an id."""
+        self.between.append(list(pairs))
+        wanted = set(pairs)
+        out: Dict[Any, List[Any]] = {}
+        for e in self._edges:
+            if (e["source"], e["target"]) in wanted:
+                out.setdefault((e["source"], e["target"]), []).append((e["type"], self._stored(e)))
+        return out
 
     async def deep_search_count(self, query, *, context=None, advance=True):
         self.versions.append(context.data_version)
@@ -138,6 +159,7 @@ class Draft:
         self.main = {n["urn"]: dict(n) for n in main_nodes}
         self.nodes = {u: dict(n) for u, n in self.main.items()}
         self.edges = {e["id"]: dict(e) for e in main_edges}
+        self.main_edges = list(main_edges)
         self.seq = 0
         self.history: Dict[int, Dict[str, Optional[Dict[str, Any]]]] = {}
         # The type of each edge row a commit wrote — None for a delete, whose row names none.
@@ -188,7 +210,7 @@ class Draft:
                 delta["nodesNew"].append(u)
             elif now is not None and now != was:
                 delta["nodesModified"].append({"urn": u, "entityId": f"id-{u}"})
-        main_edges = {e["id"]: e for e in MAIN_EDGES}
+        main_edges = {e["id"]: e for e in self.main_edges}
         for eid, e in self.edges.items():
             if eid not in main_edges:
                 delta["edgesUpsert"].append({"id": eid, "sourceUrn": e["source"],
@@ -578,14 +600,51 @@ async def test_edge_membership_of_a_relationship_the_draft_removed_is_nothing():
     assert out["matches"] == {"to_gold": []}
 
 
-async def test_edge_membership_keeps_mains_answer_for_one_whose_end_alone_changed_and_says_so():
-    main = Main(edges=[*MAIN_EDGES, _flow("c1", "c2")])
-    draft = _first_draft_on(EdgeDraft())               # c2 changed to gold, c1 → c2 unchanged
+async def test_edge_membership_judges_one_whose_end_alone_changed_on_the_draft():
+    """c1 → c2 is main's, unchanged; the draft changed c2 to gold, so it now reaches a gold
+    column: main's values, read between its ends, judged on the draft's ends — no note."""
+    edges = [*MAIN_EDGES, _flow("c1", "c2", mode="stream")]
+    main = Main(edges=edges)
+    draft = _first_draft_on(EdgeDraft(main_edges=edges))
     asked = [SearchMembershipEdge(id="e:c1>c2", source="c1", target="c2")]
-    out = await _overlay(draft, main).deep_search_edge_membership(
-        SCOPE, list(EDGE_RULES.items()), asked, context=CONTEXT)
-    assert out["matches"] == {"to_gold": [], "streams": []}
-    assert out["notes"] == [draft_search.EDGE_MEMBERSHIP_ENDS.format(n=1)]
+    items = list(EDGE_RULES.items())
+    out = await _overlay(draft, main).deep_search_edge_membership(SCOPE, items, asked,
+                                                                  context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": ["e:c1>c2"], "streams": ["e:c1>c2"]}
+    assert out["notes"] == []
+    assert main.between == [[("c1", "c2")]], "read between its ends, never by its id"
+    assert (await main.deep_search_edge_membership(SCOPE, items, asked))["matches"] == \
+        {"to_gold": [], "streams": ["e:c1>c2"]}
+
+
+async def test_edge_membership_of_one_whose_end_changed_so_it_no_longer_matches_is_nothing():
+    """c1 → c3 is main's, unchanged, and reaches a gold column there; the draft made c3 bronze."""
+    draft = EdgeDraft()
+    draft.commit({"c3": {**draft.main["c3"], "tier": "bronze"}})
+    asked = _asked_edges(draft, ["e:c1>c3", "e:t1>c1"])
+    items = [("to_gold", EDGE_RULES["to_gold"]),
+             ("any_to_gold", P_EDGES({"kind": "edges", "edgeClass": "any", "targetWhere": {
+                 "kind": "property", "key": "tier", "op": "eq", "value": "gold"}}))]
+    out = await _overlay(draft).deep_search_edge_membership(SCOPE, items, asked, context=CONTEXT)
+    want = await draft.truth().deep_search_edge_membership(SCOPE, items, asked)
+    assert out["matches"] == want["matches"] == {"to_gold": [], "any_to_gold": ["e:t1>c1"]}
+    assert out["notes"] == []
+    assert (await Main().deep_search_edge_membership(SCOPE, items, asked))["matches"] == \
+        {"to_gold": ["e:c1>c3"], "any_to_gold": ["e:c1>c3", "e:t1>c1"]}
+
+
+async def test_edge_membership_of_one_whose_end_changed_is_mains_when_its_value_cant_be_read():
+    class NoBetween(Main):
+        relationships_between = None
+
+    draft = EdgeDraft()
+    draft.commit({"c3": {**draft.main["c3"], "tier": "bronze"}})
+    out = await _overlay(draft, NoBetween()).deep_search_edge_membership(
+        SCOPE, [("to_gold", EDGE_RULES["to_gold"])], _asked_edges(draft, ["e:c1>c3"]),
+        context=CONTEXT)
+    assert out["matches"] == {"to_gold": ["e:c1>c3"]}
+    assert out["notes"] == [draft_search.MEMBERSHIP_NOT_DRAFT_AWARE]
 
 
 async def test_membership_falls_back_to_main_when_the_draft_cant_be_read():
@@ -1018,7 +1077,6 @@ class RelMain(Main):
 
     def __init__(self):
         super().__init__(nodes=REL_NODES, edges=REL_EDGES)
-        self.between: List[Any] = []
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False, subject="entities"):
@@ -1030,17 +1088,6 @@ class RelMain(Main):
                           count=sum(stats.entities.values()), status=COMPLETE)
         await store_for(self).save(session, None, 600, accumulator=stats.to_json())
         return answer_of(stats, session, context, subject="relationships")
-
-    async def relationships_between(self, pairs):
-        import json as _json
-        self.between.append(list(pairs))
-        out: Dict[Any, List[Any]] = {}
-        for e in REL_EDGES:
-            if (e["source"], e["target"]) in set(pairs):
-                out.setdefault((e["source"], e["target"]), []).append(
-                    (e["type"], {"id": e["id"], "gvHash": "h",
-                                 "properties": _json.dumps(e.get("properties") or {})}))
-        return out
 
 
 class RelDraft(Draft):

@@ -15,8 +15,8 @@ FalkorDB compiler's meaning, as the stub provider answers with it).
 
 * **membership** (≤ 1,000 urns): main's answer, with the urns in ``D`` answered on the draft —
   a removed entity matches nothing, a created one gets its chips. A rule that styles relationships
-  (≤ 1,000 of them): main's answer, with those the draft created, changed or removed judged on the
-  draft (``edge_membership``).
+  (≤ 1,000 of them): main's answer, with those the draft created, changed or removed — and those
+  at an entity it changed — judged on the draft (``edge_membership``).
 * **counts**: main's count session (keyed by main's version, so shared with main and kept across
   the draft's commits) plus the correction, read ``BATCH`` entities of ``D`` a step, in a session
   of its own that any request continues. A draft's next commit folds in only what that commit
@@ -103,11 +103,8 @@ MEMBERSHIP_NOT_DRAFT_AWARE = ("Your draft's changes couldn't be read just now, s
                               "the published graph — they will catch up.")
 EDGE_MEMBERSHIP_MAINS = ("{n} of your relationship rules can't be answered on your draft's values "
                          "alone — their ends follow relationships, test the view's layers or name "
-                         "what the draft changes: for the relationships your draft changed, their "
-                         "look shows the published graph's answer.")
-EDGE_MEMBERSHIP_ENDS = ("{n} of your relationship rules test the entities at either end: for a "
-                        "relationship your draft didn't change but whose end it changed, their look "
-                        "shows the published graph's answer.")
+                         "what the draft changes: for the relationships your draft changed, or "
+                         "whose ends it changed, their look shows the published graph's answer.")
 TOO_LARGE = "Your draft changed more than {n:,} entities, so these counts show the published graph."
 TOO_LARGE_CATALOG = ("Your draft changed more than {n:,} entities, so these properties and values show "
                      "the published graph.")
@@ -418,9 +415,10 @@ class DraftSearch:
         those the draft changed judged on the draft: one it removed, or whose end it removed,
         matches nothing; one it created or changed is tested on its values — its type and its
         filter (``predicate_eval.edge_matches``) — and on its ends as the draft holds them, rule
-        membership on the draft (:meth:`membership`). A rule whose ends can't be answered on the
-        draft's values keeps main's answer for them, and says so; so does one that tests its
-        ends, for a relationship the draft didn't change whose end it changed."""
+        membership on the draft (:meth:`membership`). So is one it didn't change whose end it
+        changed: main's values, read between its two ends (:meth:`_main_edges`), on the draft's
+        ends. A rule whose ends can't be answered on the draft's values keeps main's answer for
+        them, and says so."""
         from backend.common.predicate_eval import edge_matches
 
         started = time.monotonic()
@@ -447,11 +445,13 @@ class DraftSearch:
                 if typed is not None and not any(inexact(w, self.changed, held) for w in (
                         p.source_where, p.target_where) if w is not None):
                     exact[rid] = typed
+            if touched and exact:
+                drafted += await self._main_edges(touched)
             ends = [(f"{rid}\0{end}", where or MatchAllPredicate())
                     for rid, p in rules if rid in exact
                     for end, where in (("from", p.source_where), ("to", p.target_where))]
             urns = sorted({u for e in drafted for u in (e.source_urn, e.target_urn)})
-            meets: Dict[str, Set[str]] = {}
+            meets: Dict[str, Set[str]] = {rid: set() for rid, _ in ends}
             if ends and urns:
                 judged = await self.membership(scope, ends, urns, {
                     rid: named.get(rid.split("\0")[0], frozenset()) for rid, _ in ends})
@@ -464,29 +464,44 @@ class DraftSearch:
                            exc_info=True)
             result["notes"].append(MEMBERSHIP_NOT_DRAFT_AWARE)
             return result
-        mains = ends_kept = 0
+        answered = set(drafted_ids) | {e.id for e in touched}      # on the draft, by an exact rule
+        mains = 0
         for rid, p in rules:
             listed = {eid for eid in result["matches"].get(rid, []) if eid not in gone}
             source, target = meets.get(f"{rid}\0from"), meets.get(f"{rid}\0to")
             if rid in exact and source is not None and target is not None:
-                listed -= set(drafted_ids)
+                listed -= answered
                 listed |= {e.id for e in drafted if exact[rid](e.edge_type) and edge_matches(
                     {"id": e.id, "confidence": e.confidence, "properties": e.properties},
                     p.edge_predicate) and (
                     (e.source_urn in source and e.target_urn in target)
                     or (p.direction == "either" and e.source_urn in target
                         and e.target_urn in source))}
-            elif drafted_ids:
+            elif drafted_ids or touched:
                 mains += 1          # main's answer, less what the draft removed
-            if touched and (p.source_where is not None or p.target_where is not None):
-                ends_kept += 1
             result["matches"][rid] = [e.id for e in wanted if e.id in listed]
         if mains:
             result["notes"].append(EDGE_MEMBERSHIP_MAINS.format(n=mains))
-        if ends_kept:
-            result["notes"].append(EDGE_MEMBERSHIP_ENDS.format(n=ends_kept))
         result["elapsedMs"] = int((time.monotonic() - started) * 1000)
         return result
+
+    async def _main_edges(self, edges: Sequence[Any]) -> List[Any]:
+        """Main's value of each of ``edges`` (relationships on screen: an id and two ends), read
+        between its ends (``relationships_between``), never by its id — the one there of that id
+        (its own, else the reader's ``source|TYPE|target``), as a reader serves it. One main
+        doesn't hold there is left out."""
+        from backend.app.providers.falkordb_provider import _edge_from_row
+
+        held = await self._admitted(lambda: self.base.relationships_between(
+            [(e.source, e.target) for e in edges]))
+        out = []
+        for e in edges:
+            for rel_type, props in held.get((e.source, e.target), ()):
+                row = _edge_from_row(e.source, e.target, rel_type, props)
+                if row.id == e.id:
+                    out.append(row)
+                    break
+        return out
 
     def _hits(self, scope, read: _Read, rules, states: Sequence[_State]) -> Dict[str, Set[int]]:
         """Which of ``states`` (by position: a fold holds an entity twice, as it was and as it
